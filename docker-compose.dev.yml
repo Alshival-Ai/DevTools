@@ -1,0 +1,71 @@
+services:
+  web:
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      DEBUG: "1"
+      RUN_COLLECTSTATIC: "0"
+      WATCHFILES_FORCE_POLLING: "1"
+      WEB_TERMINAL_LOCAL_USERNAME: "${LOCAL_USERNAME:-devuser}"
+      WEB_TERMINAL_LOCAL_HOME: "${LOCAL_HOME:-/tmp}"
+    entrypoint: ["bash", "/app/docker/entrypoint.sh"]
+    command: ["uvicorn", "alshival.asgi:application", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./:/app
+      - ${LOCAL_HOME:-/tmp}:${LOCAL_HOME:-/tmp}
+  worker:
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      DEBUG: "1"
+      RUN_MIGRATE: "0"
+      RUN_COLLECTSTATIC: "0"
+      WATCHFILES_FORCE_POLLING: "1"
+    entrypoint: ["bash", "/app/docker/entrypoint.sh"]
+    command: ["python", "manage.py", "run_resource_health_worker", "--interval-seconds", "300", "--users-per-worker", "10", "--max-workers", "16"]
+    volumes:
+      - ./:/app
+  global-key-worker:
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      DEBUG: "1"
+      RUN_MIGRATE: "0"
+      RUN_COLLECTSTATIC: "0"
+      WATCHFILES_FORCE_POLLING: "1"
+    entrypoint: ["bash", "/app/docker/entrypoint.sh"]
+    command: ["python", "manage.py", "run_global_api_key_worker", "--interval-seconds", "3600"]
+    volumes:
+      - ./:/app
+  user-key-worker:
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      DEBUG: "1"
+      RUN_MIGRATE: "0"
+      RUN_COLLECTSTATIC: "0"
+      WATCHFILES_FORCE_POLLING: "1"
+    entrypoint: ["bash", "/app/docker/entrypoint.sh"]
+    command: ["python", "manage.py", "run_user_api_key_worker", "--interval-seconds", "10800"]
+    volumes:
+      - ./:/app
+  mcp:
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    depends_on:
+      - github-mcp
+    environment:
+      DEBUG: "1"
+      RUN_MIGRATE: "0"
+      RUN_COLLECTSTATIC: "0"
+      WATCHFILES_FORCE_POLLING: "1"
+      MCP_API_KEY_HEADER: "x-api-key"
+      MCP_GITHUB_UPSTREAM_URL: "http://github-mcp:8082/"
+    entrypoint: ["bash", "/app/docker/entrypoint.sh"]
+    command: ["uvicorn", "mcp.app:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./:/app
+  github-mcp:
+    build:
+      context: ./github-mcp
+      dockerfile: Dockerfile
+    environment:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_PERSONAL_ACCESS_TOKEN:-}"
+    command: ["http"]

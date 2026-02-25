@@ -5,16 +5,62 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{% block title %}Fefe{% endblock title %} | Dev Team Console</title>
+  <title>{% block title %}Alshival{% endblock title %} | Dev Team Console</title>
+  <link rel="icon" type="image/png" href="{% static 'img/branding/alshival-logo-256x256.png' %}" />
+  <script>
+    (function () {
+      var root = document.documentElement;
+      var introSeen = false;
+      try {
+        introSeen = window.sessionStorage.getItem('alshival_intro_seen') === '1';
+      } catch (error) {
+        introSeen = false;
+      }
+      if (introSeen) {
+        root.classList.add('page-ready', 'ui-visible');
+      } else {
+        root.classList.add('page-loading', 'show-session-intro');
+      }
+    })();
+  </script>
+  <style>
+    .page-content { opacity: 0; visibility: hidden; }
+    html.ui-visible .page-content { opacity: 1; visibility: visible; }
+  </style>
   <link rel="stylesheet" href="{% static 'css/app.css' %}" />
   {% block page_css %}{% endblock page_css %}
   {% vite_hmr %}
   {% vite_asset 'src/main.jsx' %}
 </head>
-<body>
-  {% block content %}{% endblock content %}
+<body data-superuser="{% if request.user.is_authenticated and request.user.is_superuser %}1{% else %}0{% endif %}">
+  <div class="page-loader" aria-hidden="true">
+    <div class="page-loader__backdrop"></div>
+    <div class="page-loader__card">
+      <div class="page-loader__logo">
+        <img class="page-loader__logo-img" src="{% static 'img/branding/alshival-logo-256x256.png' %}" alt="Alshival logo" />
+      </div>
+      <div class="page-loader__wordmark" data-typewriter-target="Alshival.Ai"></div>
+      <div class="page-loader__label">Developer Enablement Console</div>
+      <div class="page-loader__track">
+        <div class="page-loader__bar"></div>
+      </div>
+    </div>
+  </div>
+  <main class="page-content">
+    {% block content %}{% endblock content %}
+  </main>
+  {% if request.user.is_authenticated %}
+  <button class="floating-ask-alshival setup-next-btn" type="button" aria-label="Ask Alshival" title="Ask Alshival">
+    <span class="floating-ask-alshival__icon" aria-hidden="true">💬</span>
+    <span class="setup-next-btn__label">Ask Alshival</span>
+  </button>
+  {% endif %}
+  <script src="{% static 'js/page-loader.js' %}"></script>
   <script src="{% static 'js/theme-toggle.js' %}"></script>
+  <script src="{% static 'js/sidebar-mobile.js' %}"></script>
   <script src="{% static 'js/matrix-background.js' %}"></script>
+  <script src="{% static 'js/terminal-popup.js' %}"></script>
+  <script src="{% static 'js/topbar-notifications.js' %}"></script>
   {% block page_js %}{% endblock page_js %}
 </body>
 </html>

@@ -3,17 +3,23 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pwd
 import pty
+import re
 import shlex
 import shutil
+import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from tempfile import NamedTemporaryFile
+from urllib.parse import parse_qs
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.sessions.backends.db import SessionStore
+from django.utils.text import slugify
 
 from dashboard.global_ssh_store import get_global_ssh_private_key
 from dashboard.resources_store import get_resource, _decrypt_key_text, get_ssh_credential_private_key
@@ -38,20 +44,19 @@ class TerminalWebSocketApp:
         await send({"type": "websocket.accept"})
 
         try:
-            ssh_config = await _build_ssh_config(scope, user)
+            session = await _build_terminal_session(scope, user)
         except Exception as exc:
             await send({"type": "websocket.send", "text": f"Terminal error: {exc}\r\n"})
             await send({"type": "websocket.close", "code": 1008})
             return
 
-        session = SSHSession(ssh_config)
         try:
             await session.start()
         except Exception as exc:
             await send(
                 {
                     "type": "websocket.send",
-                    "text": f"Failed to start SSH session: {exc}\r\n",
+                    "text": f"Failed to start terminal session: {exc}\r\n",
                 }
             )
             await send({"type": "websocket.close", "code": 1011})
@@ -78,7 +83,7 @@ class TerminalWebSocketApp:
             await session.stop()
 
 
-def _handle_resize_message(text: str, session: "SSHSession") -> bool:
+def _handle_resize_message(text: str, session) -> bool:
     if not text or not text.startswith("{"):
         return False
     try:
@@ -127,14 +132,114 @@ async def _get_authenticated_user(scope):
     return user
 
 
-class SSHSession:
-    def __init__(self, config: "SSHConfig"):
-        self.config = config
+class PTYProcessSession:
+    def __init__(self):
         self.master_fd = None
         self.slave_fd = None
         self.process = None
+        self.cleanup_paths: list[str] = []
 
     async def start(self):
+        args = self._build_args()
+        env = self._build_env()
+        cwd = self._build_cwd()
+        self.master_fd, self.slave_fd = pty.openpty()
+        self.process = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=self.slave_fd,
+            stdout=self.slave_fd,
+            stderr=self.slave_fd,
+            env=env,
+            cwd=cwd,
+            start_new_session=True,
+        )
+        os.close(self.slave_fd)
+        self.slave_fd = None
+
+    def _build_args(self) -> list[str]:
+        raise NotImplementedError
+
+    def _build_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.setdefault("TERM", "xterm-256color")
+        env.setdefault("COLORTERM", "truecolor")
+        return env
+
+    def _build_cwd(self) -> str | None:
+        return None
+
+    async def stream_to_websocket(self, send):
+        try:
+            while True:
+                data = await asyncio.to_thread(os.read, self.master_fd, 2048)
+                if not data:
+                    break
+                await send({"type": "websocket.send", "bytes": data})
+        except Exception:
+            pass
+        try:
+            await send({"type": "websocket.close", "code": 1000})
+        except Exception:
+            return
+
+    async def write(self, payload):
+        if self.master_fd is None:
+            return
+        data = payload.encode() if isinstance(payload, str) else payload
+        await asyncio.to_thread(os.write, self.master_fd, data)
+
+    def resize(self, cols: int, rows: int):
+        if self.master_fd is None:
+            return
+        try:
+            import fcntl
+            import struct
+            import termios
+
+            winsize = struct.pack("HHHH", rows, cols, 0, 0)
+            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
+        except Exception:
+            return
+
+    async def stop(self):
+        if self.process and self.process.returncode is None:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self.process.kill()
+        if self.master_fd is not None:
+            try:
+                os.close(self.master_fd)
+            except OSError:
+                pass
+            self.master_fd = None
+        for path in self.cleanup_paths:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
+
+@dataclass
+class SSHConfig:
+    host: str
+    username: str
+    port: int
+    key_path: str
+    known_hosts: str
+    strict_checking: str
+    extra_args: str
+
+
+class SSHSession(PTYProcessSession):
+    def __init__(self, config: SSHConfig):
+        super().__init__()
+        self.config = config
+        self.cleanup_paths = [config.key_path]
+
+    def _build_args(self) -> list[str]:
         ssh_bin = os.getenv("WEB_TERMINAL_SSH_BIN", "").strip()
         if not ssh_bin:
             ssh_bin = shutil.which("ssh") or "/usr/bin/ssh"
@@ -163,100 +268,586 @@ class SSHSession:
         if self.config.extra_args:
             args.extend(shlex.split(self.config.extra_args))
         args.append(f"{self.config.username}@{self.config.host}")
+        return args
 
-        self.master_fd, self.slave_fd = pty.openpty()
-        self.process = await asyncio.create_subprocess_exec(
-            *args,
-            stdin=self.slave_fd,
-            stdout=self.slave_fd,
-            stderr=self.slave_fd,
-            start_new_session=True,
+
+class HostShellSession(PTYProcessSession):
+    def __init__(self, user):
+        super().__init__()
+        self.user = user
+        self._target_username = ""
+        self._os_username = ""
+        self._os_home = ""
+        self._os_shell = ""
+
+    async def start(self):
+        await asyncio.to_thread(self._ensure_target_account)
+        await asyncio.to_thread(self._ensure_codex_ready_for_target)
+        await super().start()
+
+    @staticmethod
+    def _sudo_bin() -> str:
+        configured = str(os.getenv("WEB_TERMINAL_SUDO_BIN", "") or "").strip()
+        if configured:
+            if os.path.isabs(configured):
+                return configured if os.path.exists(configured) else ""
+            resolved = shutil.which(configured)
+            if resolved:
+                return resolved
+        return shutil.which("sudo") or ""
+
+    @staticmethod
+    def _is_root() -> bool:
+        return os.geteuid() == 0
+
+    def _privileged_prefix(self) -> list[str]:
+        sudo_bin = self._sudo_bin()
+        if sudo_bin:
+            return [sudo_bin, "-n"]
+        if self._is_root():
+            return []
+        raise RuntimeError("Host terminal mode requires sudo (or root execution) for account provisioning.")
+
+    def _run_as_user_command(self, username: str, command: list[str]) -> list[str]:
+        sudo_bin = self._sudo_bin()
+        if sudo_bin:
+            return [sudo_bin, "-n", "-H", "-u", username, "--", *command]
+        if not self._is_root():
+            raise RuntimeError("Host terminal mode requires sudo to launch a shell as the target user.")
+        runuser_bin = shutil.which("runuser") or "/usr/sbin/runuser"
+        if os.path.exists(runuser_bin):
+            return [runuser_bin, "-u", username, "--", *command]
+        su_bin = shutil.which("su") or "/bin/su"
+        if os.path.exists(su_bin):
+            quoted = " ".join(shlex.quote(part) for part in command)
+            return [su_bin, "-", username, "-c", quoted]
+        raise RuntimeError("Host terminal mode requires sudo, runuser, or su to switch users.")
+
+    def _resolve_target_username(self) -> str:
+        if self._target_username:
+            return self._target_username
+        configured = str(os.getenv("WEB_TERMINAL_HOST_USERNAME", "") or "").strip().lower()
+        if configured:
+            self._target_username = configured
+            return self._target_username
+
+        raw_username = str(getattr(self.user, "username", "") or "").strip().lower()
+        if not raw_username:
+            raw_username = f"user-{int(getattr(self.user, 'pk', 0) or 0)}"
+        normalized = re.sub(r"[^a-z0-9_-]", "-", raw_username).strip("-_")
+        if not normalized:
+            normalized = f"user-{int(getattr(self.user, 'pk', 0) or 0)}"
+        if normalized[0].isdigit():
+            normalized = f"u-{normalized}"
+        self._target_username = normalized[:32]
+        return self._target_username
+
+    def _ensure_target_account(self) -> None:
+        target_username = self._resolve_target_username()
+        try:
+            pwd.getpwnam(target_username)
+            return
+        except KeyError:
+            pass
+
+        default_shell = str(os.getenv("WEB_TERMINAL_HOST_DEFAULT_SHELL", "") or "").strip() or "/bin/bash"
+        useradd_bin = shutil.which("useradd") or "/usr/sbin/useradd"
+        privileged_prefix = self._privileged_prefix()
+        result = subprocess.run(
+            [
+                *privileged_prefix,
+                useradd_bin,
+                "--create-home",
+                "--shell",
+                default_shell,
+                target_username,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
         )
-        os.close(self.slave_fd)
-        self.slave_fd = None
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to create host user '{target_username}' for terminal access.")
+        try:
+            pwd.getpwnam(target_username)
+        except KeyError as exc:
+            raise RuntimeError(f"Host user '{target_username}' was not created.") from exc
+
+    def _ensure_codex_ready_for_target(self) -> None:
+        ensure_flag = str(os.getenv("WEB_TERMINAL_ENSURE_CODEX", "1") or "").strip().lower()
+        if ensure_flag in {"0", "false", "no", "off"}:
+            return
+        self._ensure_codex_global_install()
+        self._ensure_codex_profile(self._resolve_target_username())
+
+    def _ensure_codex_global_install(self) -> None:
+        if shutil.which("codex") or os.path.exists("/usr/local/bin/codex") or os.path.exists("/usr/bin/codex"):
+            return
+        npm_bin = shutil.which("npm") or "/usr/bin/npm"
+        if not os.path.exists(npm_bin):
+            raise RuntimeError("Unable to auto-install codex: missing npm.")
+        privileged_prefix = self._privileged_prefix()
+        install_result = subprocess.run(
+            [*privileged_prefix, npm_bin, "install", "-g", "@openai/codex"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if install_result.returncode != 0:
+            raise RuntimeError("Failed to install @openai/codex globally.")
+        if os.path.exists("/usr/local/bin/codex") and not os.path.exists("/usr/bin/codex"):
+            subprocess.run(
+                [*privileged_prefix, "ln", "-s", "/usr/local/bin/codex", "/usr/bin/codex"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        if not (shutil.which("codex") or os.path.exists("/usr/local/bin/codex") or os.path.exists("/usr/bin/codex")):
+            raise RuntimeError("Codex installation completed but codex binary is still unavailable.")
+
+    def _ensure_codex_profile(self, username: str) -> None:
+        python_bin = shutil.which("python3") or "/usr/bin/python3"
+        if not os.path.exists(python_bin):
+            raise RuntimeError("Unable to configure codex profile: missing python3.")
+        script = """
+import os
+from pathlib import Path
+
+path = Path(os.path.expanduser("~")) / ".codex" / "config.toml"
+path.parent.mkdir(parents=True, exist_ok=True)
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+lines = text.splitlines()
+
+header = "[profiles.pro]"
+ap_line = 'approval_policy = "never"'
+sb_line = 'sandbox_mode = "danger-full-access"'
+
+idx = -1
+for i, line in enumerate(lines):
+    if line.strip() == header:
+        idx = i
+        break
+
+if idx == -1:
+    if lines and lines[-1].strip():
+        lines.append("")
+    lines.extend([header, ap_line, sb_line])
+else:
+    end = len(lines)
+    for j in range(idx + 1, len(lines)):
+        if lines[j].lstrip().startswith("["):
+            end = j
+            break
+    ap_idx = -1
+    sb_idx = -1
+    for j in range(idx + 1, end):
+        stripped = lines[j].strip()
+        if stripped.startswith("approval_policy"):
+            ap_idx = j
+        elif stripped.startswith("sandbox_mode"):
+            sb_idx = j
+    if ap_idx != -1:
+        lines[ap_idx] = ap_line
+    else:
+        lines.insert(end, ap_line)
+        end += 1
+    if sb_idx != -1:
+        lines[sb_idx] = sb_line
+    else:
+        lines.insert(end, sb_line)
+
+path.write_text("\\n".join(lines).rstrip() + "\\n", encoding="utf-8")
+"""
+        cmd = self._run_as_user_command(username, [python_bin, "-c", script])
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to configure ~/.codex/config.toml for host user '{username}'.")
+
+    def _resolve_os_identity(self) -> tuple[str, str, str]:
+        if self._os_username and self._os_home and self._os_shell:
+            return (self._os_username, self._os_home, self._os_shell)
+        try:
+            entry = pwd.getpwnam(self._resolve_target_username())
+            self._os_username = str(entry.pw_name or "").strip()
+            self._os_home = str(entry.pw_dir or "").strip()
+            self._os_shell = str(entry.pw_shell or "").strip()
+        except Exception:
+            self._os_username = ""
+            self._os_home = ""
+            self._os_shell = "/bin/bash"
+        return (self._os_username, self._os_home, self._os_shell)
+
+    def _build_args(self) -> list[str]:
+        username, _home, os_shell = self._resolve_os_identity()
+        if not username:
+            raise RuntimeError("Unable to resolve host terminal account.")
+        shell = str(os.getenv("WEB_TERMINAL_HOST_SHELL", "") or "").strip() or os_shell
+        if not shell:
+            shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+        if not os.path.exists(shell):
+            raise RuntimeError(f"host shell not found at {shell}")
+        shell_name = os.path.basename(shell)
+        if shell_name == "bash":
+            shell_args = [shell, "--login", "-i"]
+        elif shell_name == "zsh":
+            shell_args = [shell, "-l", "-i"]
+        else:
+            shell_args = [shell]
+        return self._run_as_user_command(username, shell_args)
+
+    def _build_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        username, home_dir, _shell = self._resolve_os_identity()
+        if username:
+            env["USER"] = username
+            env["LOGNAME"] = username
+        if home_dir and os.path.isdir(home_dir):
+            env["HOME"] = home_dir
+        return env
+
+    def _build_cwd(self) -> str | None:
+        # Do not chdir to the target user's home before privilege/user switch.
+        # If that home is 0700, the current app user cannot enter it and process
+        # launch fails with PermissionError before sudo/runuser executes.
+        fallback_home = str(os.getenv("HOME", "")).strip()
+        if fallback_home and os.path.isdir(fallback_home):
+            return fallback_home
+        return None
+
+
+class LocalShellSession(PTYProcessSession):
+    def __init__(self, user):
+        super().__init__()
+        self.user = user
+        self._resolved_username = ""
+        self._resolved_home = ""
+
+    async def start(self):
+        await self._prepare_local_environment()
+        await super().start()
+
+    def _build_args(self) -> list[str]:
+        shell = os.getenv("WEB_TERMINAL_LOCAL_SHELL", "").strip()
+        if not shell:
+            shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+        if not os.path.exists(shell):
+            raise RuntimeError(f"local shell not found at {shell}")
+        auto_launch_codex = str(os.getenv("WEB_TERMINAL_AUTO_LAUNCH_CODEX", "1") or "").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        if auto_launch_codex:
+            codex_command = str(os.getenv("WEB_TERMINAL_CODEX_COMMAND", "codex -p pro") or "").strip() or "codex -p pro"
+            if shell.endswith("bash"):
+                fallback_shell = f"exec {shlex.quote(shell)} --noprofile --norc -i"
+            elif shell.endswith("zsh"):
+                fallback_shell = f"exec {shlex.quote(shell)} -l -i"
+            else:
+                fallback_shell = f"exec {shlex.quote(shell)} -i"
+            return [shell, "-lc", f"{codex_command} || {fallback_shell}"]
+        if shell.endswith("bash"):
+            return [shell, "--noprofile", "--norc", "-i"]
+        return [shell]
+
+    def _build_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        local_username, local_home = self._resolve_local_identity()
+        venv_dir = self._venv_dir(local_home)
+        venv_bin = os.path.join(venv_dir, "bin")
+        if local_username:
+            env["USER"] = local_username
+            env["LOGNAME"] = local_username
+            env["PS1"] = f"{local_username}@\\h:\\w\\$ "
+        if local_home and os.path.isdir(local_home):
+            env["HOME"] = local_home
+        if os.path.isdir(venv_bin):
+            current_path = str(env.get("PATH") or "")
+            env["PATH"] = f"{venv_bin}:{current_path}" if current_path else venv_bin
+            env["VIRTUAL_ENV"] = venv_dir
+        return env
+
+    def _build_cwd(self) -> str | None:
+        _, local_home = self._resolve_local_identity()
+        if local_home and os.path.isdir(local_home):
+            return local_home
+        fallback_home = str(os.getenv("HOME", "")).strip()
+        if fallback_home and os.path.isdir(fallback_home):
+            return fallback_home
+        return None
+
+    @staticmethod
+    def _venv_dir(home_dir: str) -> str:
+        return os.path.join(home_dir, ".alshival", "venv")
+
+    async def _prepare_local_environment(self):
+        _, home_dir = self._resolve_local_identity()
+        if not home_dir:
+            return
+        os.makedirs(home_dir, exist_ok=True)
+        if not os.path.isdir(home_dir):
+            return
+        await asyncio.to_thread(self._prepare_local_environment_sync, home_dir)
+
+    def _resolve_local_identity(self) -> tuple[str, str]:
+        if self._resolved_home:
+            return (self._resolved_username, self._resolved_home)
+
+        force_static_identity = str(os.getenv("WEB_TERMINAL_FORCE_STATIC_IDENTITY", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        env_username = str(os.getenv("WEB_TERMINAL_LOCAL_USERNAME", "")).strip()
+        env_home = str(os.getenv("WEB_TERMINAL_LOCAL_HOME", "")).strip()
+        if force_static_identity and env_username and env_home:
+            self._resolved_username = env_username
+            self._resolved_home = env_home
+            return (self._resolved_username, self._resolved_home)
+
+        raw_username = str(getattr(self.user, "username", "") or f"user-{getattr(self.user, 'pk', 0)}").strip()
+        safe_username = slugify(raw_username) or f"user-{getattr(self.user, 'pk', 0)}"
+        user_pk = int(getattr(self.user, "pk", 0) or 0)
+        local_username = f"{safe_username}-{user_pk}"
+
+        user_data_root = str(getattr(settings, "USER_DATA_ROOT", "") or "").strip()
+        if not user_data_root:
+            user_data_root = str(settings.BASE_DIR / "var" / "user_data")
+        home_root = str(os.getenv("WEB_TERMINAL_LOCAL_HOME_ROOT", user_data_root)).strip() or user_data_root
+        local_home = os.path.join(home_root, local_username, "home")
+
+        self._resolved_username = local_username
+        self._resolved_home = local_home
+        return (self._resolved_username, self._resolved_home)
+
+    def _prepare_local_environment_sync(self, home_dir: str):
+        self._ensure_codex_profile_sync(home_dir)
+        venv_dir = self._venv_dir(home_dir)
+        venv_python = os.path.join(venv_dir, "bin", "python")
+        base_env = os.environ.copy()
+        base_env["HOME"] = home_dir
+
+        os.makedirs(os.path.dirname(venv_dir), exist_ok=True)
+        if not os.path.exists(venv_python):
+            subprocess.run(
+                ["python3", "-m", "venv", venv_dir],
+                env=base_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        if not os.path.exists(venv_python):
+            return
+
+        package_name = str(os.getenv("WEB_TERMINAL_OPENAI_PACKAGE", "openai")).strip() or "openai"
+        has_sdk = subprocess.run(
+            [venv_python, "-c", "import openai"],
+            env=base_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if has_sdk.returncode == 0:
+            return
+
+        subprocess.run(
+            [venv_python, "-m", "pip", "install", "--disable-pip-version-check", "--quiet", package_name],
+            env=base_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+    @staticmethod
+    def _ensure_codex_profile_sync(home_dir: str) -> None:
+        config_dir = os.path.join(home_dir, ".codex")
+        config_path = os.path.join(config_dir, "config.toml")
+        try:
+            os.makedirs(config_dir, exist_ok=True)
+        except OSError:
+            return
+
+        try:
+            raw = ""
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as handle:
+                    raw = handle.read()
+            lines = raw.splitlines()
+
+            header = "[profiles.pro]"
+            approval_line = 'approval_policy = "never"'
+            sandbox_line = 'sandbox_mode = "danger-full-access"'
+
+            idx = -1
+            for i, line in enumerate(lines):
+                if line.strip() == header:
+                    idx = i
+                    break
+
+            if idx == -1:
+                if lines and lines[-1].strip():
+                    lines.append("")
+                lines.extend([header, approval_line, sandbox_line])
+            else:
+                end = len(lines)
+                for j in range(idx + 1, len(lines)):
+                    if lines[j].lstrip().startswith("["):
+                        end = j
+                        break
+
+                approval_idx = -1
+                sandbox_idx = -1
+                for j in range(idx + 1, end):
+                    stripped = lines[j].strip()
+                    if stripped.startswith("approval_policy"):
+                        approval_idx = j
+                    elif stripped.startswith("sandbox_mode"):
+                        sandbox_idx = j
+
+                if approval_idx != -1:
+                    lines[approval_idx] = approval_line
+                else:
+                    lines.insert(end, approval_line)
+                    end += 1
+
+                if sandbox_idx != -1:
+                    lines[sandbox_idx] = sandbox_line
+                else:
+                    lines.insert(end, sandbox_line)
+
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines).rstrip() + "\n")
+        except OSError:
+            return
+
+
+class AgentSession:
+    def __init__(self, user):
+        self.user = user
+        self._queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._buffer = ""
+        self._closed = False
+
+    async def start(self):
+        banner = (
+            "Alshival Agent Terminal\r\n"
+            "Type help for commands. Ctrl+C will clear the current line.\r\n\r\n"
+        )
+        await self._queue.put(banner.encode("utf-8"))
+        await self._queue.put(b"alshival> ")
 
     async def stream_to_websocket(self, send):
-        try:
-            while True:
-                data = await asyncio.to_thread(os.read, self.master_fd, 2048)
-                if not data:
-                    break
-                await send({"type": "websocket.send", "bytes": data})
-        except Exception:
-            pass
+        while True:
+            payload = await self._queue.get()
+            if payload is None:
+                break
+            await send({"type": "websocket.send", "bytes": payload})
         try:
             await send({"type": "websocket.close", "code": 1000})
         except Exception:
             return
 
     async def write(self, payload):
-        if self.master_fd is None:
+        if self._closed:
             return
-        if isinstance(payload, str):
-            data = payload.encode()
-        else:
-            data = payload
-        await asyncio.to_thread(os.write, self.master_fd, data)
+        data = payload.encode("utf-8", errors="ignore") if isinstance(payload, str) else bytes(payload)
+        if not data:
+            return
+        await self._queue.put(data)
+
+        text = data.decode("utf-8", errors="ignore")
+        for ch in text:
+            if ch in {"\r", "\n"}:
+                command = self._buffer.strip()
+                self._buffer = ""
+                response = _agent_response(command, self.user)
+                if response:
+                    await self._queue.put((response + "\r\n").encode("utf-8"))
+                await self._queue.put(b"alshival> ")
+            elif ch in {"\x7f", "\b"}:
+                self._buffer = self._buffer[:-1]
+            elif ch.isprintable() or ch == " ":
+                self._buffer += ch
 
     def resize(self, cols: int, rows: int):
-        if self.master_fd is None:
-            return
-        try:
-            import fcntl
-            import termios
-            import struct
-
-            winsize = struct.pack("HHHH", rows, cols, 0, 0)
-            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
-        except Exception:
-            return
+        return
 
     async def stop(self):
-        if self.process and self.process.returncode is None:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                self.process.kill()
-        if self.master_fd is not None:
-            try:
-                os.close(self.master_fd)
-            except OSError:
-                pass
-            self.master_fd = None
-        for path in self.config.cleanup_paths:
-            try:
-                if path and os.path.exists(path):
-                    os.remove(path)
-            except OSError:
-                pass
+        if self._closed:
+            return
+        self._closed = True
+        await self._queue.put(None)
 
 
-@dataclass
-class SSHConfig:
-    host: str
-    username: str
-    port: int
-    key_path: str
-    known_hosts: str
-    strict_checking: str
-    extra_args: str
-    cleanup_paths: list[str] = field(default_factory=list)
+def resolve_local_shell_identity_for_user(user) -> tuple[str, str]:
+    session = LocalShellSession(user)
+    return session._resolve_local_identity()
 
 
-async def _build_ssh_config(scope, user) -> SSHConfig:
+def ensure_local_shell_home_for_user(user) -> str:
+    _local_username, local_home = resolve_local_shell_identity_for_user(user)
+    if not local_home:
+        return ""
+    try:
+        os.makedirs(local_home, exist_ok=True)
+    except OSError:
+        return ""
+    return local_home if os.path.isdir(local_home) else ""
+
+
+def _agent_response(command: str, user) -> str:
+    raw = str(command or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if lowered in {"help", "?", "man"}:
+        return (
+            "Commands:\r\n"
+            "  help         Show this help\r\n"
+            "  whoami       Show current user\r\n"
+            "  status       Show agent status\r\n"
+            "  ping         Basic connectivity check\r\n"
+            "  clear        Clear recommendation"
+        )
+    if lowered == "whoami":
+        username = str(getattr(user, "username", "") or f"user-{getattr(user, 'id', 0)}")
+        role = "superuser" if bool(getattr(user, "is_superuser", False)) else "member"
+        return f"{username} ({role})"
+    if lowered == "status":
+        ts = datetime.now(timezone.utc).isoformat()
+        return f"agent online; utc={ts}"
+    if lowered == "ping":
+        return "pong"
+    if lowered == "clear":
+        return "Use Ctrl+L to clear your terminal viewport."
+    return f"You said: {raw}"
+
+
+async def _build_terminal_session(scope, user):
     query = scope.get("query_string") or b""
-    query_params = {}
-    if query:
-        for chunk in query.decode().split("&"):
-            if not chunk:
-                continue
-            key, _, value = chunk.partition("=")
-            query_params[key] = value
-    resource_id = query_params.get("resource_id")
+    query_params = parse_qs(query.decode("utf-8", errors="ignore"))
+    mode = str((query_params.get("mode") or [""])[0] or "").strip().lower()
+
+    if mode == "shell":
+        if not bool(getattr(user, "is_superuser", False)):
+            raise PermissionError("Local shell access is restricted to superusers.")
+        return LocalShellSession(user)
+
+    if mode == "agent":
+        return AgentSession(user)
+
+    resource_id = str((query_params.get("resource_id") or [""])[0] or "").strip()
     if not resource_id:
         raise ValueError("resource_id is required.")
-    return await _user_resource_ssh_config(user, resource_id)
+    ssh_config = await _user_resource_ssh_config(user, resource_id)
+    return SSHSession(ssh_config)
 
 
 @sync_to_async
@@ -274,26 +865,23 @@ def _user_resource_ssh_config(user, resource_id: str) -> SSHConfig:
     key_text = _decrypt_key_text(resource.ssh_key_text)
     if not key_text and resource.ssh_credential_id:
         credential_lookup = None
-        raw_credential_id = (resource.ssh_credential_id or '').strip()
-        if raw_credential_id.startswith('global:'):
+        raw_credential_id = (resource.ssh_credential_id or "").strip()
+        if raw_credential_id.startswith("global:"):
             try:
-                credential_lookup = get_global_ssh_private_key(credential_id=int(raw_credential_id.split(':', 1)[1]))
+                credential_lookup = get_global_ssh_private_key(credential_id=int(raw_credential_id.split(":", 1)[1]))
             except (TypeError, ValueError):
                 credential_lookup = None
         else:
             local_raw = raw_credential_id
-            if raw_credential_id.startswith('local:'):
-                local_raw = raw_credential_id.split(':', 1)[1]
-            try:
-                credential_lookup = get_ssh_credential_private_key(user, int(local_raw))
-            except (TypeError, ValueError):
-                credential_lookup = None
+            if raw_credential_id.startswith("local:"):
+                local_raw = raw_credential_id.split(":", 1)[1]
+            credential_lookup = get_ssh_credential_private_key(user, local_raw)
         if credential_lookup:
             key_text = credential_lookup
     if not key_text:
         raise ValueError("No SSH key available for this resource.")
 
-    with NamedTemporaryFile(delete=False, prefix="fefe-key-", suffix=".key", mode="w") as tmp:
+    with NamedTemporaryFile(delete=False, prefix="alshival-key-", suffix=".key", mode="w") as tmp:
         tmp.write(key_text)
         key_path = tmp.name
     os.chmod(key_path, 0o600)
@@ -311,5 +899,4 @@ def _user_resource_ssh_config(user, resource_id: str) -> SSHConfig:
         known_hosts=known_hosts,
         strict_checking=strict_checking,
         extra_args=os.getenv("WEB_TERMINAL_SSH_EXTRA_ARGS", "").strip(),
-        cleanup_paths=[key_path],
     )

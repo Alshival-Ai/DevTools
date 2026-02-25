@@ -2,22 +2,8 @@
 
 {% block title %}Resource Details{% endblock title %}
 
-{% block page_css %}
-{{ block.super }}
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
-{% endblock page_css %}
-
 {% block page_content %}
 <section class="resource-detail">
-  <div class="toast toast-hidden" data-toast>
-    <div class="toast-body">
-      <div class="toast-icon">✓</div>
-      <div>
-        <div class="toast-title">Copied</div>
-        <div class="toast-text">Terminal output copied to clipboard.</div>
-      </div>
-    </div>
-  </div>
   <div class="detail-header">
     <div class="detail-title">
       <span
@@ -25,36 +11,91 @@
         data-status="{{ resource.last_status|default:'unknown' }}"
         aria-hidden="true">
       </span>
-      <div>
-        <h1>{{ resource.name }}</h1>
+      <div class="detail-title-main">
+        <div class="detail-title-row">
+          <h1>{{ resource.name }}</h1>
+          {% if resource.resource_type == 'vm' and resource.ssh_key_present %}
+          <button type="button" class="gradient-btn detail-connect-btn" data-ssh-toggle data-resource-id="{{ resource.id }}">Connect</button>
+          {% endif %}
+          <button
+            type="button"
+            class="ghost-btn detail-resource-env-btn"
+            data-copy-resource-env="{{ resource_env_value }}">
+            ALSHIVAL_RESOURCE=<span>{{ resource_url }}</span>
+          </button>
+        </div>
         <div class="text-muted">{{ resource.resource_type|title }}</div>
       </div>
     </div>
     <div class="detail-actions">
+      <button
+        class="icon-btn detail-alert-btn"
+        type="button"
+        aria-label="Open alerts settings"
+        data-resource-alert-open>
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.4-1.4a2 2 0 0 1-.6-1.4V11a6 6 0 1 0-12 0v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0a3 3 0 0 1-6 0" />
+        </svg>
+      </button>
       <a class="ghost-btn" href="{% url 'resources' %}">Back to Resources</a>
-      <button class="primary-btn" type="button">Run health check</button>
     </div>
   </div>
 
   <div class="detail-grid">
-    <article class="detail-card">
-      <h3>Overview</h3>
-      <div class="detail-row">
-        <span class="text-muted">Target</span>
-        <span>{{ resource.target }}</span>
+    <article class="detail-card overview-card">
+      <div class="detail-row overview-card-head">
+        <h3 class="detail-card-title">Overview</h3>
+        <span
+          class="status overview-status-badge {% if resource.last_status == 'healthy' %}success{% elif resource.last_status == 'unhealthy' %}danger{% else %}info{% endif %}"
+          data-overview-status-badge>
+          {{ resource.last_status|default:'unknown'|upper }}
+        </span>
       </div>
-      <div class="detail-row">
-        <span class="text-muted">Status</span>
-        <span>{{ resource.last_status|default:'unknown'|title }}</span>
+      <div class="overview-signal-grid">
+        <div class="overview-signal">
+          <span class="text-muted small">Last checked</span>
+          <strong data-last-checked>{{ last_checked_display }}</strong>
+        </div>
+        <div class="overview-signal overview-health-action">
+          <button
+            class="ghost-btn health-check-btn-muted"
+            type="button"
+            data-health-check-btn
+            data-health-check-url="{{ resource_check_url }}">
+            Run health check
+          </button>
+        </div>
       </div>
-      <div class="detail-row">
-        <span class="text-muted">Last checked</span>
-        <span>{{ last_checked_display }}</span>
+      <div class="overview-meta-grid">
+        <div class="overview-meta-item">
+          <span class="text-muted small">Target</span>
+          <span class="overview-meta-value">{{ resource.target|default:'—' }}</span>
+        </div>
+        <div class="overview-meta-item">
+          <span class="text-muted small">Resource type</span>
+          <span class="overview-meta-value">{{ resource.resource_type|title }}</span>
+        </div>
+        <div class="overview-meta-item">
+          <span class="text-muted small">Access scope</span>
+          <span class="overview-meta-value">{{ resource.access_scope|default:'account'|title }}</span>
+        </div>
+        <div class="overview-meta-item">
+          <span class="text-muted small">Created</span>
+          <span class="overview-meta-value">{{ created_display }}</span>
+        </div>
       </div>
+      <div class="health-chart-wrap{% if not health_history_chart %} d-none{% endif %}" data-health-chart-wrap>
+        <canvas class="health-chart-canvas" data-health-chart-canvas aria-label="Health history chart"></canvas>
+        <div class="health-chart-legend">
+          <span><i class="health-dot latency"></i> Ping latency (ms)</span>
+          <span><i class="health-dot fallback"></i> Fallback check</span>
+        </div>
+      </div>
+      <div class="placeholder-block" data-health-history-empty>No health checks yet.</div>
       {% if resource.notes %}
-      <div class="detail-row">
-        <span class="text-muted">Notes</span>
-        <span>{{ resource.notes }}</span>
+      <div class="overview-notes">
+        <span class="text-muted small">Resource notes</span>
+        <p>{{ resource.notes }}</p>
       </div>
       {% endif %}
     </article>
@@ -66,40 +107,6 @@
       <div class="placeholder-block">Latency chart placeholder</div>
       <div class="placeholder-block">Error rate placeholder</div>
     </article>
-    {% elif resource.resource_type == 'vm' %}
-    <article class="detail-card">
-      <h3>Virtual machine</h3>
-      <div class="detail-row">
-        <span class="text-muted">Host</span>
-        <span>{{ resource.address|default:'—' }}</span>
-      </div>
-      <div class="detail-row">
-        <span class="text-muted">SSH user</span>
-        <span>{{ resource.ssh_username|default:'—' }}</span>
-      </div>
-      <div class="detail-row">
-        <span class="text-muted">SSH port</span>
-        <span>{{ resource.ssh_port|default:'22' }}</span>
-      </div>
-      <p class="text-muted">CPU, memory, disk usage, and uptime charts will appear here.</p>
-      <div class="placeholder-block">Host metrics placeholder</div>
-    </article>
-    {% if resource.ssh_key_present and resource.ssh_username and resource.address %}
-    <article class="detail-card ssh-terminal-card">
-      <div class="detail-row">
-        <h3 class="detail-card-title">SSH Terminal</h3>
-        <button type="button" class="gradient-btn" data-ssh-toggle>Connect</button>
-      </div>
-      <p class="text-muted">Connect using the stored SSH credentials.</p>
-      <div class="terminal-hint text-muted">Terminal will open below.</div>
-    </article>
-    {% else %}
-    <article class="detail-card">
-      <h3>SSH Terminal</h3>
-      <p class="text-muted">Add SSH credentials to enable the web terminal for this VM.</p>
-      <div class="placeholder-block">Terminal placeholder</div>
-    </article>
-    {% endif %}
     {% elif resource.resource_type == 'database' %}
     <article class="detail-card">
       <h3>Database</h3>
@@ -118,221 +125,889 @@
       <p class="text-muted">Connection checks, query latency, and storage metrics will appear here.</p>
       <div class="placeholder-block">DB health placeholder</div>
     </article>
-    {% else %}
+    {% elif resource.resource_type != 'vm' %}
     <article class="detail-card">
       <h3>Resource signals</h3>
       <p class="text-muted">Custom checks and alerts for this resource type will appear here.</p>
       <div class="placeholder-block">Custom checks placeholder</div>
     </article>
     {% endif %}
+    <article class="detail-card resource-notes-card" id="notes">
+      <div class="detail-row">
+        <h3 class="detail-card-title">Notes</h3>
+        <span class="text-muted small">{{ note_items|length }} messages</span>
+      </div>
+      <p class="text-muted">Shared notes for this resource. Stored in {{ resource_owner_username }}'s workspace.</p>
+      <div class="comment-thread resource-notes-feed" data-notes-feed>
+        {% for note in note_items %}
+        <article class="comment-item resource-note{% if note.is_author %} is-self{% endif %}">
+          <div class="resource-note-meta">
+            <div class="comment-author">
+              {% if note.author_avatar_url %}
+              <img class="comment-avatar" src="{{ note.author_avatar_url }}" alt="{{ note.author_username }} avatar">
+              {% else %}
+              <span class="comment-avatar-fallback" aria-hidden="true">{{ note.author_username|slice:":1"|upper }}</span>
+              {% endif %}
+              <strong>@{{ note.author_username }}</strong>
+            </div>
+            <span class="text-muted small">{{ note.created_display }}</span>
+          </div>
+          {% if note.body %}
+          <div class="comment-body resource-note-body">{{ note.body|linebreaksbr }}</div>
+          {% endif %}
+          {% if note.attachment_url %}
+          <a class="resource-note-attachment" href="{{ note.attachment_url }}" target="_blank" rel="noopener">
+            <img src="{{ note.attachment_url }}" alt="{{ note.attachment_name|default:'Note attachment' }}">
+          </a>
+          {% endif %}
+        </article>
+        {% empty %}
+        <div class="placeholder-block">No notes yet. Add one below to start the team thread.</div>
+        {% endfor %}
+      </div>
+      <form method="post" action="{{ resource_note_add_url }}" enctype="multipart/form-data" class="resource-note-form">
+        {% csrf_token %}
+        <div class="resource-note-chat">
+          <input type="checkbox" name="resource-note-voice" id="resource-note-voice" class="resource-note-voice-toggle" style="display:none" disabled aria-hidden="true">
+          <textarea
+            name="body"
+            rows="1"
+            maxlength="6000"
+            class="resource-note-input-text"
+            data-note-input></textarea>
+          <div class="resource-note-upload-hints" aria-hidden="true">
+            <svg
+              class="resource-note-upload-icon"
+              xmlns="http://www.w3.org/2000/svg"
+              width="24"
+              height="24"
+              viewBox="0 0 24 24">
+              <g fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="13" r="3"></circle>
+                <path d="M9.778 21h4.444c3.121 0 4.682 0 5.803-.735a4.4 4.4 0 0 0 1.226-1.204c.749-1.1.749-2.633.749-5.697s0-4.597-.749-5.697a4.4 4.4 0 0 0-1.226-1.204c-.72-.473-1.622-.642-3.003-.702c-.659 0-1.226-.49-1.355-1.125A2.064 2.064 0 0 0 13.634 3h-3.268c-.988 0-1.839.685-2.033 1.636c-.129.635-.696 1.125-1.355 1.125c-1.38.06-2.282.23-3.003.702A4.4 4.4 0 0 0 2.75 7.667C2 8.767 2 10.299 2 13.364s0 4.596.749 5.697c.324.476.74.885 1.226 1.204C5.096 21 6.657 21 9.778 21Z"></path>
+              </g>
+            </svg>
+            <svg
+              class="resource-note-upload-icon"
+              xmlns="http://www.w3.org/2000/svg"
+              width="24"
+              height="24"
+              viewBox="0 0 24 24">
+              <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+                <rect width="18" height="18" x="3" y="3" rx="2" ry="2"></rect>
+                <circle cx="9" cy="9" r="2"></circle>
+                <path d="m21 15l-3.086-3.086a2 2 0 0 0-2.828 0L6 21"></path>
+              </g>
+            </svg>
+            <svg
+              class="resource-note-upload-icon"
+              xmlns="http://www.w3.org/2000/svg"
+              width="24"
+              height="24"
+              viewBox="0 0 24 24">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="m6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </div>
+          <label class="resource-note-label-files" title="Attach image or GIF" aria-label="Attach image or GIF">
+            <input type="file" name="note_attachment" accept="image/*" data-note-file-input>
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">
+              <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14m-7-7v14"></path>
+            </svg>
+          </label>
+          <label for="resource-note-voice" class="resource-note-label-voice" aria-label="Voice mode preview">
+            <svg
+              class="resource-note-icon-voice"
+              xmlns="http://www.w3.org/2000/svg"
+              width="24"
+              height="24"
+              viewBox="0 0 24 24">
+              <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2" d="M12 4v16m4-13v10M8 7v10m12-6v2M4 11v2"></path>
+            </svg>
+            <div class="resource-note-ai">
+              <div class="resource-note-ai-orb">
+                <div class="resource-note-c resource-note-c4"></div>
+                <div class="resource-note-c resource-note-c1"></div>
+                <div class="resource-note-c resource-note-c2"></div>
+                <div class="resource-note-c resource-note-c3"></div>
+                <div class="resource-note-rings"></div>
+              </div>
+              <div class="resource-note-glass"></div>
+            </div>
+            <div class="resource-note-voice-text">
+              <p>Conversation Started</p>
+              <p>Press to cancel the conversation</p>
+            </div>
+          </label>
+          <button class="resource-note-label-send" type="submit" aria-label="Send note">
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">
+              <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 12l7-7l7 7m-7 7V5"></path>
+            </svg>
+          </button>
+        </div>
+        <div class="text-muted small resource-note-meta" data-note-file-name hidden></div>
+      </form>
+    </article>
+    <article class="detail-card" id="resource-api-keys">
+      <div class="detail-row">
+        <h3 class="detail-card-title">Resource API Keys</h3>
+        <span class="text-muted small">{{ resource_api_keys|length }} active</span>
+      </div>
+      <p class="text-muted">Generate keys scoped only to this resource and its endpoints.</p>
+      {% if latest_resource_api_key_value %}
+      <div class="settings-api-generated">
+        <div class="settings-api-label">New resource key (copy now)</div>
+        <code>{{ latest_resource_api_key_value }}</code>
+      </div>
+      {% endif %}
+      {% if can_manage_resource %}
+      <form method="post" action="{{ resource_api_key_create_url }}" class="settings-key-form resource-key-form">
+        {% csrf_token %}
+        <label>
+          <input type="text" name="name" placeholder="Resource API Key" />
+        </label>
+        <button class="primary-btn" type="submit">Generate key</button>
+      </form>
+      {% endif %}
+      <div class="resource-key-list">
+        {% if resource_api_keys %}
+          {% for item in resource_api_keys %}
+          <article class="resource-key-row">
+            <div>
+              <div class="fw-semibold">{{ item.name }}</div>
+              <div class="text-muted small">{{ item.key_prefix }} • {{ item.created_at }}</div>
+            </div>
+            {% if can_manage_resource %}
+            <form method="post" action="{{ item.revoke_url }}">
+              {% csrf_token %}
+              <button class="icon-btn icon-btn-small danger" type="submit">Revoke</button>
+            </form>
+            {% endif %}
+          </article>
+          {% endfor %}
+        {% else %}
+        <div class="placeholder-block">No active resource API keys.</div>
+        {% endif %}
+      </div>
+      {% if not can_manage_resource %}
+      <div class="text-muted small">Only the resource owner or a superuser can generate or revoke keys.</div>
+      {% endif %}
+    </article>
   </div>
 
-  {% if resource.resource_type == 'vm' and resource.ssh_key_present and resource.ssh_username and resource.address %}
-  <section class="terminal-wrap d-none" data-ssh-panel>
-    <div class="terminal-window">
-      <div class="terminal-topbar">
-        <div class="terminal-meta">
-          <div class="terminal-dots">
-            <button type="button" class="terminal-dot terminal-dot--close" data-ssh-close aria-label="Close terminal">×</button>
-            <button type="button" class="terminal-dot terminal-dot--copy" data-copy-terminal aria-label="Copy terminal output">
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path d="M9 9h8v10H9V9zm-2 6H6V5h8v2H7v8z"></path>
-              </svg>
-            </button>
-            <span class="terminal-dot terminal-dot--expand" aria-hidden="true"></span>
-          </div>
-          <div class="terminal-title">SSH session</div>
-        </div>
+  <div class="detail-grid detail-grid-single">
+    <article class="detail-card cloud-logs-card detail-card-full">
+      <div class="detail-row">
+        <h3 class="detail-card-title">Cloud Logs</h3>
+        <span class="text-muted small">{{ cloud_logs|length }} entries</span>
       </div>
-      <div class="web-terminal-shell" data-ssh-terminal data-terminal-ws="/terminal/ws/" data-resource-id="{{ resource.id }}"></div>
-    </div>
-  </section>
-  {% endif %}
+      <p class="text-muted">Log stream from SDK and agents attached to this resource.</p>
+      {% if cloud_logs %}
+      <div class="cloud-logs-list">
+        {% for entry in cloud_logs %}
+        <article class="cloud-log-row">
+          <div class="cloud-log-head">
+            <div class="cloud-log-meta">
+              <span class="cloud-log-level cloud-log-level-{{ entry.level_tone }}">{{ entry.level|upper }}</span>
+              <span class="text-muted small">{{ entry.logger }}</span>
+            </div>
+            <span class="text-muted small">{{ entry.time_display }}</span>
+          </div>
+          <div class="cloud-log-message">{{ entry.message }}</div>
+          {% if entry.metadata_pretty %}
+          <details class="cloud-log-details">
+            <summary>Metadata</summary>
+            <pre>{{ entry.metadata_pretty }}</pre>
+          </details>
+          {% endif %}
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="placeholder-block">No logs yet for this resource.</div>
+      {% endif %}
+    </article>
+  </div>
 
-  <div class="detail-grid">
-    <article class="detail-card">
-      <h3>Health history</h3>
-      <p class="text-muted">Recent health checks will appear here once logging is wired into the UI.</p>
-      <div class="placeholder-block">Health history placeholder</div>
-    </article>
-    <article class="detail-card">
-      <h3>Alerts</h3>
-      <p class="text-muted">Alert rules, channels, and escalation policies will appear here.</p>
-      <div class="placeholder-block">Alert settings placeholder</div>
-    </article>
+  <div class="modal resource-alert-modal" id="alerts" data-resource-alert-modal aria-hidden="true">
+    <div class="modal-overlay" data-resource-alert-close></div>
+    <div class="modal-content alert-modal-content" role="dialog" aria-modal="true" aria-label="Resource alert settings">
+      <div class="modal-header">
+        <div>
+          <h3 class="detail-card-title">Alert Settings</h3>
+          <p class="text-muted small">Stored per user in this resource package.</p>
+        </div>
+        <button class="icon-btn" type="button" aria-label="Close alerts modal" data-resource-alert-close>✕</button>
+      </div>
+      <form method="post" action="{{ resource_alert_settings_update_url }}" class="alert-settings-form">
+        {% csrf_token %}
+      <div class="alert-modal-list">
+        <section class="alert-option-card">
+          <div class="alert-option-head">
+            <h4>Health Alerts</h4>
+          </div>
+          <div class="alert-option-grid">
+            <label class="checkbox">
+              <input type="checkbox" name="health_alerts_app_enabled"{% if alert_settings.health_alerts_app_enabled %} checked{% endif %}>
+              <span>App</span>
+            </label>
+            {% if twilio_sms_available %}
+            <label class="checkbox">
+              <input type="checkbox" name="health_alerts_sms_enabled"{% if alert_settings.health_alerts_sms_enabled %} checked{% endif %}>
+              <span>SMS</span>
+            </label>
+            {% endif %}
+            {% if email_notifications_available %}
+            <label class="checkbox">
+              <input type="checkbox" name="health_alerts_email_enabled"{% if alert_settings.health_alerts_email_enabled %} checked{% endif %}>
+              <span>Email</span>
+            </label>
+            {% endif %}
+          </div>
+        </section>
+        <section class="alert-option-card">
+          <div class="alert-option-head">
+            <h4>Cloud Log Errors</h4>
+          </div>
+          <div class="alert-option-grid">
+            <label class="checkbox">
+              <input type="checkbox" name="cloud_log_errors_app_enabled"{% if alert_settings.cloud_log_errors_app_enabled %} checked{% endif %}>
+              <span>App</span>
+            </label>
+            {% if twilio_sms_available %}
+            <label class="checkbox">
+              <input type="checkbox" name="cloud_log_errors_sms_enabled"{% if alert_settings.cloud_log_errors_sms_enabled %} checked{% endif %}>
+              <span>SMS</span>
+            </label>
+            {% endif %}
+            {% if email_notifications_available %}
+            <label class="checkbox">
+              <input type="checkbox" name="cloud_log_errors_email_enabled"{% if alert_settings.cloud_log_errors_email_enabled %} checked{% endif %}>
+              <span>Email</span>
+            </label>
+            {% endif %}
+          </div>
+        </section>
+        {% if not twilio_sms_available %}
+        <p class="text-muted small">SMS notifications are unavailable until Twilio is configured in Connector Settings.</p>
+        {% endif %}
+        {% if not email_notifications_available %}
+        <p class="text-muted small">Email notifications are unavailable until an email provider is configured in Connector Settings.</p>
+        {% endif %}
+      </div>
+      <div class="modal-actions">
+        <button class="ghost-btn" type="button" data-resource-alert-close>Close</button>
+        <button class="primary-btn" type="submit">Save</button>
+      </div>
+      </form>
+    </div>
   </div>
 </section>
 {% endblock page_content %}
 
 {% block page_js %}
 {{ block.super }}
-<script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+{{ health_history_chart|json_script:"health-history-data" }}
 <script>
   (function () {
-    const sshButton = document.querySelector('[data-ssh-toggle]');
-    const sshPanel = document.querySelector('[data-ssh-panel]');
-    const sshClose = document.querySelector('[data-ssh-close]');
-    const copyButton = document.querySelector('[data-copy-terminal]');
-    const toast = document.querySelector('[data-toast]');
-    let toastTimer;
-    let terminal;
-    let fitAddon;
-    let socket;
-    let hasTerminalOutput = false;
+    const healthBtn = document.querySelector('[data-health-check-btn]');
+    const statusOrb = document.querySelector('.status-orb');
+    const overviewStatusBadge = document.querySelector('[data-overview-status-badge]');
+    const checkedLabels = document.querySelectorAll('[data-last-checked]');
+    const chartWrap = document.querySelector('[data-health-chart-wrap]');
+    const historyCanvas = document.querySelector('[data-health-chart-canvas]');
+    const historyEmpty = document.querySelector('[data-health-history-empty]');
+    if (!healthBtn) return;
+    const historyDataNode = document.getElementById('health-history-data');
+    let healthSeries = [];
+    try {
+      healthSeries = JSON.parse(historyDataNode ? historyDataNode.textContent : '[]') || [];
+    } catch (err) {
+      healthSeries = [];
+    }
 
-    const openTerminal = () => {
-      if (!sshPanel || terminal) return;
-      const container = sshPanel.querySelector('[data-ssh-terminal]');
-      if (!container) return;
-      const wsPath = container.getAttribute('data-terminal-ws');
-      const resourceId = container.getAttribute('data-resource-id');
-      if (!wsPath || !resourceId) return;
-      const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const wsUrl = `${scheme}://${window.location.host}${wsPath}?resource_id=${resourceId}`;
+    const getCookie = (name) => {
+      const cookies = document.cookie ? document.cookie.split(';') : [];
+      for (const cookie of cookies) {
+        const trimmed = cookie.trim();
+        if (trimmed.startsWith(name + '=')) return decodeURIComponent(trimmed.slice(name.length + 1));
+      }
+      return '';
+    };
 
-      terminal = new Terminal({
-        cursorBlink: true,
-        fontFamily:
-          '"SFMono-Regular", "Menlo", "Monaco", "Consolas", "Liberation Mono", "Courier New", monospace',
-        fontSize: 14,
-        theme: {
-          background: '#0a0e12',
-          foreground: '#d7e2f2',
-          cursor: '#6be4a8',
-          selection: 'rgba(107, 228, 168, 0.3)',
-        },
+    const formatTime = (value) => {
+      if (!value) return '—';
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) return value;
+      return parsed.toLocaleString();
+    };
+
+    const healthColor = (item) => {
+      const method = String((item && item.check_method) || '').toLowerCase();
+      if (method && method.indexOf('ping+') === 0) return '#f59e0b';
+      return '#4fd1ff';
+    };
+
+    const drawHistoryChart = () => {
+      if (!historyCanvas || !healthSeries.length) return;
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(320, historyCanvas.clientWidth || 0);
+      const height = 180;
+      historyCanvas.width = Math.floor(width * dpr);
+      historyCanvas.height = Math.floor(height * dpr);
+      const ctx = historyCanvas.getContext('2d');
+      if (!ctx) return;
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, width, height);
+
+      const pad = { top: 12, right: 12, bottom: 26, left: 12 };
+      const chartWidth = width - pad.left - pad.right;
+      const chartHeight = height - pad.top - pad.bottom;
+      if (chartWidth <= 0 || chartHeight <= 0) return;
+
+      const values = healthSeries
+        .map((item) => Number(item && item.latency_ms))
+        .filter((value) => Number.isFinite(value) && value >= 0);
+      const maxLatency = values.length ? Math.max(...values, 1) : 1;
+      const yMax = Math.max(10, Math.ceil(maxLatency / 10) * 10);
+      const rows = [0, 0.5, 1];
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+      ctx.lineWidth = 1;
+      rows.forEach((row) => {
+        const y = pad.top + row * chartHeight;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(width - pad.right, y);
+        ctx.stroke();
       });
 
-      fitAddon = new FitAddon.FitAddon();
-      terminal.loadAddon(fitAddon);
-      terminal.open(container);
-      fitAddon.fit();
+      const points = healthSeries.map((item, index) => {
+        const x = healthSeries.length === 1
+          ? pad.left + chartWidth / 2
+          : pad.left + (index / (healthSeries.length - 1)) * chartWidth;
+        const latencyValue = Number(item && item.latency_ms);
+        const clampedValue = Number.isFinite(latencyValue) && latencyValue >= 0 ? Math.min(latencyValue, yMax) : null;
+        const y = clampedValue === null
+          ? pad.top + chartHeight
+          : pad.top + (1 - (clampedValue / yMax)) * chartHeight;
+        return { x, y, item, hasLatency: clampedValue !== null };
+      });
 
-      socket = new WebSocket(wsUrl);
-      socket.binaryType = 'arraybuffer';
+      ctx.strokeStyle = '#4fd1ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      points.forEach((point, index) => {
+        if (!point.hasLatency) return;
+        if (index === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      });
+      ctx.stroke();
 
-      const sendResize = () => {
-        const dims = fitAddon.proposeDimensions();
-        if (!dims) return;
-        socket.send(
-          JSON.stringify({
-            type: 'resize',
-            cols: dims.cols,
-            rows: dims.rows,
-          })
-        );
+      points.forEach((point) => {
+        if (!point.hasLatency) return;
+        ctx.fillStyle = healthColor(point.item);
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.9)';
+      ctx.font = '11px ui-sans-serif, system-ui, -apple-system, sans-serif';
+      ctx.fillText(String(yMax) + ' ms', pad.left, pad.top - 2);
+      if (healthSeries[0]) ctx.fillText('Older', pad.left, height - 8);
+      if (healthSeries[healthSeries.length - 1]) {
+        const label = 'Latest';
+        const metrics = ctx.measureText(label);
+        ctx.fillText(label, width - pad.right - metrics.width, height - 8);
+      }
+    };
+
+    if (historyEmpty) historyEmpty.classList.toggle('d-none', healthSeries.length > 0);
+    if (chartWrap) chartWrap.classList.toggle('d-none', healthSeries.length === 0);
+    drawHistoryChart();
+    window.addEventListener('resize', drawHistoryChart);
+
+    healthBtn.addEventListener('click', async () => {
+      const endpoint = healthBtn.getAttribute('data-health-check-url');
+      if (!endpoint) return;
+      const previousText = healthBtn.textContent;
+      healthBtn.disabled = true;
+      healthBtn.textContent = 'Running...';
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'X-CSRFToken': getCookie('csrftoken'),
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        });
+        if (!response.ok) throw new Error('Health check failed');
+        const payload = await response.json();
+        const status = String(payload.status || 'unknown').toLowerCase();
+        const checkedAt = String(payload.checked_at || '');
+        if (statusOrb) statusOrb.setAttribute('data-status', status);
+        if (overviewStatusBadge) {
+          overviewStatusBadge.textContent = status.toUpperCase();
+          overviewStatusBadge.classList.remove('success', 'danger', 'info');
+          if (status === 'healthy') overviewStatusBadge.classList.add('success');
+          else if (status === 'unhealthy' || status === 'failed' || status === 'error') overviewStatusBadge.classList.add('danger');
+          else overviewStatusBadge.classList.add('info');
+        }
+        checkedLabels.forEach((label) => {
+          label.textContent = formatTime(checkedAt);
+        });
+        healthSeries.push({
+          status,
+          checked_at: checkedAt,
+          check_method: String(payload.check_method || ''),
+          latency_ms: payload.latency_ms,
+        });
+        if (healthSeries.length > 30) healthSeries = healthSeries.slice(healthSeries.length - 30);
+        if (historyEmpty) historyEmpty.classList.add('d-none');
+        if (chartWrap) chartWrap.classList.remove('d-none');
+        drawHistoryChart();
+      } catch (err) {
+        window.alert('Health check failed. Please try again.');
+      } finally {
+        healthBtn.disabled = false;
+        healthBtn.textContent = previousText;
+      }
+    });
+  })();
+</script>
+<script>
+  (function () {
+    if (window.openDevtoolsTerminalPopup) return;
+
+    const DEFAULT_WS_PATH = '/terminal/ws/';
+    const DEFAULT_HINT = 'Ctrl/Cmd+C copy selection, Ctrl/Cmd+click open links, Ctrl+Shift+V paste, Ctrl+/- zoom';
+    const DEFAULT_FEATURES = 'width=1100,height=760,resizable=yes,scrollbars=no';
+    const FONT_PREF_KEY = 'devtools_terminal_font_size';
+
+    const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (char) => {
+      if (char === '&') return '&amp;';
+      if (char === '<') return '&lt;';
+      if (char === '>') return '&gt;';
+      if (char === '"') return '&quot;';
+      return '&#39;';
+    });
+
+    const buildPopupHtml = (resourceId, wsPath, hintText) => {
+      const safeResourceId = escapeHtml(resourceId);
+      const safeHintText = escapeHtml(hintText);
+      const wsPathLiteral = JSON.stringify(String(wsPath || DEFAULT_WS_PATH));
+      const resourceIdLiteral = JSON.stringify(String(resourceId));
+      const fontPrefKeyLiteral = JSON.stringify(FONT_PREF_KEY);
+
+      return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SSH Terminal - Resource ${safeResourceId}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
+  <style>
+    html, body { height: 100%; margin: 0; background: #050b12; color: #d7e2f2; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    .wrap { height: 100%; display: flex; flex-direction: column; }
+    .bar { padding: 10px 14px; border-bottom: 1px solid rgba(148,163,184,.25); background: rgba(15,23,42,.85); font-size: 12px; color: #94a3b8; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .bar-meta { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+    .bar-title { color: #cbd5e1; font-weight: 600; }
+    .bar-hint { color: #64748b; white-space: nowrap; }
+    .copy-status { color: #6be4a8; min-height: 1em; text-align: right; }
+    .copy-status.error { color: #fca5a5; }
+    #terminal { flex: 1; padding: 10px; }
+    @media (max-width: 700px) {
+      .bar-hint { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="bar">
+      <span class="bar-meta">
+        <span class="bar-title">Resource ${safeResourceId} terminal</span>
+        <span class="bar-hint">${safeHintText}</span>
+      </span>
+      <span id="copy-status" class="copy-status" aria-live="polite"></span>
+    </div>
+    <div id="terminal"></div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"><\/script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js"><\/script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links/lib/xterm-addon-web-links.js"><\/script>
+  <script>
+    (function () {
+      const termEl = document.getElementById('terminal');
+      const copyStatusEl = document.getElementById('copy-status');
+      const baseWsPath = ${wsPathLiteral};
+      const resourceId = ${resourceIdLiteral};
+      const fontPrefKey = ${fontPrefKeyLiteral};
+      const clampFontSize = (value) => Math.max(11, Math.min(22, value));
+
+      const loadFontSize = () => {
+        try {
+          const raw = Number(window.localStorage.getItem(fontPrefKey));
+          if (Number.isFinite(raw)) return clampFontSize(raw);
+        } catch (err) {}
+        return 14;
       };
 
-      socket.addEventListener('open', () => {
-        terminal.focus();
-        sendResize();
-      });
+      const saveFontSize = (value) => {
+        try {
+          window.localStorage.setItem(fontPrefKey, String(clampFontSize(value)));
+        } catch (err) {}
+      };
 
-      socket.addEventListener('message', (event) => {
-        if (event.data instanceof ArrayBuffer) {
-          terminal.write(new Uint8Array(event.data));
-          hasTerminalOutput = true;
+      const shouldActivateTerminalLink = (event) => Boolean(event && (event.ctrlKey || event.metaKey));
+
+      const openTerminalLink = (uri) => {
+        if (!uri) return;
+        const nextWindow = window.open();
+        if (nextWindow) {
+          try { nextWindow.opener = null; } catch (err) {}
+          nextWindow.location.href = uri;
           return;
         }
-        terminal.write(event.data);
-        hasTerminalOutput = true;
+        console.warn('Opening link blocked as opener could not be cleared');
+      };
+
+      const term = new Terminal({
+        cursorBlink: true,
+        cursorStyle: 'block',
+        cursorInactiveStyle: 'outline',
+        scrollback: 50000,
+        fontFamily: '"SFMono-Regular","Menlo","Monaco","Consolas","Liberation Mono","Courier New",monospace',
+        fontSize: loadFontSize(),
+        theme: { background: '#0a0e12', foreground: '#d7e2f2', cursor: '#6be4a8', selection: 'rgba(107, 228, 168, 0.3)' }
+      });
+      const fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+      if (window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon) {
+        term.loadAddon(new window.WebLinksAddon.WebLinksAddon((event, uri) => {
+          if (!shouldActivateTerminalLink(event)) return;
+          openTerminalLink(uri);
+        }));
+      }
+      term.open(termEl);
+      fit.fit();
+
+      const queryPrefix = baseWsPath.indexOf('?') === -1 ? '?' : '&';
+      const wsPath = baseWsPath + queryPrefix + 'resource_id=' + encodeURIComponent(resourceId);
+      const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(scheme + '://' + window.location.host + wsPath);
+      ws.binaryType = 'arraybuffer';
+
+      let statusTimer = null;
+      let lastCopiedSelection = '';
+      let currentFontSize = Number(term.options.fontSize) || 14;
+
+      const setCopyStatus = (message, isError) => {
+        if (!copyStatusEl) return;
+        copyStatusEl.textContent = message || '';
+        copyStatusEl.classList.toggle('error', Boolean(isError));
+        if (statusTimer) window.clearTimeout(statusTimer);
+        if (!message) return;
+        statusTimer = window.setTimeout(() => {
+          if (copyStatusEl) {
+            copyStatusEl.textContent = '';
+            copyStatusEl.classList.remove('error');
+          }
+        }, isError ? 2500 : 1200);
+      };
+
+      const copySelection = async () => {
+        const selected = term.getSelection ? term.getSelection() : '';
+        if (!selected) return false;
+        if (selected === lastCopiedSelection) return true;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(selected);
+            lastCopiedSelection = selected;
+            setCopyStatus('Copied selection', false);
+            return true;
+          }
+        } catch (err) {}
+
+        const fallback = window.prompt('Copy selected text (Ctrl/Cmd+C, Enter):', selected);
+        if (fallback !== null) {
+          lastCopiedSelection = selected;
+          setCopyStatus('Selection ready to copy', false);
+          return true;
+        }
+        setCopyStatus('Clipboard unavailable', true);
+        return false;
+      };
+
+      const pasteFromClipboard = async () => {
+        if (!(navigator.clipboard && navigator.clipboard.readText)) {
+          setCopyStatus('Clipboard read not supported in this browser', true);
+          return false;
+        }
+        try {
+          const text = await navigator.clipboard.readText();
+          if (!text) {
+            setCopyStatus('Clipboard is empty', true);
+            return false;
+          }
+          if (ws.readyState !== WebSocket.OPEN) {
+            setCopyStatus('Terminal is disconnected', true);
+            return false;
+          }
+          ws.send(text);
+          setCopyStatus('Pasted clipboard', false);
+          return true;
+        } catch (err) {
+          setCopyStatus('Clipboard access blocked by browser', true);
+          return false;
+        }
+      };
+
+      const sendResize = () => {
+        const dims = fit.proposeDimensions();
+        if (!dims || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+      };
+
+      const setFontSize = (nextSize) => {
+        const fontSize = clampFontSize(nextSize);
+        if (fontSize === currentFontSize) return;
+        currentFontSize = fontSize;
+        term.options.fontSize = fontSize;
+        saveFontSize(fontSize);
+        fit.fit();
+        sendResize();
+        setCopyStatus('Font size ' + String(fontSize) + 'px', false);
+      };
+
+      ws.addEventListener('open', () => {
+        term.focus();
+        sendResize();
+        setCopyStatus('Connected', false);
       });
 
-      socket.addEventListener('close', () => {
-        if (!hasTerminalOutput) {
-          terminal.write(
-            '\\r\\n[terminal session closed] Verify the SSH username, host, port, and key.\\r\\n'
-          );
-        } else {
-          terminal.write('\\r\\n[terminal session closed]\\r\\n');
+      ws.addEventListener('message', (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          term.write(new Uint8Array(event.data));
+          return;
         }
+        term.write(event.data);
       });
 
-      terminal.onData((data) => {
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(data);
+      ws.addEventListener('close', () => {
+        term.write('\\r\\n[terminal session closed]\\r\\n');
+        setCopyStatus('Disconnected', true);
+      });
+
+      term.attachCustomKeyEventHandler((event) => {
+        const key = (event.key || '').toLowerCase();
+        const ctrlOrMeta = Boolean(event.ctrlKey || event.metaKey);
+        const hasSelection = Boolean(term.hasSelection && term.hasSelection());
+        const wantsCopy = hasSelection && (
+          (ctrlOrMeta && key === 'c') ||
+          (Boolean(event.ctrlKey && event.shiftKey) && key === 'c')
+        );
+        if (wantsCopy) {
+          event.preventDefault();
+          copySelection();
+          return false;
         }
+
+        const wantsPaste = (Boolean(event.ctrlKey && event.shiftKey) && key === 'v')
+          || (Boolean(event.metaKey) && key === 'v')
+          || (Boolean(event.shiftKey) && key === 'insert');
+        if (wantsPaste) {
+          event.preventDefault();
+          pasteFromClipboard();
+          return false;
+        }
+
+        if (Boolean(event.ctrlKey) && (key === '=' || key === '+')) {
+          event.preventDefault();
+          setFontSize(currentFontSize + 1);
+          return false;
+        }
+        if (Boolean(event.ctrlKey) && key === '-') {
+          event.preventDefault();
+          setFontSize(currentFontSize - 1);
+          return false;
+        }
+        if (Boolean(event.ctrlKey) && key === '0') {
+          event.preventDefault();
+          setFontSize(14);
+          return false;
+        }
+        return true;
+      });
+
+      term.onData((data) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(data);
+      });
+
+      termEl.addEventListener('mouseup', () => {
+        window.setTimeout(() => {
+          copySelection();
+        }, 0);
+      });
+      termEl.addEventListener('touchend', () => {
+        window.setTimeout(() => {
+          copySelection();
+        }, 0);
+      }, { passive: true });
+      termEl.addEventListener('contextmenu', (event) => {
+        if (term.hasSelection && term.hasSelection()) return;
+        event.preventDefault();
+        pasteFromClipboard();
+      });
+      termEl.addEventListener('mousedown', () => {
+        term.focus();
       });
 
       window.addEventListener('resize', () => {
-        fitAddon.fit();
-        if (socket.readyState === WebSocket.OPEN) {
-          sendResize();
-        }
+        fit.fit();
+        sendResize();
       });
+      window.addEventListener('beforeunload', () => {
+        try { ws.close(); } catch (err) {}
+      });
+    })();
+  <\/script>
+</body>
+</html>`;
     };
 
-    if (sshButton && sshPanel) {
-      sshButton.addEventListener('click', (event) => {
-        event.preventDefault();
-        const isHidden = sshPanel.classList.contains('d-none');
-        sshPanel.classList.toggle('d-none', !isHidden);
-        if (isHidden) {
-          openTerminal();
-          sshButton.textContent = 'Close';
-          sshPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        } else {
-          sshButton.textContent = 'Connect';
-        }
-      });
-    }
+    window.openDevtoolsTerminalPopup = (resourceId, options = {}) => {
+      if (!resourceId) return false;
+      const popupNamePrefix = String(options.popupNamePrefix || 'resource_ssh_');
+      const popupFeatures = String(options.popupFeatures || DEFAULT_FEATURES);
+      const wsPath = String(options.wsPath || DEFAULT_WS_PATH);
+      const hintText = String(options.hintText || DEFAULT_HINT);
+      const popupName = popupNamePrefix + String(resourceId);
+      const popup = window.open('', popupName, popupFeatures);
+      if (!popup) return false;
 
-    if (sshClose && sshPanel && sshButton) {
-      sshClose.addEventListener('click', (event) => {
-        event.preventDefault();
-        sshPanel.classList.add('d-none');
-        sshButton.textContent = 'Connect';
-      });
-    }
+      popup.document.open();
+      popup.document.write(buildPopupHtml(resourceId, wsPath, hintText));
+      popup.document.close();
+      popup.focus();
+      return true;
+    };
+  })();
+</script>
+<script>
+  (function () {
+    const openButton = document.querySelector('[data-resource-alert-open]');
+    const modal = document.querySelector('[data-resource-alert-modal]');
+    if (!openButton || !modal) return;
 
-    const showToast = () => {
-      if (!toast) return;
-      toast.classList.remove('toast-hidden');
-      toast.classList.add('toast-show');
-      if (toastTimer) {
-        window.clearTimeout(toastTimer);
-      }
-      toastTimer = window.setTimeout(() => {
-        toast.classList.remove('toast-show');
-        toast.classList.add('toast-hidden');
-      }, 2200);
+    const closeModal = () => {
+      modal.classList.remove('is-active');
+      modal.setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('modal-open');
     };
 
-    const copyTerminalOutput = () => {
-      if (!terminal) return;
-      const lines = [];
-      const buffer = terminal.buffer.active;
-      for (let i = 0; i < buffer.length; i += 1) {
-        const line = buffer.getLine(i);
-        if (line) {
-          lines.push(line.translateToString(true));
-        }
-      }
-      const text = lines.join('\n').trim();
-      if (!text) return;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(showToast).catch(() => {});
-        return;
-      }
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.setAttribute('readonly', '');
-      textarea.style.position = 'absolute';
-      textarea.style.left = '-9999px';
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand('copy');
-      textarea.remove();
-      showToast();
+    const openModal = () => {
+      modal.classList.add('is-active');
+      modal.setAttribute('aria-hidden', 'false');
+      document.body.classList.add('modal-open');
     };
 
-    if (copyButton) {
-      copyButton.addEventListener('click', (event) => {
-        event.preventDefault();
-        copyTerminalOutput();
+    openButton.addEventListener('click', openModal);
+    modal.querySelectorAll('[data-resource-alert-close]').forEach((el) => {
+      el.addEventListener('click', closeModal);
+    });
+    if (String(window.location.hash || '') === '#alerts') {
+      openModal();
+    }
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (!modal.classList.contains('is-active')) return;
+      closeModal();
+    });
+  })();
+</script>
+<script>
+  (function () {
+    const notesFeed = document.querySelector('[data-notes-feed]');
+    if (!notesFeed) return;
+    notesFeed.scrollTop = notesFeed.scrollHeight;
+  })();
+</script>
+<script>
+  (function () {
+    const copyButton = document.querySelector('[data-copy-resource-env]');
+    if (!copyButton) return;
+
+    const payload = String(copyButton.getAttribute('data-copy-resource-env') || '').trim();
+    if (!payload) return;
+    const originalMarkup = copyButton.innerHTML;
+
+    const setCopiedState = (active) => {
+      copyButton.classList.toggle('is-copied', Boolean(active));
+      if (active) {
+        copyButton.innerHTML = 'Copied ALSHIVAL_RESOURCE';
+        window.setTimeout(() => {
+          copyButton.innerHTML = originalMarkup;
+          copyButton.classList.remove('is-copied');
+        }, 1200);
+      }
+    };
+
+    copyButton.addEventListener('click', async () => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(payload);
+          setCopiedState(true);
+          return;
+        }
+      } catch (err) {}
+      window.prompt('Copy value:', payload);
+    });
+  })();
+</script>
+<script>
+  (function () {
+    const chatShell = document.querySelector('.resource-note-chat');
+    const input = document.querySelector('[data-note-file-input]');
+    const nameEl = document.querySelector('[data-note-file-name]');
+    const textArea = document.querySelector('[data-note-input]');
+    if (input && nameEl) {
+      input.addEventListener('change', () => {
+        const file = input.files && input.files[0] ? input.files[0] : null;
+        nameEl.textContent = file ? file.name : '';
+        nameEl.hidden = !file;
+        if (chatShell) chatShell.classList.toggle('has-file', Boolean(file));
       });
     }
+    if (textArea) {
+      const resize = () => {
+        textArea.style.height = 'auto';
+        textArea.style.height = Math.min(textArea.scrollHeight, 160) + 'px';
+      };
+      textArea.addEventListener('input', resize);
+      resize();
+    }
+  })();
+</script>
+<script>
+  (function () {
+    const sshButton = document.querySelector('[data-ssh-toggle]');
+    if (!sshButton || !window.openDevtoolsTerminalPopup) return;
+
+    sshButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      const resourceId = sshButton.getAttribute('data-resource-id');
+      const opened = window.openDevtoolsTerminalPopup(resourceId, {
+        popupNamePrefix: 'resource_ssh_',
+      });
+      if (!opened) {
+        window.alert('Popup blocked. Please allow popups for this site and try again.');
+      }
+    });
   })();
 </script>
 {% endblock page_js %}

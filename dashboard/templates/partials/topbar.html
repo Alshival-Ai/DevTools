@@ -1,18 +1,42 @@
+{% load static %}
 <header class="topbar">
   <div class="brand">
-    <div class="brand-mark">F</div>
-    <div class="brand-text">
-      <span class="brand-title">Fefe</span>
-      <span class="brand-sub">Developer Enablement</span>
+    <button class="mobile-menu-btn" type="button" aria-label="Toggle sidebar" aria-expanded="false" data-sidebar-toggle>☰</button>
+    <div class="brand-mark">
+      <img class="brand-mark__img" src="{% static 'img/branding/alshival-logo-256x256.png' %}" alt="Alshival logo" />
     </div>
+    <span class="brand-title">Alshival</span>
   </div>
   <div class="topbar-actions">
     <label class="search">
       <span class="search-icon">⌕</span>
-      <input type="search" placeholder="Search docs, incidents, runbooks" />
+      <input type="search" placeholder="Search docs, incidents, wiki" />
     </label>
-    <button class="icon-btn" type="button">?</button>
-    <button class="icon-btn" type="button">⚙</button>
+    <div
+      class="notification-menu"
+      data-notification-menu
+      data-list-url="{% url 'notifications_feed' %}"
+      data-mark-read-url="{% url 'notifications_mark_all_read' %}"
+      data-clear-url="{% url 'notifications_clear_all' %}"
+    >
+      <button class="icon-btn notification-toggle" type="button" aria-label="Open notifications" aria-expanded="false" data-notification-toggle>
+        <span aria-hidden="true">🔔</span>
+        <span class="notification-badge d-none" data-notification-badge>0</span>
+      </button>
+      <section class="notification-dropdown" aria-label="Notifications" hidden data-notification-dropdown>
+        <header class="notification-dropdown__header">
+          <h3 class="notification-dropdown__title">Notifications</h3>
+          <div class="notification-dropdown__actions">
+            <button class="notification-dropdown__clear" type="button" data-notification-mark-read>Mark all read</button>
+            <button class="notification-dropdown__trash" type="button" data-notification-clear-all aria-label="Clear notifications" title="Clear notifications">🗑</button>
+          </div>
+        </header>
+        <div class="notification-list" data-notification-list>
+          <p class="notification-empty">No alerts yet.</p>
+        </div>
+      </section>
+    </div>
+    <a class="icon-btn{% if '/settings/' in request.path %} is-active{% endif %}" href="{% url 'app_settings' %}" aria-label="Open settings">⚙</a>
     <label class="theme-switcher" aria-label="Light/Dark Mode">
       <input class="theme__toggle theme-switcher__input" type="checkbox" role="switch" name="theme" value="dark">
       <span class="theme-switcher__slider">
@@ -72,12 +96,9 @@
         </span>
       </span>
     </label>
-    <div class="user-chip">
-      <div class="avatar">JD</div>
-      <div>
-        <div class="user-name">Jordan Doe</div>
-        <div class="user-role">Platform Lead</div>
-      </div>
-    </div>
+    <form method="post" action="{% url 'account_logout' %}">
+      {% csrf_token %}
+      <button class="icon-btn" type="submit">Log out</button>
+    </form>
   </div>
 </header>

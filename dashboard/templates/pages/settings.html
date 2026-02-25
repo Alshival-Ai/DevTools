@@ -1,0 +1,212 @@
+{% extends 'vertical.html' %}
+
+{% block title %}Settings{% endblock title %}
+
+{% block page_content %}
+<section class="settings-page">
+  <div class="card settings-header">
+    <h1>Settings</h1>
+    <p>Manage your account, API keys, and connector configuration for Alshival.</p>
+  </div>
+
+  {% if messages %}
+    {% for message in messages %}
+    <div class="team-status team-status-{{ message.tags|default:'info' }}">{{ message }}</div>
+    {% endfor %}
+  {% endif %}
+
+  <section class="resources-layout settings-layout">
+    <aside class="team-folder-panel card settings-folder-panel">
+      <div class="team-folder-title">Settings Folders</div>
+      <div class="team-folder-subtitle">Choose a settings workspace</div>
+      <div class="team-folder-tree">
+        <a class="team-folder-btn settings-folder-link{% if active_tab == 'account' %} is-active{% endif %}" href="{% url 'app_settings' %}?tab=account">
+          <span class="folder-icon" aria-hidden="true">📁</span>
+          <span>Account Settings</span>
+        </a>
+        <a class="team-folder-btn settings-folder-link{% if active_tab == 'api-key' %} is-active{% endif %}" href="{% url 'app_settings' %}?tab=api-key">
+          <span class="folder-icon" aria-hidden="true">🗂</span>
+          <span>API Key Settings</span>
+        </a>
+        {% if request.user.is_superuser %}
+        <a class="team-folder-btn settings-folder-link{% if active_tab == 'admin' %} is-active{% endif %}" href="{% url 'app_settings' %}?tab=admin">
+          <span class="folder-icon" aria-hidden="true">🛠</span>
+          <span>Alshival Admin</span>
+        </a>
+        <a class="team-folder-btn settings-folder-link" href="{% url 'connector_settings' %}">
+          <span class="folder-icon" aria-hidden="true">🗃</span>
+          <span>Connector Settings</span>
+        </a>
+        {% endif %}
+      </div>
+    </aside>
+
+    <div class="resources-main">
+      {% if active_tab == 'account' %}
+      <section class="table-wrap settings-panel">
+        <h3>Account Settings</h3>
+        <p>Profile and account defaults for your workspace identity.</p>
+        <form method="post" action="{% url 'app_settings' %}?tab=account">
+          {% csrf_token %}
+          <div class="settings-form-grid">
+            <label class="settings-field">
+              <span>Display name</span>
+              <input type="text" value="{{ request.user.get_full_name|default:request.user.username }}" disabled />
+            </label>
+            <label class="settings-field">
+              <span>Username</span>
+              <input type="text" value="{{ request.user.username }}" disabled />
+            </label>
+            <label class="settings-field settings-field-full">
+              <span>Email</span>
+              <input type="email" value="{{ request.user.email }}" placeholder="Add an email for account recovery and notifications" disabled />
+            </label>
+            <label class="settings-field settings-field-full">
+              <span>Notification phone number</span>
+              <input
+                type="text"
+                name="phone_number"
+                value="{{ account_phone_number }}"
+                placeholder="+1 555 123 4567"
+                autocomplete="tel"
+              />
+            </label>
+          </div>
+          <div class="table-actions">
+            <button class="primary-btn" type="submit">Save account settings</button>
+          </div>
+        </form>
+      </section>
+      {% endif %}
+
+      {% if active_tab == 'api-key' %}
+      <section class="table-wrap settings-panel">
+        <h3>API Key Settings</h3>
+        <p>Manage account-level API keys. Team and resource key creation is not configured in this settings page.</p>
+
+        <div class="settings-api-box">
+          <div>
+            <div class="settings-api-label">Platform ingest key status</div>
+            <code>{{ api_key_preview }}</code>
+          </div>
+        </div>
+
+        {% if latest_api_key_value and latest_api_key_type == 'account' %}
+        <div class="settings-api-box">
+          <div>
+            <div class="settings-api-label">New account key (shown once)</div>
+            <code>{{ latest_api_key_value }}</code>
+          </div>
+        </div>
+        {% endif %}
+
+        <article class="settings-key-card settings-key-card-single">
+          <h4>Account API Keys</h4>
+          <form method="post" action="{% url 'create_account_api_key_item' %}" class="settings-key-form">
+            {% csrf_token %}
+            <label class="settings-field">
+              <span>Key name</span>
+              <input type="text" name="name" placeholder="Account API Key" />
+            </label>
+            <button class="primary-btn" type="submit">Create account key</button>
+          </form>
+          <div class="settings-key-list">
+            {% for item in account_api_keys %}
+            <div class="settings-key-item">
+              <strong>{{ item.name }}</strong>
+              <code>{{ item.key_prefix }}</code>
+              <span class="text-muted small">Created: {{ item.created_at }}</span>
+            </div>
+            {% empty %}
+            <div class="text-muted">No account API keys yet.</div>
+            {% endfor %}
+          </div>
+        </article>
+      </section>
+      {% endif %}
+
+      {% if active_tab == 'connectors' %}
+      <section class="table-wrap settings-panel">
+        <h3>My Connectors</h3>
+        <p>Connect identity and platform tools used by your team.</p>
+        <div class="settings-connector-list">
+          <article class="settings-connector-item">
+            <div>
+              <h4>Microsoft Entra</h4>
+              <p>Single sign-on and identity federation.</p>
+            </div>
+            <button class="secondary-btn" type="button">Configure</button>
+          </article>
+          <article class="settings-connector-item">
+            <div>
+              <h4>GitHub</h4>
+              <p>Repository and organization metadata.</p>
+            </div>
+            <button class="secondary-btn" type="button">Connect</button>
+          </article>
+          <article class="settings-connector-item">
+            <div>
+              <h4>OpenAI</h4>
+              <p>AI workflow enablement for platform operations.</p>
+            </div>
+            <button class="secondary-btn" type="button">Configure</button>
+          </article>
+        </div>
+      </section>
+      {% endif %}
+
+      {% if active_tab == 'admin' and request.user.is_superuser %}
+      <section class="table-wrap settings-panel">
+        <h3>Alshival Admin</h3>
+        <p>Platform-wide controls for runtime behavior and maintenance operations.</p>
+        {% if not admin_setup_ready %}
+        <div class="team-status team-status-warning">Setup database is not ready yet. Run migrations first.</div>
+        {% endif %}
+        <form method="post" action="{% url 'app_settings' %}?tab=admin">
+          {% csrf_token %}
+          <div class="settings-form-grid">
+            <label class="settings-field settings-field-full">
+              <span>Alshival default model</span>
+              <input type="text" name="default_model" value="{{ default_model }}" placeholder="gpt-4.1-mini" {% if not admin_setup_ready %}disabled{% endif %} />
+              <small class="field-help">Used as the platform default model selection.</small>
+            </label>
+            <label class="settings-field settings-field-full">
+              <span>
+                <input type="checkbox" name="monitoring_enabled" value="1" {% if monitoring_enabled %}checked{% endif %} {% if not admin_setup_ready %}disabled{% endif %} />
+                Enable global resource monitoring
+              </span>
+              <small class="field-help">When disabled, background and manual health checks are skipped globally.</small>
+            </label>
+            <label class="settings-field settings-field-full">
+              <span>
+                <input type="checkbox" name="maintenance_mode" value="1" {% if maintenance_mode %}checked{% endif %} {% if not admin_setup_ready %}disabled{% endif %} />
+                Enable maintenance mode banner state
+              </span>
+              <small class="field-help">Use this to signal temporary platform maintenance operations.</small>
+            </label>
+            <label class="settings-field settings-field-full">
+              <span>Maintenance message</span>
+              <input type="text" name="maintenance_message" value="{{ maintenance_message }}" maxlength="255" placeholder="Scheduled maintenance in progress. Monitoring is temporarily paused." {% if not admin_setup_ready %}disabled{% endif %} />
+            </label>
+          </div>
+          <div class="table-actions">
+            <button class="primary-btn" type="submit" {% if not admin_setup_ready %}disabled{% endif %}>Save admin settings</button>
+          </div>
+        </form>
+      </section>
+      {% endif %}
+
+      <section class="card settings-next">
+        <h3>Suggested next settings</h3>
+        <p>Recommended additions for a fuller settings experience:</p>
+        <ul class="list">
+          <li>Notifications and alert delivery preferences</li>
+          <li>Security sessions and device management</li>
+          <li>Audit log retention and export controls</li>
+          <li>Workspace defaults (timezone, naming, env labels)</li>
+        </ul>
+      </section>
+    </div>
+  </section>
+</section>
+{% endblock page_content %}

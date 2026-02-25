@@ -1,0 +1,249 @@
+{% extends 'vertical.html' %}
+{% load static %}
+
+{% block title %}Connector Settings{% endblock title %}
+
+{% block page_content %}
+<section class="settings-page">
+  <div class="card settings-header">
+    <h1>Connector Settings</h1>
+    <p>Manage platform connectors configured during initial setup.</p>
+  </div>
+
+  {% if messages %}
+    {% for message in messages %}
+      <div class="team-status team-status-{{ message.tags|default:'info' }}">{{ message }}</div>
+    {% endfor %}
+  {% endif %}
+
+  {% if errors %}
+    <div class="form-error">
+      {% for error in errors %}
+        <div>{{ error }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <section class="table-wrap settings-panel">
+    <form method="post" class="auth-form" data-connector-form-root novalidate>
+      {% csrf_token %}
+
+      <div class="connector-grid" data-connector-home>
+        <button class="connector-btn connector-btn-openai" type="button" data-connector-open="openai" aria-label="OpenAI connector">
+          <img class="connector-btn__logo" src="{% static 'img/branding/connectors/openai.svg' %}" alt="OpenAI logo" />
+          <span class="connector-btn__label">OpenAi</span>
+        </button>
+
+        <button class="connector-btn connector-btn-microsoft" type="button" data-connector-open="microsoft" aria-label="Microsoft connector">
+          <img class="connector-btn__logo" src="{% static 'img/branding/connectors/microsoft.svg' %}" alt="Microsoft logo" />
+          <span class="connector-btn__label">Microsoft</span>
+        </button>
+
+        <button class="connector-btn connector-btn-github" type="button" data-connector-open="github" aria-label="GitHub connector">
+          <img class="connector-btn__logo" src="{% static 'img/branding/connectors/github.svg' %}" alt="GitHub logo" />
+          <span class="connector-btn__label">GitHub</span>
+        </button>
+
+        <button class="connector-btn connector-btn-twilio" type="button" data-connector-open="twilio" aria-label="Twilio connector">
+          <span class="connector-btn__logo connector-btn__logo-mark">T</span>
+          <span class="connector-btn__label">Twilio</span>
+        </button>
+      </div>
+
+      <div class="connector-config d-none" data-connector-panel>
+        <div class="connector-config__top">
+          <h4 class="connector-config__title" data-connector-title>Connector setup</h4>
+        </div>
+
+        <div class="connector-config__body d-none" data-connector-form="openai">
+          <label class="field">
+            <span>OpenAI API key</span>
+            <input type="password" name="openai_api_key" value="{{ initial.openai_api_key }}" autocomplete="off" />
+          </label>
+        </div>
+
+        <div class="connector-config__body d-none" data-connector-form="microsoft">
+          <div class="connector-help">
+            <p><strong>Redirect URI</strong> (Web):</p>
+            <code>{{ microsoft_redirect_uri }}</code>
+            <p><strong>Basic Microsoft Graph permissions:</strong></p>
+            <ul>
+              <li><code>User.Read</code></li>
+            </ul>
+          </div>
+          <div class="connector-support">
+            <p>Update your Entra app values and test with a Microsoft account.</p>
+            <p>When you click Microsoft sign-in, changes are saved first, then login starts.</p>
+          </div>
+          <label class="field">
+            <span>Microsoft Entra Tenant ID</span>
+            <input type="text" name="microsoft_tenant_id" value="{{ initial.microsoft_tenant_id }}" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Microsoft Entra Client ID</span>
+            <input type="text" name="microsoft_client_id" value="{{ initial.microsoft_client_id }}" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Microsoft Entra App Client Secret Value</span>
+            <input type="password" name="microsoft_client_secret" value="{{ initial.microsoft_client_secret }}" autocomplete="off" />
+          </label>
+          <button class="ms-signin-btn d-none" type="submit" name="setup_action" value="test_microsoft" data-ms-test-btn>
+            <img src="{% static 'img/branding/connectors/ms-symbollockup_signin_dark_short.svg' %}" alt="Sign in with Microsoft" />
+          </button>
+        </div>
+
+        <div class="connector-config__body d-none" data-connector-form="github">
+          <div class="connector-help">
+            <p><strong>Callback URL</strong> (GitHub OAuth App):</p>
+            <code>{{ github_redirect_uri }}</code>
+            <p><strong>Recommended OAuth scopes for sign-in:</strong></p>
+            <ul>
+              <li><code>read:user</code></li>
+              <li><code>user:email</code></li>
+            </ul>
+          </div>
+          <div class="connector-support">
+            <p>Update your GitHub OAuth App credentials and test sign-in.</p>
+          </div>
+          <label class="field">
+            <span>GitHub OAuth Client ID</span>
+            <input type="text" name="github_client_id" value="{{ initial.github_client_id }}" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>GitHub OAuth Client Secret</span>
+            <input type="password" name="github_client_secret" value="{{ initial.github_client_secret }}" autocomplete="off" />
+          </label>
+          <button class="github-signin-btn d-none" type="submit" name="setup_action" value="test_github" data-gh-test-btn>
+            <img src="{% static 'img/branding/connectors/github.svg' %}" alt="" aria-hidden="true" />
+            <span>Sign in with GitHub</span>
+          </button>
+        </div>
+
+        <div class="connector-config__body d-none" data-connector-form="twilio">
+          <div class="connector-help">
+            <p><strong>Configure these Twilio webhook endpoints:</strong></p>
+            <p><strong>SMS webhook</strong> (HTTP POST):</p>
+            <code>{{ twilio_sms_webhook_uri }}</code>
+            <p><strong>Group SMS webhook</strong> (HTTP POST, optional):</p>
+            <code>{{ twilio_sms_group_webhook_uri }}</code>
+            <p><strong>Voice webhook</strong> (HTTP POST):</p>
+            <code>{{ twilio_voice_webhook_uri }}</code>
+            <p><strong>Voice stream</strong> (websocket):</p>
+            <code>{{ twilio_voice_stream_public_uri }}</code>
+            <p><strong>Voice stream (internal/staff)</strong> (websocket):</p>
+            <code>{{ twilio_voice_stream_internal_uri }}</code>
+          </div>
+          <label class="field">
+            <span>Twilio Account SID</span>
+            <input type="text" name="twilio_account_sid" value="{{ initial.twilio_account_sid }}" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Twilio Auth Token</span>
+            <input type="password" name="twilio_auth_token" value="{{ initial.twilio_auth_token }}" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Twilio From Number</span>
+            <input type="text" name="twilio_from_number" value="{{ initial.twilio_from_number }}" placeholder="+15551234567" autocomplete="off" />
+          </label>
+        </div>
+      </div>
+
+      <div class="setup-actions">
+        <button class="secondary-btn" type="button" data-connector-back>Back</button>
+        <button class="primary-btn setup-next-btn setup-complete-btn" type="submit" name="setup_action" value="complete" data-progress-btn>
+          <span class="setup-next-btn__label">Save connectors</span>
+        </button>
+      </div>
+    </form>
+  </section>
+</section>
+{% endblock page_content %}
+
+{% block page_js %}
+<script>
+  (function () {
+    const form = document.querySelector('[data-connector-form-root]');
+    if (!form) return;
+
+    const connectorHome = form.querySelector('[data-connector-home]');
+    const connectorPanel = form.querySelector('[data-connector-panel]');
+    const connectorTitle = form.querySelector('[data-connector-title]');
+    const backButton = form.querySelector('[data-connector-back]');
+    const completeButton = form.querySelector('.setup-complete-btn');
+    const connectorButtons = form.querySelectorAll('[data-connector-open]');
+    const connectorForms = form.querySelectorAll('[data-connector-form]');
+    const microsoftTenantInput = form.querySelector('input[name="microsoft_tenant_id"]');
+    const microsoftClientIdInput = form.querySelector('input[name="microsoft_client_id"]');
+    const microsoftClientSecretInput = form.querySelector('input[name="microsoft_client_secret"]');
+    const microsoftTestButton = form.querySelector('[data-ms-test-btn]');
+    const githubClientIdInput = form.querySelector('input[name="github_client_id"]');
+    const githubClientSecretInput = form.querySelector('input[name="github_client_secret"]');
+    const githubTestButton = form.querySelector('[data-gh-test-btn]');
+
+    const connectorTitles = {
+      openai: 'OpenAI connector',
+      microsoft: 'Microsoft Entra connector',
+      github: 'GitHub connector',
+      twilio: 'Twilio connector'
+    };
+
+    const showConnectorPanel = (connectorKey) => {
+      connectorHome?.classList.add('d-none');
+      connectorPanel?.classList.remove('d-none');
+      completeButton?.classList.add('d-none');
+      if (connectorTitle) {
+        connectorTitle.textContent = connectorTitles[connectorKey] || 'Connector setup';
+      }
+      connectorForms.forEach((panel) => {
+        const shouldShow = panel.getAttribute('data-connector-form') === connectorKey;
+        panel.classList.toggle('d-none', !shouldShow);
+      });
+      if (connectorKey === 'microsoft') updateMicrosoftTestButton();
+      if (connectorKey === 'github') updateGithubTestButton();
+    };
+
+    const showConnectorHome = () => {
+      connectorHome?.classList.remove('d-none');
+      connectorPanel?.classList.add('d-none');
+      completeButton?.classList.remove('d-none');
+      connectorForms.forEach((panel) => panel.classList.add('d-none'));
+    };
+
+    const updateMicrosoftTestButton = () => {
+      if (!microsoftTestButton) return;
+      const tenant = (microsoftTenantInput?.value || '').trim();
+      const clientId = (microsoftClientIdInput?.value || '').trim();
+      const clientSecret = (microsoftClientSecretInput?.value || '').trim();
+      microsoftTestButton.classList.toggle('d-none', !(tenant && clientId && clientSecret));
+    };
+
+    const updateGithubTestButton = () => {
+      if (!githubTestButton) return;
+      const clientId = (githubClientIdInput?.value || '').trim();
+      const clientSecret = (githubClientSecretInput?.value || '').trim();
+      githubTestButton.classList.toggle('d-none', !(clientId && clientSecret));
+    };
+
+    backButton?.addEventListener('click', showConnectorHome);
+    connectorButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const connectorKey = button.getAttribute('data-connector-open');
+        if (connectorKey) {
+          showConnectorPanel(connectorKey);
+        }
+      });
+    });
+
+    [microsoftTenantInput, microsoftClientIdInput, microsoftClientSecretInput].forEach((input) => {
+      input?.addEventListener('input', updateMicrosoftTestButton);
+    });
+    [githubClientIdInput, githubClientSecretInput].forEach((input) => {
+      input?.addEventListener('input', updateGithubTestButton);
+    });
+
+    showConnectorHome();
+    updateMicrosoftTestButton();
+    updateGithubTestButton();
+  })();
+</script>
+{% endblock page_js %}

@@ -1,0 +1,10 @@
+Django==6.0.2
+django-allauth==65.14.3
+python-dotenv==1.2.1
+cryptography==46.0.5
+uvicorn==0.41.0
+wsproto==1.2.0
+requests==2.32.5
+fastapi==0.118.1
+mcp==1.20.0
+chromadb==1.1.1

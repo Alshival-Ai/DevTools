@@ -1,0 +1,63 @@
+{% extends 'vertical.html' %}
+
+{% block title %}Alshival Admin{% endblock title %}
+
+{% block page_content %}
+<section class="settings-page">
+  <div class="card settings-header">
+    <h1>Alshival Admin</h1>
+    <p>Platform-wide controls for runtime behavior and maintenance operations.</p>
+  </div>
+
+  {% if messages %}
+    {% for message in messages %}
+      <div class="team-status team-status-{{ message.tags|default:'info' }}">{{ message }}</div>
+    {% endfor %}
+  {% endif %}
+
+  <section class="table-wrap settings-panel">
+    <h3>Global Runtime Controls</h3>
+    <p>These controls affect every workspace and user.</p>
+    <form method="post" action="{% url 'alshival_admin' %}">
+      {% csrf_token %}
+      <div class="settings-form-grid">
+        <label class="settings-field settings-field-full">
+          <span>Alshival default model</span>
+          <input type="text" name="default_model" value="{{ default_model }}" placeholder="gpt-4.1-mini" />
+          <small class="field-help">Used as the platform default model selection.</small>
+        </label>
+
+        <label class="settings-field settings-field-full">
+          <span>
+            <input type="checkbox" name="monitoring_enabled" value="1" {% if monitoring_enabled %}checked{% endif %} />
+            Enable global resource monitoring
+          </span>
+          <small class="field-help">When disabled, background and manual health checks are skipped globally.</small>
+        </label>
+
+        <label class="settings-field settings-field-full">
+          <span>
+            <input type="checkbox" name="maintenance_mode" value="1" {% if maintenance_mode %}checked{% endif %} />
+            Enable maintenance mode banner state
+          </span>
+          <small class="field-help">Use this to signal temporary platform maintenance operations.</small>
+        </label>
+
+        <label class="settings-field settings-field-full">
+          <span>Maintenance message</span>
+          <input
+            type="text"
+            name="maintenance_message"
+            value="{{ maintenance_message }}"
+            maxlength="255"
+            placeholder="Scheduled maintenance in progress. Monitoring is temporarily paused."
+          />
+        </label>
+      </div>
+      <div class="table-actions">
+        <button class="primary-btn" type="submit">Save admin settings</button>
+      </div>
+    </form>
+  </section>
+</section>
+{% endblock page_content %}

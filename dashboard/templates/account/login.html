@@ -1,4 +1,5 @@
 {% extends 'base.html' %}
+{% load static %}
 
 {% block title %}Sign in{% endblock title %}
 
@@ -6,7 +7,9 @@
 <div class="auth-shell">
   <section class="auth-card auth-card-split">
     <div class="auth-panel">
-      <div class="brand-mark">F</div>
+      <div class="auth-brand">
+        <img class="auth-brand__img" src="{% static 'img/branding/alshival-logo-469x317.png' %}" alt="Alshival wordmark" />
+      </div>
       <h1>Welcome back</h1>
       <p>Sign in to coordinate deployments, incidents, and team workflows.</p>
       <div class="auth-panel-stats">
@@ -25,7 +28,7 @@
     <div class="auth-form-wrap">
       <div class="auth-header">
         <div>
-          <h2>Sign in to Fefe</h2>
+          <h2>Sign in to Alshival</h2>
           <p>Use your work credentials to continue.</p>
         </div>
       </div>
@@ -56,7 +59,9 @@
           <a class="text-link" href="{% url 'account_reset_password' %}">Forgot password?</a>
         </div>
 
-        <button class="primary-btn full" type="submit">Sign in</button>
+        <button class="primary-btn setup-next-btn login-signin-btn" type="submit" data-login-jiggle-btn>
+          <span class="setup-next-btn__label">Sign in</span>
+        </button>
       </form>
 
       <div class="auth-footer">
@@ -67,3 +72,30 @@
   </section>
 </div>
 {% endblock content %}
+
+{% block page_js %}
+<script>
+  (function () {
+    const button = document.querySelector('[data-login-jiggle-btn]');
+    if (!button) return;
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    const scheduleJiggle = () => {
+      if (prefersReducedMotion) return;
+      const delay = 500 + Math.random() * 4500;
+      window.setTimeout(() => {
+        button.classList.add('is-jiggling');
+      }, delay);
+    };
+
+    button.addEventListener('animationend', (event) => {
+      if (event.animationName === 'chatbot-jiggle') {
+        button.classList.remove('is-jiggling');
+        scheduleJiggle();
+      }
+    });
+
+    scheduleJiggle();
+  })();
+</script>
+{% endblock page_js %}

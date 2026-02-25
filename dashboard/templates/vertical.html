@@ -3,6 +3,7 @@
 {% block content %}
 <div class="app-shell">
   {% include 'partials/topbar.html' %}
+  <button class="sidenav-backdrop" type="button" aria-label="Close sidebar" data-sidebar-backdrop></button>
   {% include 'partials/sidenav.html' %}
   <main class="app-content main-panel">
     <canvas id="landing-page-matrix" class="landing-page-matrix" aria-hidden="true"></canvas>

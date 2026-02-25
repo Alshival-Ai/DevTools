@@ -5,185 +5,463 @@
 {% block page_content %}
 <section class="hero">
   <div>
-    <h1>Team directory</h1>
-    <p>Manage teams, memberships, user access levels, and onboarding invites.</p>
+    <h1>Team Directory</h1>
+    <p>Manage users, teams, and feature access from one administration workspace.</p>
     <div class="hero-actions">
-      <button class="primary-btn" type="button" data-modal-open="team-create">Create team</button>
+      <button class="primary-btn" type="button" data-modal-open="user-create">Create account</button>
       <button class="secondary-btn" type="button" data-modal-open="user-invite">Send invite</button>
-    </div>
-  </div>
-  <div class="hero-card">
-    <h3>Admin controls</h3>
-    <div class="metric-row">
-      <div>
-        <div class="metric-value">{{ teams|length }}</div>
-        <div class="metric-label">Teams</div>
-      </div>
-      <div>
-        <div class="metric-value">{{ users|length }}</div>
-        <div class="metric-label">Users</div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section class="table-wrap">
-  <div class="team-tabs">
-    <a class="team-tab{% if active_tab == 'teams' %} active{% endif %}" href="{% url 'team_directory' %}?tab=teams">Teams</a>
-    <a class="team-tab{% if active_tab == 'users' %} active{% endif %}" href="{% url 'team_directory' %}?tab=users">Users</a>
-  </div>
-  {% if status_message %}
-  <div class="team-status team-status-{{ status_tone }}">{{ status_message }}</div>
-  {% endif %}
-</section>
-
-{% if active_tab == 'teams' %}
-<section class="table-wrap">
-  <div class="table-header">
-    <h3>Teams</h3>
-    <div class="table-actions">
       <button class="ghost-btn" type="button" data-modal-open="team-create">Create team</button>
     </div>
   </div>
-  <table>
-    <thead>
-      <tr>
-        <th>Team</th>
-        <th>Members</th>
-        <th class="table-actions-col">Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% if teams %}
-        {% for team in teams %}
-        <tr>
-          <td>
-            <strong>{{ team.name }}</strong>
-            <div class="text-muted small">{{ team.user_set.count }} member{{ team.user_set.count|pluralize }}</div>
-          </td>
-          <td>
-            {% if team.user_set.all %}
-            <div class="team-member-stack">
-              {% for member in team.user_set.all %}
-              <div class="team-member-row">
-                <span>{{ member.username }}</span>
-                <form method="post" action="{% url 'team_directory_remove_team_member' team.id member.id %}" class="inline-form">
-                  {% csrf_token %}
-                  <button class="icon-btn icon-btn-small danger" type="submit">Remove</button>
-                </form>
-              </div>
-              {% endfor %}
-            </div>
-            {% else %}
-            <span class="text-muted">No members</span>
-            {% endif %}
-          </td>
-          <td class="row-actions">
-            <button
-              class="icon-btn icon-btn-small"
-              type="button"
-              data-modal-open="team-member"
-              data-team-id="{{ team.id }}"
-              data-team-name="{{ team.name|escape }}">
-              Add user
-            </button>
-            <button
-              class="icon-btn icon-btn-small"
-              type="button"
-              data-modal-open="team-rename"
-              data-team-id="{{ team.id }}"
-              data-team-name="{{ team.name|escape }}">
-              Rename
-            </button>
-            <form method="post" action="{% url 'team_directory_delete_team' team.id %}" class="inline-form" onsubmit="return confirm('Delete this team?');">
-              {% csrf_token %}
-              <button class="icon-btn icon-btn-small danger" type="submit">Delete</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      {% else %}
-        <tr>
-          <td colspan="3" class="text-muted">No teams created yet.</td>
-        </tr>
-      {% endif %}
-    </tbody>
-  </table>
+  <div class="hero-card">
+    <h3>Directory Overview</h3>
+    <div class="metric-row">
+      <div>
+        <div class="metric-value">{{ user_rows|length }}</div>
+        <div class="metric-label">Users</div>
+      </div>
+      <div>
+        <div class="metric-value">{{ team_rows|length }}</div>
+        <div class="metric-label">Teams</div>
+      </div>
+      <div>
+        <div class="metric-value">{{ available_features|length }}</div>
+        <div class="metric-label">Feature Gates</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+{% if status_message %}
+<section class="table-wrap">
+  <div class="team-status team-status-{{ status_tone }}">{{ status_message }}</div>
 </section>
 {% endif %}
 
-{% if active_tab == 'users' %}
 <section class="table-wrap">
-  <div class="table-header">
-    <h3>Users</h3>
-    <div class="table-actions">
-      <button class="ghost-btn" type="button" data-modal-open="user-invite">Send invite</button>
-    </div>
+  <div class="team-tabs">
+    <a class="team-tab{% if active_tab == 'users' %} active{% endif %}" href="{% url 'team_directory' %}?tab=users{% if selected_user_id %}&user={{ selected_user_id }}{% endif %}">Manage Users</a>
+    <a class="team-tab{% if active_tab == 'teams' %} active{% endif %}" href="{% url 'team_directory' %}?tab=teams{% if selected_team_id %}&team={{ selected_team_id }}{% endif %}">Manage Teams</a>
   </div>
-  <table>
-    <thead>
-      <tr>
-        <th>User</th>
-        <th>Email</th>
-        <th>Teams</th>
-        <th>Access</th>
-        <th class="table-actions-col">Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% if users %}
-        {% for user_item in users %}
-        <tr>
-          <td>
-            <strong>{{ user_item.username }}</strong>
-            {% if not user_item.is_active %}
-            <div class="text-muted small">Inactive</div>
-            {% endif %}
-          </td>
-          <td>{{ user_item.email|default:'—' }}</td>
-          <td>
-            {% if user_item.groups.all %}
-              {% for group in user_item.groups.all %}
-              <span class="status info">{{ group.name }}</span>
-              {% endfor %}
-            {% else %}
-              <span class="text-muted">No teams</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if user_item.is_superuser %}
-            <span class="status warning">Platform Admin</span>
-            {% endif %}
-            {% if user_item.is_staff and not user_item.is_superuser %}
-            <span class="status info">Operations Staff</span>
-            {% endif %}
-            {% if not user_item.is_staff and not user_item.is_superuser %}
-            <span class="status success">Standard User</span>
-            {% endif %}
-          </td>
-          <td class="row-actions">
-            <button
-              class="icon-btn icon-btn-small"
-              type="button"
-              data-modal-open="user-access"
-              data-user-id="{{ user_item.id }}"
-              data-user-name="{{ user_item.username|escape }}"
-              data-user-is-staff="{% if user_item.is_staff %}1{% else %}0{% endif %}"
-              data-user-is-super="{% if user_item.is_superuser %}1{% else %}0{% endif %}">
-              Edit access
-            </button>
-          </td>
-        </tr>
-        {% endfor %}
+</section>
+
+{% if active_tab == 'users' %}
+<section class="directory-shell">
+  <aside class="card directory-users-panel">
+    <div class="directory-users-toolbar">
+      <h3>Users</h3>
+      <div class="table-actions">
+        <button class="icon-btn" type="button" data-modal-open="user-create">New</button>
+        <button class="icon-btn" type="button" data-modal-open="user-invite">Invite</button>
+      </div>
+    </div>
+    <label class="settings-field">
+      <span>Search</span>
+      <input type="search" placeholder="Username, email, team" data-directory-search />
+    </label>
+    <div class="directory-users-list" data-directory-users-list>
+      {% for user_item in user_rows %}
+      <button
+        class="directory-user-row{% if selected_user_id == user_item.id %} is-active{% endif %}"
+        type="button"
+        data-directory-user-row
+        data-user-id="{{ user_item.id }}"
+        data-user-username="{{ user_item.username|escape }}"
+        data-user-email="{{ user_item.email|escape }}"
+        data-user-active="{% if user_item.is_active %}1{% else %}0{% endif %}"
+        data-user-staff="{% if user_item.is_staff %}1{% else %}0{% endif %}"
+        data-user-super="{% if user_item.is_superuser %}1{% else %}0{% endif %}"
+        data-user-role-label="{{ user_item.role_label|escape }}"
+        data-user-role-tone="{{ user_item.role_tone|escape }}"
+        data-user-teams="{{ user_item.team_names|join:'|'|escape }}"
+        data-user-features="{{ user_item.feature_keys|join:'|'|escape }}"
+        data-user-joined="{{ user_item.joined_display|escape }}"
+        data-user-last-login="{{ user_item.last_login_display|escape }}"
+      >
+        <div class="directory-user-row-top">
+          <strong>{{ user_item.username }}</strong>
+          {% if user_item.is_active %}
+          <span class="status success">Active</span>
+          {% else %}
+          <span class="status warning">Inactive</span>
+          {% endif %}
+        </div>
+        <div class="text-muted small">{{ user_item.email|default:'No email' }}</div>
+        <div class="directory-mini-tags">
+          <span class="status {{ user_item.role_tone }}">{{ user_item.role_label }}</span>
+          {% if user_item.feature_keys %}
+          <span class="status info">{{ user_item.feature_keys|length }} feature{{ user_item.feature_keys|length|pluralize }}</span>
+          {% endif %}
+        </div>
+      </button>
+      {% empty %}
+      <div class="directory-empty">No users found.</div>
+      {% endfor %}
+      <div class="directory-empty d-none" data-directory-no-results>No users match your search.</div>
+    </div>
+  </aside>
+
+  <section class="card directory-detail-panel" data-directory-detail-panel>
+    {% if selected_user %}
+    <div class="directory-detail-head">
+      <div>
+        <h2 data-detail-username>{{ selected_user.username }}</h2>
+        <p data-detail-email>{{ selected_user.email|default:'No email configured' }}</p>
+      </div>
+      <div class="table-actions">
+        <button class="secondary-btn" type="button" data-modal-open="user-edit" data-directory-edit-btn>Edit user</button>
+        <button class="icon-btn danger" type="button" data-modal-open="user-delete" data-directory-delete-btn>Delete</button>
+      </div>
+    </div>
+
+    <div class="directory-badge-row">
+      <span class="status {{ selected_user.role_tone }}" data-detail-role>{{ selected_user.role_label }}</span>
+      {% if selected_user.is_active %}
+      <span class="status success" data-detail-active>Active account</span>
       {% else %}
-        <tr>
-          <td colspan="5" class="text-muted">No users found.</td>
-        </tr>
+      <span class="status warning" data-detail-active>Inactive account</span>
       {% endif %}
-    </tbody>
-  </table>
+    </div>
+
+    <div class="directory-meta-grid">
+      <article class="directory-meta-card">
+        <h4>Joined</h4>
+        <p data-detail-joined>{{ selected_user.joined_display }}</p>
+      </article>
+      <article class="directory-meta-card">
+        <h4>Last login</h4>
+        <p data-detail-last-login>{{ selected_user.last_login_display }}</p>
+      </article>
+      <article class="directory-meta-card">
+        <h4>Access level</h4>
+        <p data-detail-access>
+          {% if selected_user.is_superuser %}
+          Platform Admin
+          {% elif selected_user.is_staff %}
+          Operations Staff
+          {% else %}
+          Standard User
+          {% endif %}
+        </p>
+      </article>
+    </div>
+
+    <section class="directory-section">
+      <div class="directory-section-head">
+        <h4>Teams</h4>
+      </div>
+      <div class="directory-chip-list" data-detail-teams>
+        {% if selected_user.team_names %}
+          {% for team_name in selected_user.team_names %}
+          <span class="status info">{{ team_name }}</span>
+          {% endfor %}
+        {% else %}
+          <span class="text-muted">No teams assigned.</span>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="directory-section">
+      <div class="directory-section-head">
+        <h4>Feature Access</h4>
+      </div>
+      <div class="directory-chip-list" data-detail-features>
+        {% if selected_user.feature_keys %}
+          {% for feature in available_features %}
+            {% if feature.key in selected_user.feature_keys %}
+            <span class="status success">{{ feature.label }}</span>
+            {% endif %}
+          {% endfor %}
+        {% else %}
+          <span class="text-muted">No feature flags enabled.</span>
+        {% endif %}
+      </div>
+    </section>
+    {% else %}
+    <div class="directory-empty-state">
+      <h3>No users available</h3>
+      <p>Create an account to begin managing access.</p>
+      <button class="primary-btn" type="button" data-modal-open="user-create">Create account</button>
+    </div>
+    {% endif %}
+  </section>
 </section>
 {% endif %}
+
+{% if active_tab == 'teams' %}
+<section class="directory-shell">
+  <aside class="card directory-users-panel">
+    <div class="directory-users-toolbar">
+      <h3>Teams</h3>
+      <div class="table-actions">
+        <button class="icon-btn" type="button" data-modal-open="team-create">New team</button>
+      </div>
+    </div>
+    <label class="settings-field">
+      <span>Search</span>
+      <input type="search" placeholder="Team name or member" data-team-search />
+    </label>
+    <div class="directory-users-list">
+      {% for team_item in team_rows %}
+      <button
+        class="directory-user-row{% if selected_team_id == team_item.id %} is-active{% endif %}"
+        type="button"
+        data-team-row
+        data-team-id="{{ team_item.id }}"
+        data-team-name="{{ team_item.name|escape }}"
+        data-team-members="{{ team_item.member_ids|join:'|' }}"
+        data-team-member-names="{{ team_item.member_names|join:'|'|escape }}"
+      >
+        <div class="directory-user-row-top">
+          <strong>{{ team_item.name }}</strong>
+          <span class="status info">{{ team_item.member_count }} member{{ team_item.member_count|pluralize }}</span>
+        </div>
+        <div class="text-muted small">
+          {% if team_item.member_names %}
+            {{ team_item.member_names|join:', ' }}
+          {% else %}
+            No members assigned
+          {% endif %}
+        </div>
+      </button>
+      {% empty %}
+      <div class="directory-empty">No teams found.</div>
+      {% endfor %}
+      <div class="directory-empty d-none" data-team-no-results>No teams match your search.</div>
+    </div>
+  </aside>
+
+  <section class="card directory-detail-panel">
+    {% if selected_team %}
+    <div class="directory-detail-head">
+      <div>
+        <h2 data-team-detail-name>{{ selected_team.name }}</h2>
+        <p class="text-muted">Manage membership assignments for this team.</p>
+      </div>
+      <div class="table-actions">
+        <button
+          class="secondary-btn"
+          type="button"
+          data-modal-open="team-rename"
+          data-team-rename-btn
+          data-team-id="{{ selected_team.id }}"
+          data-team-name="{{ selected_team.name|escape }}">
+          Rename team
+        </button>
+        <form method="post" data-team-delete-form action="{% url 'team_directory_delete_team' selected_team.id %}" class="inline-form" onsubmit="return confirm('Delete this team?');">
+          {% csrf_token %}
+          <button class="icon-btn danger" type="submit">Delete</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="directory-badge-row">
+      <span class="status info" data-team-detail-member-count>{{ selected_team.member_count }} member{{ selected_team.member_count|pluralize }}</span>
+    </div>
+
+    <section class="directory-section">
+      <div class="directory-section-head">
+        <h4>Current Members</h4>
+      </div>
+      <div class="directory-chip-list" data-team-detail-member-list>
+        {% if selected_team.member_names %}
+          {% for member_name in selected_team.member_names %}
+          <span class="status success">{{ member_name }}</span>
+          {% endfor %}
+        {% else %}
+          <span class="text-muted">No members assigned.</span>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="directory-section">
+      <div class="directory-section-head">
+        <h4>Assign Members</h4>
+      </div>
+      <label class="settings-field">
+        <span>Filter users</span>
+        <input type="search" placeholder="Filter by username or email" data-team-member-filter />
+      </label>
+      <form method="post" action="{% url 'team_directory_update_team_members' selected_team.id %}" data-team-members-form class="modal-form">
+        {% csrf_token %}
+        <div class="team-member-picker" data-team-member-picker>
+          {% for user_item in user_rows %}
+          <label class="team-member-option" data-team-member-option data-member-search="{{ user_item.username|lower }} {{ user_item.email|lower }}">
+            <input type="checkbox" name="user_ids" value="{{ user_item.id }}" {% if user_item.id in selected_team.member_ids %}checked{% endif %} />
+            <span>
+              <strong>{{ user_item.username }}</strong>
+              <small class="text-muted">{{ user_item.email|default:'No email' }}</small>
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+        <div class="modal-actions">
+          <button class="primary-btn" type="submit">Save team members</button>
+        </div>
+      </form>
+    </section>
+    {% else %}
+    <div class="directory-empty-state">
+      <h3>No teams available</h3>
+      <p>Create a team to start assigning members.</p>
+      <button class="primary-btn" type="button" data-modal-open="team-create">Create team</button>
+    </div>
+    {% endif %}
+  </section>
+</section>
+{% endif %}
+
+<div class="modal" data-modal="user-create" aria-hidden="true">
+  <div class="modal-overlay" data-modal-close></div>
+  <div class="modal-content" role="dialog" aria-modal="true" aria-label="Create user account">
+    <div class="modal-header">
+      <h3>Create account</h3>
+      <button class="icon-btn" type="button" data-modal-close>✕</button>
+    </div>
+    <form method="post" action="{% url 'team_directory_create_user' %}" data-user-create-form class="modal-form">
+      {% csrf_token %}
+      <label>
+        <span>Username</span>
+        <input type="text" name="username" placeholder="jdoe" required />
+      </label>
+      <label>
+        <span>Email</span>
+        <input type="email" name="email" placeholder="jdoe@example.com" />
+      </label>
+      <label>
+        <span>Password</span>
+        <input type="password" name="password" required />
+      </label>
+      <label>
+        <span>Confirm password</span>
+        <input type="password" name="password_confirm" required />
+      </label>
+      <label>
+        <span>Teams</span>
+        <select name="team_names" multiple size="5">
+          {% for team in teams %}
+          <option value="{{ team.name }}">{{ team.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <fieldset class="modal-fieldset">
+        <legend>Feature access</legend>
+        <div class="directory-feature-grid">
+          {% for feature in available_features %}
+          <label class="checkbox">
+            <input type="checkbox" name="feature_keys" value="{{ feature.key }}" />
+            <span>
+              <strong>{{ feature.label }}</strong>
+              <small class="text-muted">{{ feature.description }}</small>
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+      </fieldset>
+      <label class="checkbox">
+        <input type="checkbox" name="is_active" value="1" checked />
+        <span>Active account</span>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="is_staff" value="1" />
+        <span>Operations Staff</span>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="is_superuser" value="1" />
+        <span>Platform Admin (Superuser)</span>
+      </label>
+      <div class="modal-actions">
+        <button class="ghost-btn" type="button" data-modal-close>Cancel</button>
+        <button class="primary-btn" type="submit">Create account</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal" data-modal="user-edit" aria-hidden="true">
+  <div class="modal-overlay" data-modal-close></div>
+  <div class="modal-content" role="dialog" aria-modal="true" aria-label="Edit user">
+    <div class="modal-header">
+      <h3 data-user-edit-title>Edit user</h3>
+      <button class="icon-btn" type="button" data-modal-close>✕</button>
+    </div>
+    <form method="post" data-user-edit-form class="modal-form">
+      {% csrf_token %}
+      <label>
+        <span>Username</span>
+        <input type="text" name="username" required />
+      </label>
+      <label>
+        <span>Email</span>
+        <input type="email" name="email" />
+      </label>
+      <label>
+        <span>New password (optional)</span>
+        <input type="password" name="password" />
+      </label>
+      <label>
+        <span>Confirm new password</span>
+        <input type="password" name="password_confirm" />
+      </label>
+      <label>
+        <span>Teams</span>
+        <select name="team_names" multiple size="5">
+          {% for team in teams %}
+          <option value="{{ team.name }}">{{ team.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <fieldset class="modal-fieldset">
+        <legend>Feature access</legend>
+        <div class="directory-feature-grid">
+          {% for feature in available_features %}
+          <label class="checkbox">
+            <input type="checkbox" name="feature_keys" value="{{ feature.key }}" />
+            <span>
+              <strong>{{ feature.label }}</strong>
+              <small class="text-muted">{{ feature.description }}</small>
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+      </fieldset>
+      <label class="checkbox">
+        <input type="checkbox" name="is_active" value="1" />
+        <span>Active account</span>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="is_staff" value="1" />
+        <span>Operations Staff</span>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="is_superuser" value="1" />
+        <span>Platform Admin (Superuser)</span>
+      </label>
+      <div class="modal-actions">
+        <button class="ghost-btn" type="button" data-modal-close>Cancel</button>
+        <button class="primary-btn" type="submit">Save changes</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal" data-modal="user-delete" aria-hidden="true">
+  <div class="modal-overlay" data-modal-close></div>
+  <div class="modal-content" role="dialog" aria-modal="true" aria-label="Delete user">
+    <div class="modal-header">
+      <h3>Delete user</h3>
+      <button class="icon-btn" type="button" data-modal-close>✕</button>
+    </div>
+    <form method="post" data-user-delete-form class="modal-form">
+      {% csrf_token %}
+      <p>Delete <strong data-user-delete-name></strong>? This action cannot be undone.</p>
+      <div class="modal-actions">
+        <button class="ghost-btn" type="button" data-modal-close>Cancel</button>
+        <button class="icon-btn danger" type="submit">Delete user</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <div class="modal" data-modal="team-create" aria-hidden="true">
   <div class="modal-overlay" data-modal-close></div>
@@ -227,57 +505,6 @@
   </div>
 </div>
 
-<div class="modal" data-modal="team-member" aria-hidden="true">
-  <div class="modal-overlay" data-modal-close></div>
-  <div class="modal-content" role="dialog" aria-modal="true" aria-label="Add team member">
-    <div class="modal-header">
-      <h3 data-team-member-title>Add team member</h3>
-      <button class="icon-btn" type="button" data-modal-close>✕</button>
-    </div>
-    <form method="post" data-team-member-form class="modal-form">
-      {% csrf_token %}
-      <label>
-        <span>User</span>
-        <select name="user_id" required>
-          <option value="">Select user</option>
-          {% for user_item in users %}
-          <option value="{{ user_item.id }}">{{ user_item.username }}{% if user_item.email %} ({{ user_item.email }}){% endif %}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <div class="modal-actions">
-        <button class="ghost-btn" type="button" data-modal-close>Cancel</button>
-        <button class="primary-btn" type="submit">Add user</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<div class="modal" data-modal="user-access" aria-hidden="true">
-  <div class="modal-overlay" data-modal-close></div>
-  <div class="modal-content" role="dialog" aria-modal="true" aria-label="Edit user access">
-    <div class="modal-header">
-      <h3 data-user-access-title>Edit user access</h3>
-      <button class="icon-btn" type="button" data-modal-close>✕</button>
-    </div>
-    <form method="post" data-user-access-form class="modal-form">
-      {% csrf_token %}
-      <label class="checkbox">
-        <input type="checkbox" name="is_staff" value="1" />
-        <span>Operations Staff</span>
-      </label>
-      <label class="checkbox">
-        <input type="checkbox" name="is_superuser" value="1" />
-        <span>Platform Admin (Superuser)</span>
-      </label>
-      <div class="modal-actions">
-        <button class="ghost-btn" type="button" data-modal-close>Cancel</button>
-        <button class="primary-btn" type="submit">Save access</button>
-      </div>
-    </form>
-  </div>
-</div>
-
 <div class="modal" data-modal="user-invite" aria-hidden="true">
   <div class="modal-overlay" data-modal-close></div>
   <div class="modal-content" role="dialog" aria-modal="true" aria-label="Send invite">
@@ -294,6 +521,32 @@
       <label>
         <span>Email</span>
         <input type="email" name="email" placeholder="jdoe@example.com" required />
+      </label>
+      <label>
+        <span>Teams</span>
+        <select name="team_names" multiple size="5">
+          {% for team in teams %}
+          <option value="{{ team.name }}">{{ team.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <fieldset class="modal-fieldset">
+        <legend>Feature access</legend>
+        <div class="directory-feature-grid">
+          {% for feature in available_features %}
+          <label class="checkbox">
+            <input type="checkbox" name="feature_keys" value="{{ feature.key }}" />
+            <span>
+              <strong>{{ feature.label }}</strong>
+              <small class="text-muted">{{ feature.description }}</small>
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+      </fieldset>
+      <label class="checkbox">
+        <input type="checkbox" name="is_active" value="1" checked />
+        <span>Active account</span>
       </label>
       <label class="checkbox">
         <input type="checkbox" name="is_staff" value="1" />
@@ -314,20 +567,42 @@
 
 <script>
   (function () {
-    const openButtons = document.querySelectorAll('[data-modal-open]');
-    const closeButtons = document.querySelectorAll('[data-modal-close]');
-    const renameForm = document.querySelector('[data-team-rename-form]');
-    const memberForm = document.querySelector('[data-team-member-form]');
-    const memberTitle = document.querySelector('[data-team-member-title]');
-    const userAccessForm = document.querySelector('[data-user-access-form]');
-    const userAccessTitle = document.querySelector('[data-user-access-title]');
-    const inviteForm = document.querySelector('[data-user-invite-form]');
+    const parseList = (value) => {
+      return (value || '')
+        .split('|')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    };
 
-    const openModal = (name) => {
-      const modal = document.querySelector(`[data-modal="${name}"]`);
-      if (!modal) return;
-      modal.classList.add('is-active');
-      modal.setAttribute('aria-hidden', 'false');
+    const featureLabelMap = {
+      {% for feature in available_features %}
+      '{{ feature.key|escapejs }}': '{{ feature.label|escapejs }}',
+      {% endfor %}
+    };
+
+    const setSelectValues = (select, values) => {
+      if (!select) return;
+      const selected = new Set(values || []);
+      Array.from(select.options || []).forEach((option) => {
+        option.selected = selected.has(option.value);
+      });
+    };
+
+    const setFeatureValues = (form, values) => {
+      if (!form) return;
+      const selected = new Set(values || []);
+      form.querySelectorAll('input[name="feature_keys"]').forEach((input) => {
+        input.checked = selected.has(input.value);
+      });
+    };
+
+    const renderPills = (container, items, tone, emptyLabel) => {
+      if (!container) return;
+      if (!items.length) {
+        container.innerHTML = `<span class="text-muted">${emptyLabel}</span>`;
+        return;
+      }
+      container.innerHTML = items.map((item) => `<span class="status ${tone}">${item}</span>`).join('');
     };
 
     const closeModal = (modal) => {
@@ -336,51 +611,273 @@
       modal.setAttribute('aria-hidden', 'true');
     };
 
-    openButtons.forEach((button) => {
+    const openModal = (name) => {
+      const modal = document.querySelector(`[data-modal="${name}"]`);
+      if (!modal) return;
+      modal.classList.add('is-active');
+      modal.setAttribute('aria-hidden', 'false');
+    };
+
+    const userRows = Array.from(document.querySelectorAll('[data-directory-user-row]'));
+    const userSearch = document.querySelector('[data-directory-search]');
+    const userNoResults = document.querySelector('[data-directory-no-results]');
+    const detailName = document.querySelector('[data-detail-username]');
+    const detailEmail = document.querySelector('[data-detail-email]');
+    const detailRole = document.querySelector('[data-detail-role]');
+    const detailActive = document.querySelector('[data-detail-active]');
+    const detailJoined = document.querySelector('[data-detail-joined]');
+    const detailLastLogin = document.querySelector('[data-detail-last-login]');
+    const detailAccess = document.querySelector('[data-detail-access]');
+    const detailTeams = document.querySelector('[data-detail-teams]');
+    const detailFeatures = document.querySelector('[data-detail-features]');
+    const editButton = document.querySelector('[data-directory-edit-btn]');
+    const deleteButton = document.querySelector('[data-directory-delete-btn]');
+    const editForm = document.querySelector('[data-user-edit-form]');
+    const editTitle = document.querySelector('[data-user-edit-title]');
+    const deleteForm = document.querySelector('[data-user-delete-form]');
+    const deleteName = document.querySelector('[data-user-delete-name]');
+
+    const applyUserRow = (row) => {
+      if (!row || !detailName) return;
+      const username = row.getAttribute('data-user-username') || '';
+      const email = row.getAttribute('data-user-email') || '';
+      const isActive = row.getAttribute('data-user-active') === '1';
+      const isStaff = row.getAttribute('data-user-staff') === '1';
+      const isSuper = row.getAttribute('data-user-super') === '1';
+      const roleLabel = row.getAttribute('data-user-role-label') || 'Standard User';
+      const roleTone = row.getAttribute('data-user-role-tone') || 'info';
+      const teams = parseList(row.getAttribute('data-user-teams'));
+      const features = parseList(row.getAttribute('data-user-features'));
+      const featureLabels = features.map((item) => featureLabelMap[item] || item);
+      const joined = row.getAttribute('data-user-joined') || '—';
+      const lastLogin = row.getAttribute('data-user-last-login') || '—';
+      const userId = row.getAttribute('data-user-id') || '';
+
+      detailName.textContent = username;
+      if (detailEmail) detailEmail.textContent = email || 'No email configured';
+      if (detailRole) {
+        detailRole.className = `status ${roleTone}`;
+        detailRole.textContent = roleLabel;
+      }
+      if (detailActive) {
+        detailActive.className = `status ${isActive ? 'success' : 'warning'}`;
+        detailActive.textContent = isActive ? 'Active account' : 'Inactive account';
+      }
+      if (detailJoined) detailJoined.textContent = joined || '—';
+      if (detailLastLogin) detailLastLogin.textContent = lastLogin || '—';
+      if (detailAccess) {
+        detailAccess.textContent = isSuper ? 'Platform Admin' : (isStaff ? 'Operations Staff' : 'Standard User');
+      }
+      renderPills(detailTeams, teams, 'info', 'No teams assigned.');
+      renderPills(detailFeatures, featureLabels, 'success', 'No feature flags enabled.');
+
+      if (editButton) editButton.setAttribute('data-user-id', userId);
+      if (deleteButton) deleteButton.setAttribute('data-user-id', userId);
+      if (editForm) {
+        editForm.action = `/team-directory/users/${userId}/update/`;
+        const usernameInput = editForm.querySelector('input[name="username"]');
+        const emailInput = editForm.querySelector('input[name="email"]');
+        const isActiveInput = editForm.querySelector('input[name="is_active"]');
+        const isStaffInput = editForm.querySelector('input[name="is_staff"]');
+        const isSuperInput = editForm.querySelector('input[name="is_superuser"]');
+        const teamSelect = editForm.querySelector('select[name="team_names"]');
+        const passwordInput = editForm.querySelector('input[name="password"]');
+        const passwordConfirmInput = editForm.querySelector('input[name="password_confirm"]');
+
+        if (usernameInput) usernameInput.value = username;
+        if (emailInput) emailInput.value = email;
+        if (isActiveInput) isActiveInput.checked = isActive;
+        if (isStaffInput) isStaffInput.checked = isStaff;
+        if (isSuperInput) isSuperInput.checked = isSuper;
+        if (passwordInput) passwordInput.value = '';
+        if (passwordConfirmInput) passwordConfirmInput.value = '';
+        setSelectValues(teamSelect, teams);
+        setFeatureValues(editForm, features);
+        if (editTitle) editTitle.textContent = `Edit user: ${username}`;
+      }
+      if (deleteForm) deleteForm.action = `/team-directory/users/${userId}/delete/`;
+      if (deleteName) deleteName.textContent = username;
+    };
+
+    const activateUserRow = (row, updateUrl) => {
+      if (!row) return;
+      userRows.forEach((item) => item.classList.remove('is-active'));
+      row.classList.add('is-active');
+      applyUserRow(row);
+      if (updateUrl) {
+        const userId = row.getAttribute('data-user-id');
+        if (!userId) return;
+        const url = new URL(window.location.href);
+        url.searchParams.set('tab', 'users');
+        url.searchParams.set('user', userId);
+        window.history.replaceState({}, '', url.toString());
+      }
+    };
+
+    if (userRows.length) {
+      const initial = userRows.find((row) => row.classList.contains('is-active')) || userRows[0];
+      activateUserRow(initial, false);
+      userRows.forEach((row) => row.addEventListener('click', () => activateUserRow(row, true)));
+    }
+
+    if (userSearch) {
+      userSearch.addEventListener('input', () => {
+        const term = (userSearch.value || '').trim().toLowerCase();
+        let visible = 0;
+        userRows.forEach((row) => {
+          const haystack = [
+            row.getAttribute('data-user-username') || '',
+            row.getAttribute('data-user-email') || '',
+            (row.getAttribute('data-user-teams') || '').split('|').join(' '),
+            (row.getAttribute('data-user-features') || '').split('|').join(' '),
+          ].join(' ').toLowerCase();
+          const show = !term || haystack.includes(term);
+          row.classList.toggle('d-none', !show);
+          if (show) visible += 1;
+        });
+        if (userNoResults) userNoResults.classList.toggle('d-none', visible > 0);
+        const activeVisible = userRows.find((row) => row.classList.contains('is-active') && !row.classList.contains('d-none'));
+        if (!activeVisible) {
+          const nextVisible = userRows.find((row) => !row.classList.contains('d-none'));
+          if (nextVisible) activateUserRow(nextVisible, true);
+        }
+      });
+    }
+
+    const teamRows = Array.from(document.querySelectorAll('[data-team-row]'));
+    const teamSearch = document.querySelector('[data-team-search]');
+    const teamNoResults = document.querySelector('[data-team-no-results]');
+    const teamDetailName = document.querySelector('[data-team-detail-name]');
+    const teamDetailCount = document.querySelector('[data-team-detail-member-count]');
+    const teamDetailMembers = document.querySelector('[data-team-detail-member-list]');
+    const teamMembersForm = document.querySelector('[data-team-members-form]');
+    const teamDeleteForm = document.querySelector('[data-team-delete-form]');
+    const teamRenameButton = document.querySelector('[data-team-rename-btn]');
+    const teamMemberFilter = document.querySelector('[data-team-member-filter]');
+    const teamMemberOptions = Array.from(document.querySelectorAll('[data-team-member-option]'));
+
+    const applyTeamRow = (row) => {
+      if (!row || !teamDetailName) return;
+      const teamId = row.getAttribute('data-team-id') || '';
+      const teamName = row.getAttribute('data-team-name') || '';
+      const memberIds = parseList(row.getAttribute('data-team-members'));
+      const memberNames = parseList(row.getAttribute('data-team-member-names'));
+
+      teamDetailName.textContent = teamName;
+      if (teamDetailCount) {
+        const count = memberIds.length;
+        teamDetailCount.textContent = `${count} member${count === 1 ? '' : 's'}`;
+      }
+      renderPills(teamDetailMembers, memberNames, 'success', 'No members assigned.');
+
+      if (teamMembersForm) {
+        teamMembersForm.action = `/team-directory/teams/${teamId}/members/update/`;
+        const selected = new Set(memberIds);
+        teamMembersForm.querySelectorAll('input[name="user_ids"]').forEach((input) => {
+          input.checked = selected.has(String(input.value));
+        });
+      }
+
+      if (teamDeleteForm) {
+        teamDeleteForm.action = `/team-directory/teams/${teamId}/delete/`;
+      }
+
+      if (teamRenameButton) {
+        teamRenameButton.setAttribute('data-team-id', teamId);
+        teamRenameButton.setAttribute('data-team-name', teamName);
+      }
+    };
+
+    const activateTeamRow = (row, updateUrl) => {
+      if (!row) return;
+      teamRows.forEach((item) => item.classList.remove('is-active'));
+      row.classList.add('is-active');
+      applyTeamRow(row);
+      if (updateUrl) {
+        const teamId = row.getAttribute('data-team-id');
+        if (!teamId) return;
+        const url = new URL(window.location.href);
+        url.searchParams.set('tab', 'teams');
+        url.searchParams.set('team', teamId);
+        window.history.replaceState({}, '', url.toString());
+      }
+    };
+
+    if (teamRows.length) {
+      const initialTeam = teamRows.find((row) => row.classList.contains('is-active')) || teamRows[0];
+      activateTeamRow(initialTeam, false);
+      teamRows.forEach((row) => row.addEventListener('click', () => activateTeamRow(row, true)));
+    }
+
+    if (teamSearch) {
+      teamSearch.addEventListener('input', () => {
+        const term = (teamSearch.value || '').trim().toLowerCase();
+        let visible = 0;
+        teamRows.forEach((row) => {
+          const haystack = [
+            row.getAttribute('data-team-name') || '',
+            (row.getAttribute('data-team-member-names') || '').split('|').join(' '),
+          ].join(' ').toLowerCase();
+          const show = !term || haystack.includes(term);
+          row.classList.toggle('d-none', !show);
+          if (show) visible += 1;
+        });
+        if (teamNoResults) teamNoResults.classList.toggle('d-none', visible > 0);
+        const activeVisible = teamRows.find((row) => row.classList.contains('is-active') && !row.classList.contains('d-none'));
+        if (!activeVisible) {
+          const nextVisible = teamRows.find((row) => !row.classList.contains('d-none'));
+          if (nextVisible) activateTeamRow(nextVisible, true);
+        }
+      });
+    }
+
+    if (teamMemberFilter) {
+      teamMemberFilter.addEventListener('input', () => {
+        const term = (teamMemberFilter.value || '').trim().toLowerCase();
+        teamMemberOptions.forEach((item) => {
+          const haystack = (item.getAttribute('data-member-search') || '').toLowerCase();
+          item.classList.toggle('d-none', !!term && !haystack.includes(term));
+        });
+      });
+    }
+
+    const renameForm = document.querySelector('[data-team-rename-form]');
+    const inviteForm = document.querySelector('[data-user-invite-form]');
+    const createForm = document.querySelector('[data-user-create-form]');
+
+    document.querySelectorAll('[data-modal-open]').forEach((button) => {
       button.addEventListener('click', () => {
         const modalName = button.getAttribute('data-modal-open');
+        if (!modalName) return;
+
         if (modalName === 'team-rename' && renameForm) {
           const teamId = button.getAttribute('data-team-id');
           const teamName = button.getAttribute('data-team-name') || '';
-          renameForm.action = `/team-directory/teams/${teamId}/rename/`;
+          if (teamId) {
+            renameForm.action = `/team-directory/teams/${teamId}/rename/`;
+          }
           const input = renameForm.querySelector('input[name="name"]');
           if (input) input.value = teamName;
         }
-        if (modalName === 'team-member' && memberForm) {
-          const teamId = button.getAttribute('data-team-id');
-          const teamName = button.getAttribute('data-team-name') || '';
-          memberForm.action = `/team-directory/teams/${teamId}/members/add/`;
-          if (memberTitle) {
-            memberTitle.textContent = `Add team member: ${teamName}`;
-          }
-          const userSelect = memberForm.querySelector('select[name="user_id"]');
-          if (userSelect) userSelect.value = '';
+
+        if (modalName === 'user-create' && createForm) {
+          createForm.reset();
+          const isActiveInput = createForm.querySelector('input[name="is_active"]');
+          if (isActiveInput) isActiveInput.checked = true;
         }
-        if (modalName === 'user-access' && userAccessForm) {
-          const userId = button.getAttribute('data-user-id');
-          const userName = button.getAttribute('data-user-name') || '';
-          const isStaff = button.getAttribute('data-user-is-staff') === '1';
-          const isSuper = button.getAttribute('data-user-is-super') === '1';
-          userAccessForm.action = `/team-directory/users/${userId}/permissions/`;
-          if (userAccessTitle) {
-            userAccessTitle.textContent = `Edit user access: ${userName}`;
-          }
-          const staffInput = userAccessForm.querySelector('input[name="is_staff"]');
-          const superInput = userAccessForm.querySelector('input[name="is_superuser"]');
-          if (staffInput) staffInput.checked = isStaff;
-          if (superInput) superInput.checked = isSuper;
-        }
+
         if (modalName === 'user-invite' && inviteForm) {
           inviteForm.reset();
+          const isActiveInput = inviteForm.querySelector('input[name="is_active"]');
+          if (isActiveInput) isActiveInput.checked = true;
         }
+
         openModal(modalName);
       });
     });
 
-    closeButtons.forEach((button) => {
-      button.addEventListener('click', () => {
-        closeModal(button.closest('.modal'));
-      });
+    document.querySelectorAll('[data-modal-close]').forEach((button) => {
+      button.addEventListener('click', () => closeModal(button.closest('.modal')));
     });
 
     document.addEventListener('keydown', (event) => {

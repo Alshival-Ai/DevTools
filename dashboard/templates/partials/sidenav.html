@@ -6,21 +6,19 @@
         <a class="nav-item{% if request.path == '/' %} active{% endif %}" href="{% url 'home' %}">Overview</a>
         <a class="nav-item{% if '/resources/' in request.path %} active{% endif %}" href="{% url 'resources' %}">Resources</a>
         <a class="nav-item" href="#">Incidents</a>
-        <a class="nav-item" href="#">Runbooks</a>
-        <a class="nav-item" href="#">Deployments</a>
+        <a class="nav-item{% if '/wiki/' in request.path %} active{% endif %}" href="{% url 'wiki' %}">Wiki</a>
+        <a class="nav-item{% if request.path == '/settings/' %} active{% endif %}" href="{% url 'app_settings' %}">Settings</a>
       </nav>
     </div>
+    {% if request.user.is_superuser %}
     <div class="sidenav-section">
-      <div class="sidenav-title">Teams</div>
+      <div class="sidenav-title">Admin</div>
       <nav class="sidenav-nav">
-        {% if request.user.is_superuser %}
         <a class="nav-item{% if '/team-directory/' in request.path %} active{% endif %}" href="{% url 'team_directory' %}">Team Directory</a>
-        {% endif %}
-        <a class="nav-item" href="#">Ownership</a>
-        <a class="nav-item" href="#">Service Catalog</a>
-        <a class="nav-item" href="#">On-call</a>
+        <a class="nav-item{% if '/settings/connectors/' in request.path %} active{% endif %}" href="{% url 'connector_settings' %}">Connectors</a>
       </nav>
     </div>
+    {% endif %}
     <div class="sidenav-card">
       <div class="sidenav-card-title">Today's focus</div>
       <p>2 incidents triaged, 5 deploys scheduled, 1 compliance review.</p>

@@ -1,20 +1,29 @@
 import base64
 import hashlib
 import json
+import shutil
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
 
 from django.conf import settings
+from django.contrib.auth.models import Group
+from django.db import transaction
 from django.utils.text import slugify
 from cryptography.fernet import Fernet, InvalidToken
+
+from .api_key_utils import generate_api_key, hash_api_key, key_prefix, key_preview
 
 
 @dataclass
 class ResourceItem:
     id: int
+    resource_uuid: str
     name: str
+    access_scope: str
+    team_names: list[str]
     resource_type: str
     target: str
     address: str
@@ -39,11 +48,48 @@ class ResourceItem:
 
 @dataclass
 class SSHCredentialItem:
-    id: int
+    id: str
     name: str
     scope: str
-    team_name: str
+    team_names: list[str]
     created_at: str
+
+
+@dataclass
+class UserAPIKeyItem:
+    id: int
+    key_type: str
+    name: str
+    resource_uuid: str
+    key_prefix: str
+    created_at: str
+
+
+@dataclass
+class ResourceNoteItem:
+    id: int
+    resource_uuid: str
+    body: str
+    author_user_id: int
+    author_username: str
+    created_at: str
+    attachment_id: int | None
+    attachment_name: str
+    attachment_content_type: str
+    attachment_size: int
+
+
+@dataclass
+class ResourceCheckItem:
+    id: int
+    resource_id: int
+    status: str
+    checked_at: str
+    target: str
+    error: str
+    check_method: str
+    latency_ms: float | None
+    packet_loss_pct: float | None
 
 
 _SSH_KEY_PREFIX = "enc:"
@@ -108,6 +154,294 @@ def _user_db_path(user) -> Path:
     return user_dir / 'member.db'
 
 
+def _user_data_dir(user) -> Path:
+    return _user_db_path(user).parent
+
+
+def _base_user_data_root() -> Path:
+    root = Path(getattr(settings, 'USER_DATA_ROOT', Path(settings.BASE_DIR) / 'var' / 'user_data'))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _base_team_data_root() -> Path:
+    root = Path(getattr(settings, 'TEAM_DATA_ROOT', Path(settings.BASE_DIR) / 'var' / 'team_data'))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _base_global_data_root() -> Path:
+    root = Path(getattr(settings, 'GLOBAL_DATA_ROOT', Path(settings.BASE_DIR) / 'var' / 'global_data'))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _user_owner_dir(user) -> Path:
+    username = user.get_username() or f"user-{user.pk}"
+    safe_username = slugify(username) or f"user-{user.pk}"
+    path = _base_user_data_root() / f"{safe_username}-{user.pk}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _team_owner_dir(team: Group) -> Path:
+    team_name = str(getattr(team, "name", "") or f"team-{getattr(team, 'pk', 0)}")
+    safe_team_name = slugify(team_name) or f"team-{getattr(team, 'pk', 0)}"
+    path = _base_team_data_root() / f"{safe_team_name}-{int(team.pk)}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _global_owner_dir() -> Path:
+    path = _base_global_data_root()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _normalize_resource_owner_scope(raw_scope: str) -> str:
+    normalized = str(raw_scope or "").strip().lower()
+    if normalized in {"team", "global"}:
+        return normalized
+    return "user"
+
+
+def _resolve_owner_from_scope(*, fallback_user, access_scope: str, team_names: list[str] | None):
+    normalized_scope = str(access_scope or "").strip().lower()
+    if normalized_scope == "global" and bool(getattr(fallback_user, "is_superuser", False)):
+        return {"owner_scope": "global", "owner_user": None, "owner_team": None}
+    if normalized_scope == "team":
+        for team_name in team_names or []:
+            resolved_name = str(team_name or "").strip()
+            if not resolved_name:
+                continue
+            team = Group.objects.filter(name=resolved_name).first()
+            if team:
+                return {"owner_scope": "team", "owner_user": None, "owner_team": team}
+    return {"owner_scope": "user", "owner_user": fallback_user, "owner_team": None}
+
+
+def _get_package_owner_record(resource_uuid: str):
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return None
+    from .models import ResourcePackageOwner
+
+    return (
+        ResourcePackageOwner.objects.select_related("owner_user", "owner_team")
+        .filter(resource_uuid=resolved_uuid)
+        .first()
+    )
+
+
+def _ensure_package_owner_record(
+    *,
+    resource_uuid: str,
+    fallback_user=None,
+    access_scope: str = "account",
+    team_names: list[str] | None = None,
+):
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return None
+    from .models import ResourcePackageOwner
+
+    with transaction.atomic():
+        row = (
+            ResourcePackageOwner.objects.select_for_update()
+            .select_related("owner_user", "owner_team")
+            .filter(resource_uuid=resolved_uuid)
+            .first()
+        )
+        if row:
+            return row
+        if fallback_user is None:
+            return None
+        target_owner = _resolve_owner_from_scope(
+            fallback_user=fallback_user,
+            access_scope=access_scope,
+            team_names=team_names,
+        )
+        return ResourcePackageOwner.objects.create(
+            resource_uuid=resolved_uuid,
+            owner_scope=target_owner["owner_scope"],
+            owner_user=target_owner["owner_user"],
+            owner_team=target_owner["owner_team"],
+            created_by=fallback_user,
+            updated_by=fallback_user,
+        )
+
+
+def _owner_root_dir_for_row(row, fallback_user=None) -> Path:
+    scope = _normalize_resource_owner_scope(getattr(row, "owner_scope", "user"))
+    owner_user = getattr(row, "owner_user", None)
+    owner_team = getattr(row, "owner_team", None)
+    if scope == "team" and owner_team is not None:
+        return _team_owner_dir(owner_team)
+    if scope == "global":
+        return _global_owner_dir()
+    if owner_user is not None:
+        return _user_owner_dir(owner_user)
+    if fallback_user is not None:
+        return _user_owner_dir(fallback_user)
+    raise ValueError("resource package user owner is missing")
+
+
+def _resource_data_dir(user, resource_uuid: str, *, create: bool = True) -> Path:
+    resolved_uuid = str(resource_uuid or "").strip().lower()
+    safe_uuid = "".join(ch for ch in resolved_uuid if ch.isalnum() or ch in {"-", "_"})
+    if not safe_uuid:
+        safe_uuid = "unknown-resource"
+    owner_row = _get_package_owner_record(resolved_uuid)
+    if owner_row is None and user is not None:
+        owner_row = _ensure_package_owner_record(
+            resource_uuid=resolved_uuid,
+            fallback_user=user,
+        )
+    if owner_row is not None:
+        base_dir = _owner_root_dir_for_row(owner_row, fallback_user=user)
+    elif user is not None:
+        base_dir = _user_data_dir(user)
+    else:
+        base_dir = _base_global_data_root()
+    path = base_dir / "resources" / safe_uuid
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _resource_db_path(user, resource_uuid: str) -> Path:
+    return _resource_data_dir(user, resource_uuid) / "resource.db"
+
+
+def get_resource_owner_context(user, resource_uuid: str) -> dict[str, Any]:
+    resolved_uuid = str(resource_uuid or "").strip().lower()
+    owner_row = _get_package_owner_record(resolved_uuid)
+    if owner_row is None and user is not None:
+        owner_row = _ensure_package_owner_record(
+            resource_uuid=resolved_uuid,
+            fallback_user=user,
+        )
+    if owner_row is not None:
+        owner_root = _owner_root_dir_for_row(owner_row, fallback_user=user)
+        return {
+            "owner_scope": _normalize_resource_owner_scope(getattr(owner_row, "owner_scope", "user")),
+            "owner_user_id": int(getattr(owner_row, "owner_user_id", 0) or 0),
+            "owner_team_id": int(getattr(owner_row, "owner_team_id", 0) or 0),
+            "owner_root": owner_root,
+            "resource_dir": owner_root / "resources" / (
+                "".join(ch for ch in resolved_uuid if ch.isalnum() or ch in {"-", "_"}) or "unknown-resource"
+            ),
+        }
+    fallback_root = _user_data_dir(user) if user is not None else _base_global_data_root()
+    safe_uuid = "".join(ch for ch in resolved_uuid if ch.isalnum() or ch in {"-", "_"}) or "unknown-resource"
+    return {
+        "owner_scope": "user" if user is not None else "global",
+        "owner_user_id": int(getattr(user, "id", 0) or 0),
+        "owner_team_id": 0,
+        "owner_root": fallback_root,
+        "resource_dir": fallback_root / "resources" / safe_uuid,
+    }
+
+
+def get_resource_knowledge_db_path(user, resource_uuid: str) -> Path:
+    owner_context = get_resource_owner_context(user, resource_uuid)
+    owner_root = Path(owner_context["owner_root"])
+    owner_root.mkdir(parents=True, exist_ok=True)
+    return owner_root / "knowledge.db"
+
+
+def transfer_resource_package(
+    *,
+    actor,
+    resource_uuid: str,
+    access_scope: str,
+    team_names: list[str] | None = None,
+) -> dict[str, str]:
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return {"status": "skipped", "reason": "missing_resource_uuid"}
+    from .models import ResourcePackageOwner
+
+    target_owner = _resolve_owner_from_scope(
+        fallback_user=actor,
+        access_scope=access_scope,
+        team_names=team_names,
+    )
+    with transaction.atomic():
+        row = (
+            ResourcePackageOwner.objects.select_for_update()
+            .select_related("owner_user", "owner_team")
+            .filter(resource_uuid=resolved_uuid)
+            .first()
+        )
+        if row is None:
+            safe_uuid = "".join(ch for ch in resolved_uuid.lower() if ch.isalnum() or ch in {"-", "_"}) or "unknown-resource"
+            legacy_source_dir = _user_data_dir(actor) / "resources" / safe_uuid
+            if target_owner["owner_scope"] == "team" and target_owner["owner_team"] is not None:
+                target_root = _team_owner_dir(target_owner["owner_team"])
+            elif target_owner["owner_scope"] == "global":
+                target_root = _global_owner_dir()
+            elif target_owner["owner_user"] is not None:
+                target_root = _user_owner_dir(target_owner["owner_user"])
+            else:
+                target_root = _user_owner_dir(actor)
+            destination_dir = target_root / "resources" / safe_uuid
+            destination_dir.parent.mkdir(parents=True, exist_ok=True)
+            if legacy_source_dir.exists() and legacy_source_dir != destination_dir:
+                if destination_dir.exists():
+                    shutil.rmtree(destination_dir, ignore_errors=True)
+                shutil.move(str(legacy_source_dir), str(destination_dir))
+            row = ResourcePackageOwner.objects.create(
+                resource_uuid=resolved_uuid,
+                owner_scope=target_owner["owner_scope"],
+                owner_user=target_owner["owner_user"],
+                owner_team=target_owner["owner_team"],
+                created_by=actor,
+                updated_by=actor,
+            )
+            return {"status": "created", "owner_scope": row.owner_scope}
+
+        current_scope = _normalize_resource_owner_scope(row.owner_scope)
+        current_user_id = int(row.owner_user_id or 0)
+        current_team_id = int(row.owner_team_id or 0)
+        target_scope = _normalize_resource_owner_scope(target_owner["owner_scope"])
+        target_user_id = int(getattr(target_owner["owner_user"], "id", 0) or 0)
+        target_team_id = int(getattr(target_owner["owner_team"], "id", 0) or 0)
+        if (
+            current_scope == target_scope
+            and current_user_id == target_user_id
+            and current_team_id == target_team_id
+        ):
+            return {"status": "noop", "owner_scope": current_scope}
+
+        source_dir = _owner_root_dir_for_row(row, fallback_user=actor) / "resources" / (
+            "".join(ch for ch in resolved_uuid.lower() if ch.isalnum() or ch in {"-", "_"}) or "unknown-resource"
+        )
+        if target_scope == "team" and target_owner["owner_team"] is not None:
+            target_root = _team_owner_dir(target_owner["owner_team"])
+        elif target_scope == "global":
+            target_root = _global_owner_dir()
+        elif target_owner["owner_user"] is not None:
+            target_root = _user_owner_dir(target_owner["owner_user"])
+        else:
+            target_root = _user_owner_dir(actor)
+        destination_dir = target_root / "resources" / (
+            "".join(ch for ch in resolved_uuid.lower() if ch.isalnum() or ch in {"-", "_"}) or "unknown-resource"
+        )
+        destination_dir.parent.mkdir(parents=True, exist_ok=True)
+        if source_dir.exists():
+            if destination_dir.exists():
+                shutil.rmtree(destination_dir, ignore_errors=True)
+            shutil.move(str(source_dir), str(destination_dir))
+
+        row.owner_scope = target_scope
+        row.owner_user = target_owner["owner_user"]
+        row.owner_team = target_owner["owner_team"]
+        row.updated_by = actor
+        row.save(update_fields=["owner_scope", "owner_user", "owner_team", "updated_by", "updated_at"])
+        return {"status": "moved", "owner_scope": target_scope}
+
+
 def _connect(user) -> sqlite3.Connection:
     db_path = _user_db_path(user)
     conn = sqlite3.connect(db_path)
@@ -115,12 +449,278 @@ def _connect(user) -> sqlite3.Connection:
     return conn
 
 
+def _connect_sqlite(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _team_ssh_db_path(team: Group) -> Path:
+    return _team_owner_dir(team) / "team.db"
+
+
+def _ensure_team_ssh_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ssh_credentials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL,
+            created_by_user_id INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_team_ssh_credentials_active
+        ON ssh_credentials(is_active, updated_at)
+        """
+    )
+    conn.commit()
+
+
+def _parse_ssh_credential_ref(raw_value: str | int) -> tuple[str, int, int]:
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return "account", 0, 0
+    if raw.startswith("team:"):
+        # team:<team_id>:<credential_id>
+        parts = raw.split(":")
+        if len(parts) == 3:
+            try:
+                return "team", int(parts[1]), int(parts[2])
+            except Exception:
+                return "account", 0, 0
+    if raw.startswith("account:"):
+        try:
+            return "account", 0, int(raw.split(":", 1)[1])
+        except Exception:
+            return "account", 0, 0
+    if raw.startswith("local:"):
+        try:
+            return "account", 0, int(raw.split(":", 1)[1])
+        except Exception:
+            return "account", 0, 0
+    try:
+        return "account", 0, int(raw)
+    except Exception:
+        return "account", 0, 0
+
+
+def _connect_resource(user, resource_uuid: str) -> sqlite3.Connection:
+    db_path = _resource_db_path(user, resource_uuid)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _ensure_resource_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            received_at TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            log_count INTEGER NOT NULL DEFAULT 0,
+            payload TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_note_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            file_size INTEGER NOT NULL DEFAULT 0,
+            file_blob BLOB NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            body TEXT NOT NULL,
+            author_user_id INTEGER NOT NULL DEFAULT 0,
+            author_username TEXT NOT NULL,
+            attachment_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT NOT NULL,
+            checked_at TEXT NOT NULL,
+            target TEXT,
+            error TEXT,
+            check_method TEXT,
+            latency_ms REAL,
+            packet_loss_pct REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            key_prefix TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_alert_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            health_alerts_app_enabled INTEGER NOT NULL DEFAULT 1,
+            health_alerts_sms_enabled INTEGER NOT NULL DEFAULT 0,
+            health_alerts_email_enabled INTEGER NOT NULL DEFAULT 0,
+            cloud_log_errors_app_enabled INTEGER NOT NULL DEFAULT 1,
+            cloud_log_errors_sms_enabled INTEGER NOT NULL DEFAULT 0,
+            cloud_log_errors_email_enabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(user_id)
+        )
+        """
+    )
+    alert_setting_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(resource_alert_settings)").fetchall()
+    }
+    required_alert_setting_columns = {
+        "health_alerts_app_enabled": "INTEGER NOT NULL DEFAULT 1",
+        "health_alerts_sms_enabled": "INTEGER NOT NULL DEFAULT 0",
+        "health_alerts_email_enabled": "INTEGER NOT NULL DEFAULT 0",
+        "cloud_log_errors_app_enabled": "INTEGER NOT NULL DEFAULT 1",
+        "cloud_log_errors_sms_enabled": "INTEGER NOT NULL DEFAULT 0",
+        "cloud_log_errors_email_enabled": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for column_name, definition in required_alert_setting_columns.items():
+        if column_name in alert_setting_columns:
+            continue
+        conn.execute(
+            f"ALTER TABLE resource_alert_settings ADD COLUMN {column_name} {definition}"
+        )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_resource_alert_settings_user_id
+        ON resource_alert_settings(user_id)
+        """
+    )
+    conn.commit()
+
+
+def _quote_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _resource_logs_table_name(resource_uuid: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in str(resource_uuid).strip().lower())
+    cleaned = "_".join(part for part in cleaned.split("_") if part)
+    if not cleaned:
+        cleaned = "unknown_resource"
+    return f"resource_{cleaned}_logs"
+
+
+def _create_resource_logs_table(conn: sqlite3.Connection, resource_uuid: str) -> str:
+    table_name = _resource_logs_table_name(resource_uuid)
+    table_identifier = _quote_identifier(table_name)
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_identifier} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            received_at TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            log_count INTEGER NOT NULL DEFAULT 0,
+            payload TEXT NOT NULL
+        )
+        """
+    )
+    return table_name
+
+
+def _list_resource_team_access(conn: sqlite3.Connection, resource_uuid: str) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT team_name
+        FROM resource_team_access
+        WHERE resource_uuid = ?
+        ORDER BY team_name COLLATE NOCASE ASC
+        """,
+        (resource_uuid,),
+    ).fetchall()
+    return [str(row["team_name"]).strip() for row in rows if str(row["team_name"] or "").strip()]
+
+
+def _replace_resource_team_access(conn: sqlite3.Connection, resource_uuid: str, team_names: list[str] | None) -> None:
+    conn.execute("DELETE FROM resource_team_access WHERE resource_uuid = ?", (resource_uuid,))
+    for team_name in team_names or []:
+        normalized = str(team_name or "").strip()
+        if not normalized:
+            continue
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO resource_team_access (resource_uuid, team_name, created_at)
+            VALUES (?, ?, datetime('now'))
+            """,
+            (resource_uuid, normalized),
+        )
+
+
+def _list_ssh_team_access(conn: sqlite3.Connection, credential_id: int) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT team_name
+        FROM ssh_credential_team_access
+        WHERE credential_id = ?
+        ORDER BY team_name COLLATE NOCASE ASC
+        """,
+        (credential_id,),
+    ).fetchall()
+    return [str(row["team_name"]).strip() for row in rows if str(row["team_name"] or "").strip()]
+
+
+def _replace_ssh_team_access(conn: sqlite3.Connection, credential_id: int, team_names: list[str] | None) -> None:
+    conn.execute("DELETE FROM ssh_credential_team_access WHERE credential_id = ?", (credential_id,))
+    for team_name in team_names or []:
+        normalized = str(team_name or "").strip()
+        if not normalized:
+            continue
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ssh_credential_team_access (credential_id, team_name, created_at)
+            VALUES (?, ?, datetime('now'))
+            """,
+            (int(credential_id), normalized),
+        )
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS resources (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource_uuid TEXT,
             name TEXT NOT NULL,
+            access_scope TEXT NOT NULL DEFAULT 'account',
+            team_name TEXT,
             resource_type TEXT NOT NULL,
             target TEXT NOT NULL,
             notes TEXT,
@@ -165,14 +765,141 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             checked_at TEXT NOT NULL,
             target TEXT,
-            error TEXT
+            error TEXT,
+            check_method TEXT,
+            latency_ms REAL,
+            packet_loss_pct REAL
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_team_access (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource_uuid TEXT NOT NULL,
+            team_name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(resource_uuid, team_name)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ssh_credential_team_access (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            credential_id INTEGER NOT NULL,
+            team_name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(credential_id, team_name)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            resource_uuid TEXT,
+            key_prefix TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_note_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource_uuid TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            file_size INTEGER NOT NULL DEFAULT 0,
+            file_blob BLOB NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource_uuid TEXT NOT NULL,
+            body TEXT NOT NULL,
+            author_user_id INTEGER NOT NULL DEFAULT 0,
+            author_username TEXT NOT NULL,
+            attachment_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ask_chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL DEFAULT 'default',
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            resource_uuid TEXT,
+            level TEXT NOT NULL DEFAULT 'info',
+            channel TEXT NOT NULL DEFAULT 'app',
+            metadata TEXT NOT NULL DEFAULT '{}',
+            is_read INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_notifications_read_created
+        ON notifications(is_read, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_notifications_resource_created
+        ON notifications(resource_uuid, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ask_chat_conv_created
+        ON ask_chat_messages(conversation_id, id DESC)
+        """
+    )
+    _ensure_ask_chat_schema(conn)
     existing_columns = {
         row[1]
         for row in conn.execute("PRAGMA table_info(resources)").fetchall()
     }
+    if 'resource_uuid' not in existing_columns:
+        conn.execute("ALTER TABLE resources ADD COLUMN resource_uuid TEXT")
+    if 'access_scope' not in existing_columns:
+        conn.execute("ALTER TABLE resources ADD COLUMN access_scope TEXT")
+        conn.execute("UPDATE resources SET access_scope = 'account' WHERE access_scope IS NULL OR trim(access_scope) = ''")
+    if 'team_name' not in existing_columns:
+        conn.execute("ALTER TABLE resources ADD COLUMN team_name TEXT")
+    uuid_rows = conn.execute(
+        "SELECT id FROM resources WHERE resource_uuid IS NULL OR trim(resource_uuid) = ''"
+    ).fetchall()
+    for row in uuid_rows:
+        conn.execute(
+            "UPDATE resources SET resource_uuid = ? WHERE id = ?",
+            (str(uuid.uuid4()), row["id"] if isinstance(row, sqlite3.Row) else row[0]),
+        )
     if 'ssh_key_name' not in existing_columns:
         conn.execute("ALTER TABLE resources ADD COLUMN ssh_key_name TEXT")
     if 'ssh_username' not in existing_columns:
@@ -203,6 +930,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE resources ADD COLUMN last_checked_at TEXT")
     if 'last_error' not in existing_columns:
         conn.execute("ALTER TABLE resources ADD COLUMN last_error TEXT")
+    conn.commit()
+
+    check_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(resource_checks)").fetchall()
+    }
+    if 'check_method' not in check_columns:
+        conn.execute("ALTER TABLE resource_checks ADD COLUMN check_method TEXT")
+    if 'latency_ms' not in check_columns:
+        conn.execute("ALTER TABLE resource_checks ADD COLUMN latency_ms REAL")
+    if 'packet_loss_pct' not in check_columns:
+        conn.execute("ALTER TABLE resource_checks ADD COLUMN packet_loss_pct REAL")
     conn.commit()
 
     key_columns = {
@@ -264,6 +1003,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE ssh_credentials ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
     conn.commit()
 
+    api_key_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(api_keys)").fetchall()
+    }
+    if 'updated_at' not in api_key_columns:
+        conn.execute("ALTER TABLE api_keys ADD COLUMN updated_at TEXT")
+        conn.execute("UPDATE api_keys SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''")
+    if 'is_active' not in api_key_columns:
+        conn.execute("ALTER TABLE api_keys ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    if 'resource_uuid' not in api_key_columns:
+        conn.execute("ALTER TABLE api_keys ADD COLUMN resource_uuid TEXT")
+    conn.commit()
+
 
 def _display_target(
     resource_type: str,
@@ -306,6 +1058,9 @@ def list_resources(user) -> List[ResourceItem]:
         rows = conn.execute(
             """
             SELECT id, name, resource_type, target, notes, created_at,
+                   COALESCE(resource_uuid, '') as resource_uuid,
+                   COALESCE(access_scope, 'account') as access_scope,
+                   COALESCE(team_name, '') as team_name,
                    COALESCE(ssh_key_name, '') as ssh_key_name,
                    COALESCE(ssh_username, '') as ssh_username,
                    COALESCE(ssh_key_text, '') as ssh_key_text,
@@ -339,7 +1094,10 @@ def list_resources(user) -> List[ResourceItem]:
         return [
             ResourceItem(
                 id=row['id'],
+                resource_uuid=row['resource_uuid'],
                 name=row['name'],
+                access_scope=row['access_scope'] or 'account',
+                team_names=_list_resource_team_access(conn, row['resource_uuid']),
                 resource_type=row['resource_type'],
                 target=_display_target(
                     row['resource_type'],
@@ -391,22 +1149,28 @@ def add_resource(
     resource_metadata: dict[str, Any] | None = None,
     ssh_credential_id: str = '',
     ssh_credential_scope: str = '',
-) -> None:
+    access_scope: str = 'account',
+    team_names: list[str] | None = None,
+) -> int:
     conn = _connect(user)
     try:
         _ensure_schema(conn)
         resolved_key_text = _encrypt_key_text(ssh_key_text) if ssh_key_text else ''
         metadata_payload = json.dumps(resource_metadata or {}, separators=(",", ":"))
-        conn.execute(
+        new_uuid = str(uuid.uuid4())
+        cursor = conn.execute(
             """
             INSERT INTO resources (
-                name, resource_type, target, address, port, db_type, healthcheck_url,
+                resource_uuid, name, access_scope, team_name, resource_type, target, address, port, db_type, healthcheck_url,
                 notes, ssh_key_name, ssh_username, ssh_key_text, ssh_port,
                 resource_subtype, resource_metadata, ssh_credential_id, ssh_credential_scope
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                new_uuid,
                 name,
+                access_scope,
+                "",
                 resource_type,
                 target,
                 address,
@@ -424,7 +1188,20 @@ def add_resource(
                 ssh_credential_scope,
             ),
         )
+        _replace_resource_team_access(conn, new_uuid, team_names if access_scope == "team" else [])
         conn.commit()
+        _ensure_package_owner_record(
+            resource_uuid=new_uuid,
+            fallback_user=user,
+            access_scope=access_scope,
+            team_names=team_names,
+        )
+        resource_conn = _connect_resource(user, new_uuid)
+        try:
+            _ensure_resource_schema(resource_conn)
+        finally:
+            resource_conn.close()
+        return int(cursor.lastrowid)
     finally:
         conn.close()
 
@@ -449,6 +1226,8 @@ def update_resource(
     resource_metadata: dict[str, Any] | None = None,
     ssh_credential_id: str = '',
     ssh_credential_scope: str = '',
+    access_scope: str = 'account',
+    team_names: list[str] | None = None,
 ) -> None:
     conn = _connect(user)
     try:
@@ -471,13 +1250,15 @@ def update_resource(
         conn.execute(
             """
             UPDATE resources
-            SET name = ?, resource_type = ?, target = ?, address = ?, port = ?, db_type = ?, healthcheck_url = ?,
+            SET name = ?, access_scope = ?, team_name = ?, resource_type = ?, target = ?, address = ?, port = ?, db_type = ?, healthcheck_url = ?,
                 notes = ?, ssh_key_name = ?, ssh_username = ?, ssh_key_text = ?, ssh_port = ?,
                 resource_subtype = ?, resource_metadata = ?, ssh_credential_id = ?, ssh_credential_scope = ?
             WHERE id = ?
             """,
             (
                 name,
+                access_scope,
+                "",
                 resource_type,
                 target,
                 address,
@@ -496,19 +1277,55 @@ def update_resource(
                 resource_id,
             ),
         )
+        resource_row = conn.execute(
+            "SELECT resource_uuid FROM resources WHERE id = ?",
+            (resource_id,),
+        ).fetchone()
+        resource_uuid = str(resource_row["resource_uuid"] or "").strip() if resource_row else ""
+        if resource_uuid:
+            _replace_resource_team_access(conn, resource_uuid, team_names if access_scope == "team" else [])
         conn.commit()
+        if resource_uuid:
+            transfer_resource_package(
+                actor=user,
+                resource_uuid=resource_uuid,
+                access_scope=access_scope,
+                team_names=team_names,
+            )
     finally:
         conn.close()
 
 
 def delete_resource(user, resource_id: int) -> None:
+    row = None
     conn = _connect(user)
     try:
         _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT resource_uuid FROM resources WHERE id = ?",
+            (resource_id,),
+        ).fetchone()
+        if row and str(row["resource_uuid"] or "").strip():
+            resolved_uuid = str(row["resource_uuid"]).strip()
+            conn.execute(
+                "DELETE FROM resource_team_access WHERE resource_uuid = ?",
+                (resolved_uuid,),
+            )
+            conn.execute(
+                "DELETE FROM api_keys WHERE key_type = 'resource' AND COALESCE(resource_uuid, '') = ?",
+                (resolved_uuid,),
+            )
         conn.execute("DELETE FROM resources WHERE id = ?", (resource_id,))
         conn.commit()
     finally:
         conn.close()
+    if row and str(row["resource_uuid"] or "").strip():
+        resolved_uuid = str(row["resource_uuid"]).strip()
+        resource_dir = _resource_data_dir(user, resolved_uuid, create=False)
+        shutil.rmtree(resource_dir, ignore_errors=True)
+        from .models import ResourcePackageOwner
+
+        ResourcePackageOwner.objects.filter(resource_uuid=resolved_uuid).delete()
 
 
 def get_resource(user, resource_id: int) -> ResourceItem | None:
@@ -518,6 +1335,9 @@ def get_resource(user, resource_id: int) -> ResourceItem | None:
         row = conn.execute(
             """
             SELECT id, name, resource_type, target, notes, created_at,
+                   COALESCE(resource_uuid, '') as resource_uuid,
+                   COALESCE(access_scope, 'account') as access_scope,
+                   COALESCE(team_name, '') as team_name,
                    COALESCE(ssh_key_name, '') as ssh_key_name,
                    COALESCE(ssh_username, '') as ssh_username,
                    COALESCE(ssh_key_text, '') as ssh_key_text,
@@ -542,7 +1362,79 @@ def get_resource(user, resource_id: int) -> ResourceItem | None:
             return None
         return ResourceItem(
             id=row['id'],
+            resource_uuid=row['resource_uuid'],
             name=row['name'],
+            access_scope=row['access_scope'] or 'account',
+            team_names=_list_resource_team_access(conn, row['resource_uuid']),
+            resource_type=row['resource_type'],
+            target=_display_target(
+                row['resource_type'],
+                row['target'],
+                row['address'] or (row['target'] if row['resource_type'] == 'vm' else row['address']),
+                row['port'],
+                row['healthcheck_url'],
+            ),
+            address=row['address'] or (row['target'] if row['resource_type'] == 'vm' else row['address']),
+            port=row['port'],
+            db_type=row['db_type'],
+            healthcheck_url=row['healthcheck_url'],
+            notes=row['notes'] or '',
+            created_at=row['created_at'],
+            last_status=row['last_status'],
+            last_checked_at=row['last_checked_at'],
+            last_error=row['last_error'],
+            ssh_key_name=row['ssh_key_name'],
+            ssh_username=row['ssh_username'],
+            ssh_key_text=row['ssh_key_text'],
+            ssh_key_present=bool(row['ssh_key_text'] or row['ssh_credential_id']),
+            ssh_port=row['ssh_port'],
+            resource_subtype=row['resource_subtype'],
+            resource_metadata=_load_resource_metadata(row['resource_metadata']),
+            ssh_credential_id=row['ssh_credential_id'],
+            ssh_credential_scope=row['ssh_credential_scope'],
+        )
+    finally:
+        conn.close()
+
+
+def get_resource_by_uuid(user, resource_uuid: str) -> ResourceItem | None:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT id, name, resource_type, target, notes, created_at,
+                   COALESCE(resource_uuid, '') as resource_uuid,
+                   COALESCE(access_scope, 'account') as access_scope,
+                   COALESCE(team_name, '') as team_name,
+                   COALESCE(ssh_key_name, '') as ssh_key_name,
+                   COALESCE(ssh_username, '') as ssh_username,
+                   COALESCE(ssh_key_text, '') as ssh_key_text,
+                   COALESCE(ssh_port, '') as ssh_port,
+                   COALESCE(address, '') as address,
+                   COALESCE(port, '') as port,
+                   COALESCE(db_type, '') as db_type,
+                   COALESCE(healthcheck_url, '') as healthcheck_url,
+                   COALESCE(resource_subtype, '') as resource_subtype,
+                   COALESCE(resource_metadata, '') as resource_metadata,
+                   COALESCE(ssh_credential_id, '') as ssh_credential_id,
+                   COALESCE(ssh_credential_scope, '') as ssh_credential_scope,
+                   COALESCE(last_status, '') as last_status,
+                   COALESCE(last_checked_at, '') as last_checked_at,
+                   COALESCE(last_error, '') as last_error
+            FROM resources
+            WHERE resource_uuid = ?
+            """,
+            (resource_uuid,),
+        ).fetchone()
+        if not row:
+            return None
+        return ResourceItem(
+            id=row['id'],
+            resource_uuid=row['resource_uuid'],
+            name=row['name'],
+            access_scope=row['access_scope'] or 'account',
+            team_names=_list_resource_team_access(conn, row['resource_uuid']),
             resource_type=row['resource_type'],
             target=_display_target(
                 row['resource_type'],
@@ -598,23 +1490,946 @@ def log_resource_check(
     checked_at: str,
     target: str,
     error: str = '',
+    resource_uuid: str = '',
+    check_method: str = '',
+    latency_ms: float | None = None,
+    packet_loss_pct: float | None = None,
 ) -> None:
-    conn = _connect(user)
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        resolved_resource = get_resource(user, int(resource_id))
+        resolved_uuid = str(resolved_resource.resource_uuid).strip() if resolved_resource else ""
+    if not resolved_uuid:
+        return
+    conn = _connect_resource(user, resolved_uuid)
     try:
-        _ensure_schema(conn)
+        _ensure_resource_schema(conn)
         conn.execute(
             """
-            INSERT INTO resource_checks (resource_id, status, checked_at, target, error)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO resource_checks (
+                status, checked_at, target, error, check_method, latency_ms, packet_loss_pct
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (resource_id, status, checked_at, target, error),
+            (
+                status,
+                checked_at,
+                target,
+                error,
+                check_method,
+                latency_ms,
+                packet_loss_pct,
+            ),
         )
         conn.commit()
     finally:
         conn.close()
 
 
+def list_resource_checks(user, resource_uuid: str, limit: int = 50) -> list[ResourceCheckItem]:
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return []
+    conn = _connect_resource(user, resolved_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                status,
+                checked_at,
+                COALESCE(target, '') AS target,
+                COALESCE(error, '') AS error,
+                COALESCE(check_method, '') AS check_method,
+                latency_ms,
+                packet_loss_pct
+            FROM resource_checks
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(max(1, limit)),),
+        ).fetchall()
+        return [
+            ResourceCheckItem(
+                id=int(row["id"]),
+                resource_id=0,
+                status=str(row["status"] or ""),
+                checked_at=str(row["checked_at"] or ""),
+                target=str(row["target"] or ""),
+                error=str(row["error"] or ""),
+                check_method=str(row["check_method"] or ""),
+                latency_ms=float(row["latency_ms"]) if row["latency_ms"] is not None else None,
+                packet_loss_pct=float(row["packet_loss_pct"]) if row["packet_loss_pct"] is not None else None,
+            )
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def store_resource_logs(
+    user,
+    resource_uuid: str,
+    payload: dict[str, Any],
+    ip_address: str | None,
+    user_agent: str | None,
+) -> str:
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return ""
+    conn = _connect_resource(user, resolved_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        logs = payload.get("logs")
+        if isinstance(logs, list):
+            log_count = len(logs)
+        elif logs is None:
+            log_count = 0
+        else:
+            log_count = 1
+        conn.execute(
+            """
+            INSERT INTO resource_logs (
+                received_at,
+                ip_address,
+                user_agent,
+                log_count,
+                payload
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("received_at") or "",
+                ip_address,
+                user_agent,
+                int(log_count),
+                json.dumps(payload),
+            ),
+        )
+        conn.commit()
+        return "resource_logs"
+    finally:
+        conn.close()
+
+
+def list_resource_logs(user, resource_uuid: str, limit: int = 200) -> list[dict[str, Any]]:
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return []
+    conn = _connect_resource(user, resolved_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT id, received_at, payload
+            FROM resource_logs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(max(1, limit)),),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    parsed_logs: list[dict[str, Any]] = []
+    for row in rows:
+        row_payload_raw = row["payload"] or "{}"
+        try:
+            row_payload = json.loads(row_payload_raw)
+        except (TypeError, ValueError):
+            row_payload = {}
+        if not isinstance(row_payload, dict):
+            row_payload = {}
+
+        envelope_received_at = str(row["received_at"] or "").strip()
+        logs = row_payload.get("logs")
+        if not isinstance(logs, list):
+            logs = [row_payload]
+
+        for item in logs:
+            if isinstance(item, dict):
+                level = str(item.get("level") or "info").strip().lower() or "info"
+                message = str(item.get("message") or "").strip()
+                logger = str(item.get("logger") or "").strip() or "alshival"
+                timestamp = str(item.get("ts") or envelope_received_at).strip() or envelope_received_at
+                raw_metadata = item.get("extra")
+                if not isinstance(raw_metadata, dict):
+                    raw_metadata = {}
+            else:
+                level = "info"
+                message = str(item or "").strip()
+                logger = "alshival"
+                timestamp = envelope_received_at
+                raw_metadata = {}
+
+            envelope_meta = {
+                "sdk": row_payload.get("sdk"),
+                "sdk_version": row_payload.get("sdk_version"),
+                "submitted_by_username": row_payload.get("submitted_by_username"),
+                "received_at": row_payload.get("received_at"),
+            }
+            merged_metadata = {k: v for k, v in envelope_meta.items() if v not in (None, "", [], {})}
+            merged_metadata.update(raw_metadata)
+
+            parsed_logs.append(
+                {
+                    "level": level,
+                    "message": message,
+                    "logger": logger,
+                    "timestamp": timestamp,
+                    "metadata": merged_metadata,
+                }
+            )
+
+    return parsed_logs
+
+
+def add_ask_chat_message(user, *, conversation_id: str = "default", role: str, content: str) -> int:
+    resolved_role = str(role or "").strip().lower()
+    if resolved_role not in {"user", "assistant", "system", "tool"}:
+        raise ValueError("role must be one of: user, assistant, system, tool")
+    resolved_content = str(content or "").strip()
+    if not resolved_content:
+        raise ValueError("content is required")
+    resolved_conversation_id = str(conversation_id or "").strip() or "default"
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        cursor = conn.execute(
+            """
+            INSERT INTO ask_chat_messages (conversation_id, role, content)
+            VALUES (?, ?, ?)
+            """,
+            (resolved_conversation_id, resolved_role, resolved_content),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
+
+
+def list_ask_chat_messages(user, *, conversation_id: str = "default", limit: int = 20) -> list[dict[str, str]]:
+    resolved_conversation_id = str(conversation_id or "").strip() or "default"
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT role, content, created_at
+            FROM ask_chat_messages
+            WHERE conversation_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (resolved_conversation_id, int(max(1, limit))),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    ordered = list(reversed(rows))
+    return [
+        {
+            "role": str(row["role"] or "").strip(),
+            "content": str(row["content"] or "").strip(),
+            "created_at": str(row["created_at"] or "").strip(),
+        }
+        for row in ordered
+        if str(row["role"] or "").strip() in {"user", "assistant", "system", "tool"} and str(row["content"] or "").strip()
+    ]
+
+
+def _ensure_ask_chat_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ask_chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL DEFAULT 'default',
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ask_chat_conv_created
+        ON ask_chat_messages(conversation_id, id DESC)
+        """
+    )
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(ask_chat_messages)").fetchall()
+    }
+    if "message_kind" not in columns:
+        conn.execute("ALTER TABLE ask_chat_messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'chat'")
+    if "tool_name" not in columns:
+        conn.execute("ALTER TABLE ask_chat_messages ADD COLUMN tool_name TEXT")
+    if "tool_call_id" not in columns:
+        conn.execute("ALTER TABLE ask_chat_messages ADD COLUMN tool_call_id TEXT")
+    if "tool_args_json" not in columns:
+        conn.execute("ALTER TABLE ask_chat_messages ADD COLUMN tool_args_json TEXT")
+    if "tool_result_json" not in columns:
+        conn.execute("ALTER TABLE ask_chat_messages ADD COLUMN tool_result_json TEXT")
+    conn.commit()
+
+
+def add_ask_chat_tool_event(
+    user,
+    *,
+    conversation_id: str = "default",
+    kind: str,
+    tool_name: str,
+    tool_call_id: str = "",
+    tool_args_json: str = "",
+    tool_result_json: str = "",
+    content: str = "",
+) -> int:
+    resolved_kind = str(kind or "").strip().lower()
+    if resolved_kind not in {"tool_call", "tool_result"}:
+        raise ValueError("kind must be one of: tool_call, tool_result")
+    resolved_tool_name = str(tool_name or "").strip()
+    if not resolved_tool_name:
+        raise ValueError("tool_name is required")
+    resolved_content = str(content or "").strip()
+    if not resolved_content:
+        resolved_content = f"[{resolved_kind}] {resolved_tool_name}"
+    resolved_conversation_id = str(conversation_id or "").strip() or "default"
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        _ensure_ask_chat_schema(conn)
+        cursor = conn.execute(
+            """
+            INSERT INTO ask_chat_messages (
+                conversation_id, role, content, message_kind, tool_name, tool_call_id, tool_args_json, tool_result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_conversation_id,
+                "tool",
+                resolved_content,
+                resolved_kind,
+                resolved_tool_name,
+                str(tool_call_id or "").strip(),
+                str(tool_args_json or "").strip(),
+                str(tool_result_json or "").strip(),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
+
+
+def list_resource_notes(user, resource_uuid: str, limit: int = 200) -> list[ResourceNoteItem]:
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return []
+    conn = _connect_resource(user, resolved_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                t.id,
+                COALESCE(t.body, '') AS body,
+                COALESCE(t.author_user_id, 0) AS author_user_id,
+                COALESCE(t.author_username, '') AS author_username,
+                COALESCE(t.created_at, '') AS created_at,
+                t.attachment_id,
+                COALESCE(a.file_name, '') AS attachment_name,
+                COALESCE(a.content_type, '') AS attachment_content_type,
+                COALESCE(a.file_size, 0) AS attachment_size
+            FROM (
+                SELECT id, body, author_user_id, author_username, attachment_id, created_at
+                FROM resource_notes
+                ORDER BY id DESC
+                LIMIT ?
+            ) t
+            LEFT JOIN resource_note_attachments a ON a.id = t.attachment_id
+            ORDER BY t.id ASC
+            """,
+            (int(max(1, limit)),),
+        ).fetchall()
+        return [
+            ResourceNoteItem(
+                id=int(row["id"]),
+                resource_uuid=resolved_uuid,
+                body=str(row["body"] or ""),
+                author_user_id=int(row["author_user_id"] or 0),
+                author_username=str(row["author_username"] or ""),
+                created_at=str(row["created_at"] or ""),
+                attachment_id=int(row["attachment_id"]) if row["attachment_id"] is not None else None,
+                attachment_name=str(row["attachment_name"] or ""),
+                attachment_content_type=str(row["attachment_content_type"] or ""),
+                attachment_size=int(row["attachment_size"] or 0),
+            )
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+_RESOURCE_ALERT_SETTINGS_DEFAULTS = {
+    "health_alerts_app_enabled": True,
+    "health_alerts_sms_enabled": False,
+    "health_alerts_email_enabled": False,
+    "cloud_log_errors_app_enabled": True,
+    "cloud_log_errors_sms_enabled": False,
+    "cloud_log_errors_email_enabled": False,
+}
+
+
+def _normalize_resource_alert_settings_payload(payload: dict[str, Any] | None) -> dict[str, int]:
+    source = payload or {}
+    normalized: dict[str, int] = {}
+    for key, default in _RESOURCE_ALERT_SETTINGS_DEFAULTS.items():
+        value = source.get(key, default)
+        normalized[key] = 1 if bool(value) else 0
+    return normalized
+
+
+def get_resource_alert_settings(user, resource_uuid: str, target_user_id: int) -> dict[str, Any]:
+    resolved_uuid = str(resource_uuid or "").strip()
+    resolved_user_id = int(target_user_id or 0)
+    result: dict[str, Any] = {
+        "user_id": resolved_user_id,
+        "updated_at": "",
+    }
+    result.update(_RESOURCE_ALERT_SETTINGS_DEFAULTS)
+
+    if not resolved_uuid or resolved_user_id <= 0:
+        return result
+
+    conn = _connect_resource(user, resolved_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        row = conn.execute(
+            """
+            SELECT
+                user_id,
+                health_alerts_app_enabled,
+                health_alerts_sms_enabled,
+                health_alerts_email_enabled,
+                cloud_log_errors_app_enabled,
+                cloud_log_errors_sms_enabled,
+                cloud_log_errors_email_enabled,
+                COALESCE(updated_at, '') AS updated_at
+            FROM resource_alert_settings
+            WHERE user_id = ?
+            LIMIT 1
+            """,
+            (resolved_user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return result
+
+    for key in _RESOURCE_ALERT_SETTINGS_DEFAULTS:
+        result[key] = bool(int(row[key] or 0))
+    result["updated_at"] = str(row["updated_at"] or "")
+    return result
+
+
+def upsert_resource_alert_settings(
+    user,
+    resource_uuid: str,
+    target_user_id: int,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolved_uuid = str(resource_uuid or "").strip()
+    resolved_user_id = int(target_user_id or 0)
+    if not resolved_uuid or resolved_user_id <= 0:
+        return get_resource_alert_settings(user, resolved_uuid, resolved_user_id)
+
+    normalized = _normalize_resource_alert_settings_payload(payload)
+    conn = _connect_resource(user, resolved_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO resource_alert_settings (
+                user_id,
+                health_alerts_app_enabled,
+                health_alerts_sms_enabled,
+                health_alerts_email_enabled,
+                cloud_log_errors_app_enabled,
+                cloud_log_errors_sms_enabled,
+                cloud_log_errors_email_enabled
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                health_alerts_app_enabled = excluded.health_alerts_app_enabled,
+                health_alerts_sms_enabled = excluded.health_alerts_sms_enabled,
+                health_alerts_email_enabled = excluded.health_alerts_email_enabled,
+                cloud_log_errors_app_enabled = excluded.cloud_log_errors_app_enabled,
+                cloud_log_errors_sms_enabled = excluded.cloud_log_errors_sms_enabled,
+                cloud_log_errors_email_enabled = excluded.cloud_log_errors_email_enabled,
+                updated_at = datetime('now')
+            """,
+            (
+                resolved_user_id,
+                normalized["health_alerts_app_enabled"],
+                normalized["health_alerts_sms_enabled"],
+                normalized["health_alerts_email_enabled"],
+                normalized["cloud_log_errors_app_enabled"],
+                normalized["cloud_log_errors_sms_enabled"],
+                normalized["cloud_log_errors_email_enabled"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return get_resource_alert_settings(user, resolved_uuid, resolved_user_id)
+
+
+def add_user_notification(
+    user,
+    *,
+    kind: str,
+    title: str,
+    body: str,
+    resource_uuid: str = "",
+    level: str = "info",
+    channel: str = "app",
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        payload = metadata or {}
+        cursor = conn.execute(
+            """
+            INSERT INTO notifications (
+                kind,
+                title,
+                body,
+                resource_uuid,
+                level,
+                channel,
+                metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(kind or "").strip() or "event",
+                str(title or "").strip()[:255],
+                str(body or "").strip()[:5000],
+                str(resource_uuid or "").strip(),
+                str(level or "").strip().lower() or "info",
+                str(channel or "").strip().lower() or "app",
+                json.dumps(payload),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid or 0)
+    finally:
+        conn.close()
+
+
+def list_user_notifications(user, *, limit: int = 20) -> dict[str, Any]:
+    resolved_limit = max(1, min(int(limit or 20), 100))
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                kind,
+                title,
+                body,
+                COALESCE(resource_uuid, '') AS resource_uuid,
+                COALESCE(level, 'info') AS level,
+                COALESCE(channel, 'app') AS channel,
+                COALESCE(metadata, '{}') AS metadata,
+                COALESCE(is_read, 0) AS is_read,
+                COALESCE(created_at, '') AS created_at
+            FROM notifications
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (resolved_limit,),
+        ).fetchall()
+        unread_row = conn.execute(
+            """
+            SELECT COUNT(*) AS unread_count
+            FROM notifications
+            WHERE COALESCE(is_read, 0) = 0
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            metadata = json.loads(str(row["metadata"] or "{}"))
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        items.append(
+            {
+                "id": int(row["id"] or 0),
+                "kind": str(row["kind"] or "").strip() or "event",
+                "title": str(row["title"] or "").strip(),
+                "body": str(row["body"] or "").strip(),
+                "resource_uuid": str(row["resource_uuid"] or "").strip(),
+                "level": str(row["level"] or "info").strip().lower() or "info",
+                "channel": str(row["channel"] or "app").strip().lower() or "app",
+                "metadata": metadata,
+                "is_read": bool(int(row["is_read"] or 0)),
+                "created_at": str(row["created_at"] or "").strip(),
+            }
+        )
+
+    unread_count = int((unread_row["unread_count"] if unread_row else 0) or 0)
+    return {"unread_count": unread_count, "items": items}
+
+
+def mark_all_user_notifications_read(user) -> int:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        cursor = conn.execute(
+            """
+            UPDATE notifications
+            SET is_read = 1
+            WHERE COALESCE(is_read, 0) = 0
+            """
+        )
+        conn.commit()
+        return int(cursor.rowcount or 0)
+    finally:
+        conn.close()
+
+
+def clear_user_notifications(user) -> int:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        cursor = conn.execute("DELETE FROM notifications")
+        conn.commit()
+        return int(cursor.rowcount or 0)
+    finally:
+        conn.close()
+
+
+def add_resource_note(
+    user,
+    resource_uuid: str,
+    body: str,
+    author_user_id: int,
+    author_username: str,
+    attachment_name: str = "",
+    attachment_content_type: str = "",
+    attachment_blob: bytes | None = None,
+) -> int:
+    resolved_resource_uuid = str(resource_uuid or "").strip()
+    conn = _connect_resource(user, resolved_resource_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        resolved_body = str(body or "").strip()
+        resolved_author_username = str(author_username or "").strip()
+        attachment_id: int | None = None
+        if attachment_blob:
+            attachment_cursor = conn.execute(
+                """
+                INSERT INTO resource_note_attachments (
+                    file_name, content_type, file_size, file_blob
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    str(attachment_name or "attachment").strip() or "attachment",
+                    str(attachment_content_type or "application/octet-stream").strip() or "application/octet-stream",
+                    len(attachment_blob),
+                    attachment_blob,
+                ),
+            )
+            attachment_id = int(attachment_cursor.lastrowid)
+
+        cursor = conn.execute(
+            """
+            INSERT INTO resource_notes (
+                body, author_user_id, author_username, attachment_id
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                resolved_body,
+                int(author_user_id or 0),
+                resolved_author_username,
+                attachment_id,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
+
+
+def get_resource_note_attachment(user, resource_uuid: str, attachment_id: int) -> dict[str, Any] | None:
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return None
+    resource_conn = _connect_resource(user, resolved_uuid)
+    try:
+        _ensure_resource_schema(resource_conn)
+        row = resource_conn.execute(
+            """
+            SELECT id, file_name, content_type, file_size, file_blob, created_at
+            FROM resource_note_attachments
+            WHERE id = ?
+            """,
+            (int(attachment_id),),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": int(row["id"]),
+            "resource_uuid": resolved_uuid,
+            "file_name": str(row["file_name"] or ""),
+            "content_type": str(row["content_type"] or "application/octet-stream"),
+            "file_size": int(row["file_size"] or 0),
+            "file_blob": row["file_blob"] or b"",
+            "created_at": str(row["created_at"] or ""),
+        }
+    finally:
+        resource_conn.close()
+
+
+def create_account_api_key(user, name: str) -> tuple[int, str]:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        raw_key = generate_api_key("account")
+        cursor = conn.execute(
+            """
+            INSERT INTO api_keys (
+                key_type, name, resource_uuid, key_prefix, key_hash, created_at, updated_at, is_active
+            ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), 1)
+            """,
+            (
+                "account",
+                (name or "Account API Key").strip() or "Account API Key",
+                "",
+                key_prefix(raw_key),
+                hash_api_key(raw_key),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid), raw_key
+    finally:
+        conn.close()
+
+
+def rotate_internal_account_api_key(user, name: str = "Internal Worker API Key") -> int:
+    """
+    Rotate an internal account API key for a user.
+
+    Existing active account keys with the same name are deactivated, then a
+    fresh account key is created. The raw key is intentionally discarded.
+    """
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        resolved_name = (name or "Internal Worker API Key").strip() or "Internal Worker API Key"
+        conn.execute(
+            """
+            UPDATE api_keys
+            SET is_active = 0, updated_at = datetime('now')
+            WHERE key_type = 'account'
+              AND name = ?
+              AND COALESCE(is_active, 1) = 1
+            """,
+            (resolved_name,),
+        )
+        raw_key = generate_api_key("account")
+        cursor = conn.execute(
+            """
+            INSERT INTO api_keys (
+                key_type, name, resource_uuid, key_prefix, key_hash, created_at, updated_at, is_active
+            ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), 1)
+            """,
+            (
+                "account",
+                resolved_name,
+                "",
+                key_prefix(raw_key),
+                hash_api_key(raw_key),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
+
+
+def create_resource_api_key(user, name: str, resource_uuid: str) -> tuple[int, str]:
+    resolved_resource_uuid = (resource_uuid or "").strip()
+    if not resolved_resource_uuid:
+        raise ValueError("resource_uuid is required")
+    conn = _connect_resource(user, resolved_resource_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        raw_key = generate_api_key("resource")
+        cursor = conn.execute(
+            """
+            INSERT INTO resource_api_keys (
+                name, key_prefix, key_hash, created_at, updated_at, is_active
+            ) VALUES (?, ?, ?, datetime('now'), datetime('now'), 1)
+            """,
+            (
+                (name or "Resource API Key").strip() or "Resource API Key",
+                key_prefix(raw_key),
+                hash_api_key(raw_key),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid), raw_key
+    finally:
+        conn.close()
+
+
+def list_resource_api_keys(user, resource_uuid: str) -> list[UserAPIKeyItem]:
+    resolved_resource_uuid = str(resource_uuid or "").strip()
+    if not resolved_resource_uuid:
+        return []
+    conn = _connect_resource(user, resolved_resource_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT id, name, key_prefix, created_at
+            FROM resource_api_keys
+            WHERE COALESCE(is_active, 1) = 1
+            ORDER BY id DESC
+            """,
+        ).fetchall()
+        return [
+            UserAPIKeyItem(
+                id=int(row["id"]),
+                key_type="resource",
+                name=str(row["name"] or "").strip() or "Resource API Key",
+                resource_uuid=resolved_resource_uuid,
+                key_prefix=key_preview(str(row["key_prefix"] or "").strip()),
+                created_at=str(row["created_at"] or ""),
+            )
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def revoke_resource_api_key(user, key_id: int, resource_uuid: str) -> None:
+    resolved_resource_uuid = str(resource_uuid or "").strip()
+    if not resolved_resource_uuid:
+        return
+    conn = _connect_resource(user, resolved_resource_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        conn.execute(
+            """
+            UPDATE resource_api_keys
+            SET is_active = 0, updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (int(key_id),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def resolve_api_key_scope(user, raw_api_key: str, resource_uuid: str) -> str:
+    resolved_key = str(raw_api_key or "").strip()
+    resolved_resource_uuid = str(resource_uuid or "").strip()
+    if not resolved_key:
+        return ""
+    key_hash_value = hash_api_key(resolved_key)
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT key_type
+            FROM api_keys
+            WHERE key_hash = ?
+              AND COALESCE(is_active, 1) = 1
+              AND key_type = 'account'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (key_hash_value,),
+        ).fetchone()
+        if row and str(row["key_type"] or "").strip().lower() == "account":
+            return "account"
+    finally:
+        conn.close()
+    if not resolved_resource_uuid:
+        return ""
+    resource_conn = _connect_resource(user, resolved_resource_uuid)
+    try:
+        _ensure_resource_schema(resource_conn)
+        resource_row = resource_conn.execute(
+            """
+            SELECT id
+            FROM resource_api_keys
+            WHERE key_hash = ?
+              AND COALESCE(is_active, 1) = 1
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (key_hash_value,),
+        ).fetchone()
+        if resource_row:
+            return "resource"
+        return ""
+    finally:
+        resource_conn.close()
+
+
+def list_user_api_keys(user, key_type: str | None = None) -> list[UserAPIKeyItem]:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        where = "WHERE is_active = 1"
+        params: tuple[Any, ...] = ()
+        if key_type:
+            where += " AND key_type = ?"
+            params = (str(key_type).strip().lower(),)
+        rows = conn.execute(
+            f"""
+            SELECT id, key_type, name, COALESCE(resource_uuid, '') AS resource_uuid, key_prefix, created_at
+            FROM api_keys
+            {where}
+            ORDER BY id DESC
+            """,
+            params,
+        ).fetchall()
+        return [
+            UserAPIKeyItem(
+                id=int(row["id"]),
+                key_type=str(row["key_type"] or "").strip() or "account",
+                name=str(row["name"] or "").strip() or "API Key",
+                resource_uuid=str(row["resource_uuid"] or "").strip(),
+                key_prefix=key_preview(str(row["key_prefix"] or "").strip()),
+                created_at=str(row["created_at"] or ""),
+            )
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
 def list_ssh_credentials(user) -> List[SSHCredentialItem]:
+    items: list[SSHCredentialItem] = []
+
+    # Account-scoped credentials live in the per-user member DB.
     conn = _connect(user)
     try:
         _ensure_schema(conn)
@@ -628,67 +2443,183 @@ def list_ssh_credentials(user) -> List[SSHCredentialItem]:
             """
         ).fetchall()
         for row in rows:
-            key_text = row['encrypted_private_key'] or ''
+            key_text = row["encrypted_private_key"] or ""
             if key_text and not _is_encrypted(key_text):
                 conn.execute(
                     "UPDATE ssh_credentials SET encrypted_private_key = ?, updated_at = datetime('now') WHERE id = ?",
-                    (_encrypt_key_text(key_text), row['id']),
+                    (_encrypt_key_text(key_text), row["id"]),
                 )
         conn.commit()
-        return [
-            SSHCredentialItem(
-                id=row['id'],
-                name=row['name'],
-                scope=row['scope'] or 'account',
-                team_name=row['team_name'] or '',
-                created_at=row['created_at'],
+        for row in rows:
+            resolved_scope = str(row["scope"] or "account").strip().lower()
+            team_names = _list_ssh_team_access(conn, row["id"]) if resolved_scope == "team" else []
+            items.append(
+                SSHCredentialItem(
+                    id=f"account:{int(row['id'])}",
+                    name=row["name"],
+                    scope=resolved_scope if resolved_scope in {"account", "team"} else "account",
+                    team_names=team_names,
+                    created_at=row["created_at"],
+                )
             )
-            for row in rows
-        ]
     finally:
         conn.close()
+
+    # Team-scoped credentials live in each team root under TEAM_DATA_ROOT.
+    teams = list(user.groups.order_by("name"))
+    for team in teams:
+        team_conn = _connect_sqlite(_team_ssh_db_path(team))
+        try:
+            _ensure_team_ssh_schema(team_conn)
+            rows = team_conn.execute(
+                """
+                SELECT id, name, encrypted_private_key, created_at
+                FROM ssh_credentials
+                WHERE COALESCE(is_active, 1) = 1
+                ORDER BY id DESC
+                """
+            ).fetchall()
+            for row in rows:
+                key_text = row["encrypted_private_key"] or ""
+                if key_text and not _is_encrypted(key_text):
+                    team_conn.execute(
+                        "UPDATE ssh_credentials SET encrypted_private_key = ?, updated_at = datetime('now') WHERE id = ?",
+                        (_encrypt_key_text(key_text), row["id"]),
+                    )
+            team_conn.commit()
+            for row in rows:
+                items.append(
+                    SSHCredentialItem(
+                        id=f"team:{int(team.id)}:{int(row['id'])}",
+                        name=row["name"],
+                        scope="team",
+                        team_names=[str(team.name)],
+                        created_at=str(row["created_at"] or ""),
+                    )
+                )
+        finally:
+            team_conn.close()
+
+    return items
 
 
 def add_ssh_credential(
     user,
     name: str,
     scope: str,
-    team_name: str,
+    team_names: list[str] | None,
     private_key_text: str,
-) -> int:
+) -> str:
+    resolved_scope = scope if scope in {"account", "team"} else "account"
+    encrypted_key = _encrypt_key_text(private_key_text)
+
+    if resolved_scope == "team":
+        resolved_teams = list(
+            Group.objects.filter(name__in=list(team_names or []))
+            .order_by("name")
+        )
+        first_credential_ref = ""
+        for team in resolved_teams:
+            team_conn = _connect_sqlite(_team_ssh_db_path(team))
+            try:
+                _ensure_team_ssh_schema(team_conn)
+                cursor = team_conn.execute(
+                    """
+                    INSERT INTO ssh_credentials (
+                        name, encrypted_private_key, created_by_user_id, updated_at
+                    ) VALUES (?, ?, ?, datetime('now'))
+                    """,
+                    (name, encrypted_key, int(getattr(user, "id", 0) or 0)),
+                )
+                team_conn.commit()
+                credential_ref = f"team:{int(team.id)}:{int(cursor.lastrowid)}"
+                if not first_credential_ref:
+                    first_credential_ref = credential_ref
+            finally:
+                team_conn.close()
+        return first_credential_ref
+
     conn = _connect(user)
     try:
         _ensure_schema(conn)
-        resolved_scope = scope if scope in {'account', 'team'} else 'account'
-        encrypted_key = _encrypt_key_text(private_key_text)
         cursor = conn.execute(
             """
             INSERT INTO ssh_credentials (
                 name, scope, team_name, encrypted_private_key, updated_at
             ) VALUES (?, ?, ?, ?, datetime('now'))
             """,
-            (name, resolved_scope, team_name, encrypted_key),
+            (name, "account", "", encrypted_key),
         )
         conn.commit()
-        return int(cursor.lastrowid)
+        return f"account:{int(cursor.lastrowid)}"
     finally:
         conn.close()
 
 
-def delete_ssh_credential(user, credential_id: int) -> None:
+def delete_ssh_credential(user, credential_id: str | int) -> None:
+    resolved_scope, team_id, local_id = _parse_ssh_credential_ref(credential_id)
+    if resolved_scope == "team" and team_id > 0 and local_id > 0:
+        team = user.groups.filter(id=team_id).first()
+        if not team:
+            return
+        team_conn = _connect_sqlite(_team_ssh_db_path(team))
+        try:
+            _ensure_team_ssh_schema(team_conn)
+            team_conn.execute(
+                "UPDATE ssh_credentials SET is_active = 0, updated_at = datetime('now') WHERE id = ?",
+                (local_id,),
+            )
+            team_conn.commit()
+            return
+        finally:
+            team_conn.close()
+
+    if local_id <= 0:
+        return
     conn = _connect(user)
     try:
         _ensure_schema(conn)
         conn.execute(
+            "DELETE FROM ssh_credential_team_access WHERE credential_id = ?",
+            (local_id,),
+        )
+        conn.execute(
             "UPDATE ssh_credentials SET is_active = 0, updated_at = datetime('now') WHERE id = ?",
-            (credential_id,),
+            (local_id,),
         )
         conn.commit()
     finally:
         conn.close()
 
 
-def get_ssh_credential_private_key(user, credential_id: int) -> str | None:
+def get_ssh_credential_private_key(user, credential_id: str | int) -> str | None:
+    resolved_scope, team_id, local_id = _parse_ssh_credential_ref(credential_id)
+    if resolved_scope == "team" and team_id > 0 and local_id > 0:
+        team = user.groups.filter(id=team_id).first()
+        if not team:
+            return None
+        team_conn = _connect_sqlite(_team_ssh_db_path(team))
+        try:
+            _ensure_team_ssh_schema(team_conn)
+            row = team_conn.execute(
+                """
+                SELECT encrypted_private_key
+                FROM ssh_credentials
+                WHERE id = ? AND COALESCE(is_active, 1) = 1
+                """,
+                (local_id,),
+            ).fetchone()
+            if not row:
+                return None
+            decrypted = _decrypt_key_text(row["encrypted_private_key"] or "")
+            if not decrypted:
+                return None
+            return decrypted
+        finally:
+            team_conn.close()
+
+    if local_id <= 0:
+        return None
     conn = _connect(user)
     try:
         _ensure_schema(conn)
@@ -698,7 +2629,7 @@ def get_ssh_credential_private_key(user, credential_id: int) -> str | None:
             FROM ssh_credentials
             WHERE id = ? AND COALESCE(is_active, 1) = 1
             """,
-            (credential_id,),
+            (local_id,),
         ).fetchone()
         if not row:
             return None

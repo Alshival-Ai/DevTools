@@ -1,0 +1,263 @@
+{% extends 'vertical.html' %}
+{% load static %}
+
+{% block title %}Wiki{% endblock title %}
+
+{% block page_content %}
+<section class="resources-layout wiki-layout">
+  <aside class="team-folder-panel card">
+    <div class="team-folder-title">Wiki Folders</div>
+    <div class="team-folder-subtitle">Browse by visibility</div>
+    <div class="team-folder-tree">
+      <button class="team-folder-btn is-active" type="button" data-wiki-folder="all" data-wiki-folder-label="All Pages">
+        <span class="folder-icon" aria-hidden="true">📁</span>
+        <span>All Pages</span>
+      </button>
+      <button class="team-folder-btn" type="button" data-wiki-folder="public" data-wiki-folder-label="Published Public">
+        <span class="folder-icon" aria-hidden="true">📄</span>
+        <span>Published Public</span>
+      </button>
+      <button class="team-folder-btn" type="button" data-wiki-folder="drafts" data-wiki-folder-label="My Drafts">
+        <span class="folder-icon" aria-hidden="true">📝</span>
+        <span>My Drafts</span>
+      </button>
+      <div class="team-folder-group">
+        <div class="team-folder-group-label">Teams</div>
+        {% if member_teams %}
+          {% for team_name in member_teams %}
+          <button
+            class="team-folder-btn"
+            type="button"
+            data-wiki-folder="{{ team_name|lower|slugify }}"
+            data-wiki-folder-label="{{ team_name }}">
+            <span class="folder-icon" aria-hidden="true">🗂</span>
+            <span>{{ team_name }}</span>
+          </button>
+          {% endfor %}
+        {% else %}
+        <div class="text-muted small">No team memberships yet.</div>
+        {% endif %}
+      </div>
+    </div>
+  </aside>
+
+  <div class="resources-main wiki-main">
+    <div class="team-filter-banner">
+      <span class="text-muted small">Viewing</span>
+      <strong data-wiki-view-label>All Pages</strong>
+    </div>
+
+    {% if status_message %}
+    <section class="table-wrap">
+      <div class="team-status team-status-{{ status_tone }}">{{ status_message }}</div>
+    </section>
+    {% endif %}
+
+    <section class="directory-shell wiki-shell">
+      <aside class="card wiki-pages-panel">
+        <div class="directory-users-toolbar">
+          <h3>Pages</h3>
+          <a class="icon-btn" href="{% url 'wiki_editor_new' %}">New page</a>
+        </div>
+        <label class="settings-field">
+          <span>Search</span>
+          <input type="search" placeholder="Title, path, or team" data-wiki-search />
+        </label>
+        <div class="directory-users-list">
+          {% for page_item in wiki_pages %}
+          <a
+            class="directory-user-row wiki-page-row{% if selected_page and selected_page.id == page_item.id %} is-active{% endif %}"
+            href="{% url 'wiki' %}?page={{ page_item.path|urlencode }}"
+            data-wiki-row
+            data-page-title="{{ page_item.title|escape }}"
+            data-page-path="{{ page_item.path|escape }}"
+            data-page-is-draft="{% if page_item.is_draft %}1{% else %}0{% endif %}"
+            data-page-teams="{{ page_item.team_keys|join:'|' }}"
+            data-page-team-names="{{ page_item.team_names|join:'|'|escape }}"
+          >
+            <div class="directory-user-row-top">
+              <strong>{{ page_item.title }}</strong>
+              {% if page_item.is_draft %}
+              <span class="status warning">Draft</span>
+              {% elif page_item.is_public %}
+              <span class="status success">Public</span>
+              {% else %}
+              <span class="status info">Restricted</span>
+              {% endif %}
+            </div>
+            <div class="text-muted small">/{{ page_item.path }}</div>
+            <div class="directory-mini-tags">
+              {% if page_item.is_draft %}
+              <span class="status warning">Not published</span>
+              {% endif %}
+              {% if page_item.team_names %}
+              <span class="status info">{{ page_item.team_names|join:', ' }}</span>
+              {% elif not page_item.is_draft %}
+              <span class="status success">All users</span>
+              {% endif %}
+            </div>
+          </a>
+          {% empty %}
+          <div class="directory-empty">No wiki pages yet.</div>
+          {% endfor %}
+          <div class="directory-empty d-none" data-wiki-no-results>No pages match this filter.</div>
+        </div>
+      </aside>
+
+      <section class="card wiki-detail-panel">
+        {% if selected_page %}
+        <div class="directory-detail-head wiki-detail-head">
+          <div>
+            <h2>{{ selected_page.title }}</h2>
+            <p><code>/{{ selected_page.path }}</code></p>
+          </div>
+          <div class="table-actions">
+            {% if selected_page_payload.can_edit %}
+            <a class="secondary-btn" href="{% url 'wiki_editor' selected_page.id %}">Edit page</a>
+            {% endif %}
+            {% if request.user.is_superuser %}
+            <form method="post" action="{% url 'wiki_delete_page' selected_page.id %}" class="inline-form" onsubmit="return confirm('Delete this page?');">
+              {% csrf_token %}
+              <button class="icon-btn danger" type="submit">Delete</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="directory-badge-row">
+          {% if selected_page_payload.is_draft %}
+          <span class="status warning">Draft · Only visible to you and admins</span>
+          {% else %}
+            {% if selected_page_payload.team_names %}
+              {% for team_name in selected_page_payload.team_names %}
+              <span class="status info">{{ team_name }}</span>
+              {% endfor %}
+            {% else %}
+            <span class="status success">Public page</span>
+            {% endif %}
+          {% endif %}
+        </div>
+
+        <div class="text-muted small">
+          Updated {{ selected_page_payload.updated_display }} · Created {{ selected_page_payload.created_display }}
+        </div>
+
+        <textarea class="d-none" data-wiki-view-source>{{ selected_page.body_markdown }}</textarea>
+        <article class="wiki-rendered md-body" data-wiki-render-target>
+          {{ selected_page_html_fallback|safe }}
+        </article>
+        {% else %}
+        <div class="directory-empty-state">
+          <h3>No pages available</h3>
+          <p>Create your first wiki page to start documenting your platform.</p>
+          <a class="primary-btn" href="{% url 'wiki_editor_new' %}">Create page</a>
+        </div>
+        {% endif %}
+      </section>
+    </section>
+  </div>
+</section>
+
+<script src="{% static 'js/marked.min.js' %}"></script>
+<script src="{% static 'js/purify.min.js' %}"></script>
+<script>
+  (function () {
+    const parseList = (value) => {
+      return (value || '')
+        .split('|')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    };
+
+    const renderMarkdown = (value) => {
+      const source = String(value || '');
+      if (!source.trim()) {
+        return '<p class="text-muted">No content yet.</p>';
+      }
+
+      if (window.marked && typeof window.marked.parse === 'function') {
+        if (typeof window.marked.setOptions === 'function') {
+          window.marked.setOptions({
+            gfm: true,
+            breaks: true,
+            headerIds: false,
+            mangle: false,
+          });
+        }
+        const rendered = window.marked.parse(source);
+        if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
+          return window.DOMPurify.sanitize(rendered, {
+            ADD_TAGS: ['details', 'summary', 'kbd'],
+            ADD_ATTR: ['target', 'rel'],
+          });
+        }
+        return rendered;
+      }
+      return source
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/\n/g, '<br>');
+    };
+
+    const viewSource = document.querySelector('[data-wiki-view-source]');
+    const viewTarget = document.querySelector('[data-wiki-render-target]');
+    if (viewSource && viewTarget) {
+      viewTarget.innerHTML = renderMarkdown(viewSource.value || viewSource.textContent || '');
+    }
+
+    const pageRows = Array.from(document.querySelectorAll('[data-wiki-row]'));
+    const folderButtons = Array.from(document.querySelectorAll('[data-wiki-folder]'));
+    const folderViewLabel = document.querySelector('[data-wiki-view-label]');
+    const searchInput = document.querySelector('[data-wiki-search]');
+    const noResults = document.querySelector('[data-wiki-no-results]');
+    let activeFolder = 'all';
+
+    const applyListFilters = () => {
+      const term = ((searchInput && searchInput.value) || '').trim().toLowerCase();
+      let visible = 0;
+
+      pageRows.forEach((row) => {
+        const teams = parseList(row.getAttribute('data-page-teams'));
+        const teamNames = parseList(row.getAttribute('data-page-team-names'));
+        const title = row.getAttribute('data-page-title') || '';
+        const path = row.getAttribute('data-page-path') || '';
+        const isDraft = row.getAttribute('data-page-is-draft') === '1';
+
+        const folderMatch =
+          activeFolder === 'all' ||
+          (activeFolder === 'public' && !isDraft && teams.length === 0) ||
+          (activeFolder === 'drafts' && isDraft) ||
+          (!isDraft && teams.includes(activeFolder));
+        const haystack = [title, path, teamNames.join(' ')].join(' ').toLowerCase();
+        const searchMatch = !term || haystack.includes(term);
+        const show = folderMatch && searchMatch;
+        row.classList.toggle('d-none', !show);
+        if (show) visible += 1;
+      });
+
+      if (noResults) noResults.classList.toggle('d-none', visible > 0);
+    };
+
+    folderButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        activeFolder = button.getAttribute('data-wiki-folder') || 'all';
+        const label = button.getAttribute('data-wiki-folder-label') || 'All Pages';
+
+        folderButtons.forEach((item) => {
+          item.classList.toggle('is-active', item === button);
+        });
+        if (folderViewLabel) folderViewLabel.textContent = label;
+        applyListFilters();
+      });
+    });
+
+    if (searchInput) {
+      searchInput.addEventListener('input', applyListFilters);
+    }
+    applyListFilters();
+  })();
+</script>
+{% endblock page_content %}

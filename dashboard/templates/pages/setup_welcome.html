@@ -1,0 +1,438 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Welcome Setup{% endblock title %}
+
+{% block content %}
+<div class="auth-shell">
+  <section class="auth-card auth-card-split">
+    <div class="auth-panel">
+      <div class="auth-brand">
+        <img class="auth-brand__img" src="{% static 'img/branding/alshival-logo-469x317.png' %}" alt="Alshival wordmark" />
+      </div>
+      <h1>Hi, I'm Alshival!</h1>
+      <p>I am here to help your team monitor resources, use GitHub and infrastructure context to answer questions, integrate with your systems, query databases, and provide hands-on developer support.</p>
+      <div class="auth-panel-stats">
+        <div>
+          <span class="stat-value">1</span>
+          <span class="stat-label">Setup flow</span>
+        </div>
+        <div>
+          <span class="stat-value">~2m</span>
+          <span class="stat-label">Estimated time</span>
+        </div>
+      </div>
+      <div class="auth-panel-foot">Configure API access and your first admin account.</div>
+    </div>
+
+    <div class="auth-form-wrap">
+      {% if messages %}
+        {% for message in messages %}
+          <div class="auth-flash {{ message.tags }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+
+      {% if errors %}
+        <div class="form-error">
+          {% for error in errors %}
+            <div>{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <form method="post" class="auth-form" data-setup-form data-initial-step="{{ initial_step|default:'1' }}" novalidate>
+        {% csrf_token %}
+        <input type="hidden" name="setup_step" value="2" />
+
+        <div data-setup-step="1">
+          <h3 class="setup-step-title">Step 1: Create admin account</h3>
+          <p class="setup-step-sub">Start by setting up the first administrator.</p>
+
+          {% if not users_exist %}
+            <label class="field">
+              <span>Admin username</span>
+              <input type="text" name="admin_username" value="{{ initial.admin_username }}" required data-admin-username />
+              <small class="field-help">Use GitHub username rules: 1-39 letters, numbers, or single hyphens.</small>
+            </label>
+
+            <label class="field">
+              <span>Admin password</span>
+              <input type="password" name="admin_password" required data-admin-password />
+            </label>
+
+            <label class="field">
+              <span>Confirm password</span>
+              <input type="password" name="admin_password_confirm" required data-admin-password-confirm />
+            </label>
+          {% else %}
+            <p>An account already exists in this environment. Continue to additional configurations.</p>
+          {% endif %}
+
+          <div class="form-error d-none" data-step1-error></div>
+
+          <div class="setup-next-wrap">
+            <button class="primary-btn setup-next-btn" type="button" data-setup-next data-progress-btn>
+              <span class="setup-next-btn__label">Next</span>
+            </button>
+          </div>
+        </div>
+
+        <div data-setup-step="2" class="d-none">
+          <h3 class="setup-step-title">Step 2: Additional configurations</h3>
+          <p class="setup-step-sub">Connect services now or come back later.</p>
+
+          <div class="connector-grid" data-connector-home>
+            <button class="connector-btn connector-btn-openai" type="button" data-connector-open="openai" aria-label="OpenAI connector">
+              <img class="connector-btn__logo" src="{% static 'img/branding/connectors/openai.svg' %}" alt="OpenAI logo" />
+              <span class="connector-btn__label">OpenAi</span>
+            </button>
+
+            <button class="connector-btn connector-btn-microsoft" type="button" data-connector-open="microsoft" aria-label="Microsoft connector">
+              <img class="connector-btn__logo" src="{% static 'img/branding/connectors/microsoft.svg' %}" alt="Microsoft logo" />
+              <span class="connector-btn__label">Microsoft</span>
+            </button>
+
+            <button class="connector-btn connector-btn-github" type="button" data-connector-open="github" aria-label="GitHub connector">
+              <img class="connector-btn__logo" src="{% static 'img/branding/connectors/github.svg' %}" alt="GitHub logo" />
+              <span class="connector-btn__label">GitHub</span>
+            </button>
+
+            <button class="connector-btn connector-btn-twilio" type="button" data-connector-open="twilio" aria-label="Twilio connector">
+              <span class="connector-btn__logo connector-btn__logo-mark">T</span>
+              <span class="connector-btn__label">Twilio</span>
+            </button>
+
+            <button class="connector-btn connector-btn-placeholder" type="button" aria-label="Google connector coming soon">
+              <span class="connector-btn__logo connector-btn__logo-mark">G</span>
+              <span class="connector-btn__label">Google</span>
+              <span class="connector-btn__status">Coming soon</span>
+            </button>
+
+            <button class="connector-btn connector-btn-placeholder" type="button" aria-label="Anthropic connector coming soon">
+              <span class="connector-btn__logo connector-btn__logo-mark">A</span>
+              <span class="connector-btn__label">Anthropic</span>
+              <span class="connector-btn__status">Coming soon</span>
+            </button>
+          </div>
+
+          <div class="connector-config d-none" data-connector-panel>
+            <div class="connector-config__top">
+              <h4 class="connector-config__title" data-connector-title>Connector setup</h4>
+            </div>
+
+            <div class="connector-config__body d-none" data-connector-form="openai">
+              <label class="field">
+                <span>OpenAI API key</span>
+                <input type="password" name="openai_api_key" value="{{ initial.openai_api_key }}" autocomplete="off" />
+              </label>
+            </div>
+
+            <div class="connector-config__body d-none" data-connector-form="microsoft">
+              <div class="connector-help">
+                <p><strong>Redirect URI</strong> (Web):</p>
+                <code>{{ microsoft_redirect_uri }}</code>
+                <p><strong>Basic Microsoft Graph permissions:</strong></p>
+                <ul>
+                  <li><code>User.Read</code></li>
+                </ul>
+              </div>
+              <div class="connector-support">
+                <p>Nice, you are close. Add your Entra app values below, then test with your work Microsoft account.</p>
+                <p>When you click Microsoft sign-in, we first save setup and then route you into the live Microsoft login flow.</p>
+              </div>
+              <label class="field">
+                <span>Microsoft Entra Tenant ID</span>
+                <input type="text" name="microsoft_tenant_id" value="{{ initial.microsoft_tenant_id }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Microsoft Entra Client ID</span>
+                <input type="text" name="microsoft_client_id" value="{{ initial.microsoft_client_id }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Microsoft Entra App Client Secret Value</span>
+                <input type="password" name="microsoft_client_secret" value="{{ initial.microsoft_client_secret }}" autocomplete="off" />
+              </label>
+              <button class="ms-signin-btn d-none" type="submit" name="setup_action" value="test_microsoft" data-ms-test-btn>
+                <img src="{% static 'img/branding/connectors/ms-symbollockup_signin_dark_short.svg' %}" alt="Sign in with Microsoft" />
+              </button>
+            </div>
+
+            <div class="connector-config__body d-none" data-connector-form="github">
+              <div class="connector-help">
+                <p><strong>Callback URL</strong> (GitHub OAuth App):</p>
+                <code>{{ github_redirect_uri }}</code>
+                <p><strong>Recommended OAuth scopes for sign-in:</strong></p>
+                <ul>
+                  <li><code>read:user</code></li>
+                  <li><code>user:email</code></li>
+                </ul>
+              </div>
+              <div class="connector-support">
+                <p>Set up a GitHub OAuth App, paste the credentials, and test sign-in with your work GitHub account.</p>
+                <p>For deeper repo/org automation later, we should add a GitHub App connector separately.</p>
+              </div>
+              <label class="field">
+                <span>GitHub OAuth Client ID</span>
+                <input type="text" name="github_client_id" value="{{ initial.github_client_id }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>GitHub OAuth Client Secret</span>
+                <input type="password" name="github_client_secret" value="{{ initial.github_client_secret }}" autocomplete="off" />
+              </label>
+              <button class="github-signin-btn d-none" type="submit" name="setup_action" value="test_github" data-gh-test-btn>
+                <img src="{% static 'img/branding/connectors/github.svg' %}" alt="" aria-hidden="true" />
+                <span>Sign in with GitHub</span>
+              </button>
+            </div>
+
+            <div class="connector-config__body d-none" data-connector-form="twilio">
+              <div class="connector-help">
+                <p><strong>Configure these Twilio webhook endpoints:</strong></p>
+                <p><strong>SMS webhook</strong> (HTTP POST):</p>
+                <code>{{ twilio_sms_webhook_uri }}</code>
+                <p><strong>Group SMS webhook</strong> (HTTP POST, optional):</p>
+                <code>{{ twilio_sms_group_webhook_uri }}</code>
+                <p><strong>Voice webhook</strong> (HTTP POST):</p>
+                <code>{{ twilio_voice_webhook_uri }}</code>
+                <p><strong>Voice stream</strong> (websocket):</p>
+                <code>{{ twilio_voice_stream_public_uri }}</code>
+                <p><strong>Voice stream (internal/staff)</strong> (websocket):</p>
+                <code>{{ twilio_voice_stream_internal_uri }}</code>
+                <p><strong>What this enables now:</strong></p>
+                <ul>
+                  <li>SMS alerts from your Alshival assistant when incidents happen.</li>
+                </ul>
+              </div>
+              <div class="connector-support">
+                <p>Want me to send a text to your phone when something goes wrong? Set that up here.</p>
+                <p>Add your Twilio Account SID, Auth Token, and the Twilio phone number I should send alerts from.</p>
+              </div>
+              <label class="field">
+                <span>Twilio Account SID</span>
+                <input type="text" name="twilio_account_sid" value="{{ initial.twilio_account_sid }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Twilio Auth Token</span>
+                <input type="password" name="twilio_auth_token" value="{{ initial.twilio_auth_token }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Twilio From Number</span>
+                <input type="text" name="twilio_from_number" value="{{ initial.twilio_from_number }}" placeholder="+15551234567" autocomplete="off" />
+              </label>
+            </div>
+          </div>
+
+          <div class="setup-actions">
+            <button class="secondary-btn" type="button" data-setup-back>Back</button>
+            <button class="primary-btn setup-next-btn setup-complete-btn" type="submit" name="setup_action" value="complete" data-progress-btn>
+              <span class="setup-next-btn__label">Complete</span>
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </section>
+</div>
+{% endblock content %}
+
+{% block page_js %}
+<script>
+  (function () {
+    const form = document.querySelector('[data-setup-form]');
+    if (!form) return;
+
+    const stepOne = form.querySelector('[data-setup-step="1"]');
+    const stepTwo = form.querySelector('[data-setup-step="2"]');
+    const nextButton = form.querySelector('[data-setup-next]');
+    const progressButtons = form.querySelectorAll('[data-progress-btn]');
+    const backButton = form.querySelector('[data-setup-back]');
+    const connectorHome = form.querySelector('[data-connector-home]');
+    const connectorPanel = form.querySelector('[data-connector-panel]');
+    const connectorTitle = form.querySelector('[data-connector-title]');
+    const completeSetupButton = form.querySelector('.setup-complete-btn');
+    const connectorButtons = form.querySelectorAll('[data-connector-open]');
+    const connectorForms = form.querySelectorAll('[data-connector-form]');
+    const microsoftTenantInput = form.querySelector('input[name="microsoft_tenant_id"]');
+    const microsoftClientIdInput = form.querySelector('input[name="microsoft_client_id"]');
+    const microsoftClientSecretInput = form.querySelector('input[name="microsoft_client_secret"]');
+    const microsoftTestButton = form.querySelector('[data-ms-test-btn]');
+    const githubClientIdInput = form.querySelector('input[name="github_client_id"]');
+    const githubClientSecretInput = form.querySelector('input[name="github_client_secret"]');
+    const githubTestButton = form.querySelector('[data-gh-test-btn]');
+    const errorBox = form.querySelector('[data-step1-error]');
+    const usernameInput = form.querySelector('[data-admin-username]');
+    const passwordInput = form.querySelector('[data-admin-password]');
+    const confirmInput = form.querySelector('[data-admin-password-confirm]');
+    const usersExist = {{ users_exist|yesno:"true,false" }};
+    const initialStep = form.getAttribute('data-initial-step') || '1';
+    const usernamePattern = /^(?!-)(?!.*--)[A-Za-z0-9-]{1,39}(?<!-)$/;
+
+    const showStep = (step) => {
+      if (step === 1) {
+        stepOne.classList.remove('d-none');
+        stepTwo.classList.add('d-none');
+        connectorHome?.classList.remove('d-none');
+        connectorPanel?.classList.add('d-none');
+        backButton?.classList.remove('d-none');
+        completeSetupButton?.classList.remove('d-none');
+      } else {
+        stepOne.classList.add('d-none');
+        stepTwo.classList.remove('d-none');
+        backButton?.classList.remove('d-none');
+        completeSetupButton?.classList.remove('d-none');
+      }
+    };
+
+    if (initialStep === '2') {
+      showStep(2);
+    } else {
+      showStep(1);
+    }
+
+    const connectorTitles = {
+      openai: 'OpenAI connector',
+      microsoft: 'Microsoft Entra connector',
+      github: 'GitHub connector',
+      twilio: 'Twilio connector'
+    };
+
+    const showConnectorPanel = (connectorKey) => {
+      connectorHome?.classList.add('d-none');
+      connectorPanel?.classList.remove('d-none');
+      completeSetupButton?.classList.add('d-none');
+      if (connectorTitle) {
+        connectorTitle.textContent = connectorTitles[connectorKey] || 'Connector setup';
+      }
+      connectorForms.forEach((panel) => {
+        const shouldShow = panel.getAttribute('data-connector-form') === connectorKey;
+        panel.classList.toggle('d-none', !shouldShow);
+      });
+      if (connectorKey === 'microsoft') {
+        updateMicrosoftTestButton();
+      }
+      if (connectorKey === 'github') {
+        updateGithubTestButton();
+      }
+    };
+
+    const showConnectorHome = () => {
+      connectorHome?.classList.remove('d-none');
+      connectorPanel?.classList.add('d-none');
+      backButton?.classList.remove('d-none');
+      completeSetupButton?.classList.remove('d-none');
+      connectorForms.forEach((panel) => panel.classList.add('d-none'));
+    };
+
+    const updateMicrosoftTestButton = () => {
+      if (!microsoftTestButton) return;
+      const tenant = (microsoftTenantInput?.value || '').trim();
+      const clientId = (microsoftClientIdInput?.value || '').trim();
+      const clientSecret = (microsoftClientSecretInput?.value || '').trim();
+      const isComplete = Boolean(tenant && clientId && clientSecret);
+      microsoftTestButton.classList.toggle('d-none', !isComplete);
+    };
+
+    const updateGithubTestButton = () => {
+      if (!githubTestButton) return;
+      const clientId = (githubClientIdInput?.value || '').trim();
+      const clientSecret = (githubClientSecretInput?.value || '').trim();
+      const isComplete = Boolean(clientId && clientSecret);
+      githubTestButton.classList.toggle('d-none', !isComplete);
+    };
+
+    const setError = (message) => {
+      if (!errorBox) return;
+      if (!message) {
+        errorBox.textContent = '';
+        errorBox.classList.add('d-none');
+        return;
+      }
+      errorBox.textContent = message;
+      errorBox.classList.remove('d-none');
+    };
+
+    const validateStepOne = () => {
+      if (usersExist) {
+        setError('');
+        return true;
+      }
+      const username = (usernameInput?.value || '').trim();
+      const password = passwordInput?.value || '';
+      const confirm = confirmInput?.value || '';
+
+      if (!username) {
+        setError('Admin username is required.');
+        return false;
+      }
+      if (!usernamePattern.test(username)) {
+        setError('Use GitHub username rules: 1-39 letters/numbers/hyphens, no leading/trailing or consecutive hyphens.');
+        return false;
+      }
+      if (!password) {
+        setError('Admin password is required.');
+        return false;
+      }
+      if (password.length < 8) {
+        setError('Admin password must be at least 8 characters.');
+        return false;
+      }
+      if (password !== confirm) {
+        setError('Admin password confirmation does not match.');
+        return false;
+      }
+      setError('');
+      return true;
+    };
+
+    nextButton?.addEventListener('click', () => {
+      if (!validateStepOne()) return;
+      showStep(2);
+    });
+
+    backButton?.addEventListener('click', () => {
+      const isConnectorPanelOpen = connectorPanel && !connectorPanel.classList.contains('d-none');
+      if (isConnectorPanelOpen) {
+        showConnectorHome();
+        return;
+      }
+      showStep(1);
+    });
+
+    connectorButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const connectorKey = button.getAttribute('data-connector-open');
+        if (!connectorKey) return;
+        showConnectorPanel(connectorKey);
+      });
+    });
+
+    [microsoftTenantInput, microsoftClientIdInput, microsoftClientSecretInput].forEach((input) => {
+      input?.addEventListener('input', updateMicrosoftTestButton);
+    });
+    [githubClientIdInput, githubClientSecretInput].forEach((input) => {
+      input?.addEventListener('input', updateGithubTestButton);
+    });
+
+    if (progressButtons.length) {
+      const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const scheduleJiggle = (button) => {
+        if (prefersReducedMotion) return;
+        const delay = 500 + Math.random() * 4500;
+        window.setTimeout(() => {
+          button.classList.add('is-jiggling');
+        }, delay);
+      };
+
+      progressButtons.forEach((button) => {
+        button.addEventListener('animationend', (event) => {
+          if (event.animationName === 'chatbot-jiggle') {
+            button.classList.remove('is-jiggling');
+            scheduleJiggle(button);
+          }
+        });
+        scheduleJiggle(button);
+      });
+    }
+  })();
+</script>
+{% endblock page_js %}

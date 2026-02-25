@@ -1,5 +1,5 @@
 (function () {
-  const storageKey = 'fefe-theme';
+  const storageKey = 'alshival-theme';
   const root = document.documentElement;
   const toggles = document.querySelectorAll('.theme__toggle');
   const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;

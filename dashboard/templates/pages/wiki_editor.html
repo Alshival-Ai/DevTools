@@ -1,0 +1,171 @@
+{% extends 'vertical.html' %}
+{% load static %}
+
+{% block title %}Wiki Editor{% endblock title %}
+
+{% block page_content %}
+<section class="wiki-editor-page">
+  {% if status_message %}
+  <section class="table-wrap">
+    <div class="team-status team-status-{{ status_tone }}">{{ status_message }}</div>
+  </section>
+  {% endif %}
+
+  <form
+    method="post"
+    action="{% if editor_mode == 'create' %}{% url 'wiki_create_page' %}{% else %}{% url 'wiki_update_page' editor_page.id %}{% endif %}"
+    class="wiki-editor-form"
+    data-wiki-editor-form>
+    {% csrf_token %}
+
+    <section class="hero wiki-editor-header">
+      <div class="hero-card wiki-editor-header-card">
+        <div class="wiki-editor-meta">
+          <label>
+            <span>Wiki title</span>
+            <input type="text" name="title" value="{{ editor_payload.title }}" required data-wiki-title />
+          </label>
+          <label>
+            <span>Path</span>
+            <input type="text" name="path" value="{{ editor_payload.path }}" placeholder="docs/getting-started" required data-wiki-path />
+          </label>
+        </div>
+        <label class="wiki-editor-team-field">
+          <span>Restrict to teams (optional)</span>
+          <select name="team_names" multiple size="4">
+            {% for team_name in member_teams %}
+            <option value="{{ team_name }}"{% if team_name in editor_payload.team_names %} selected{% endif %}>{{ team_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+
+      <div class="hero-card wiki-editor-header-side">
+        <div class="hero-actions">
+          <a class="ghost-btn" href="{% url 'wiki' %}{% if editor_page %}?page={{ editor_page.path|urlencode }}{% endif %}">Back to Wiki</a>
+        </div>
+        <p class="text-muted small">Draft pages are only visible to their creator and admins.</p>
+        {% if editor_mode == 'edit' %}
+        <div class="text-muted small">Created: {{ editor_payload.created_display }}</div>
+        <div class="text-muted small">Updated: {{ editor_payload.updated_display }}</div>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="table-wrap settings-panel">
+      <div class="wiki-editor-grid">
+        <label>
+          <span>Markdown</span>
+          <textarea name="body_markdown" rows="20" data-wiki-markdown-input>{{ editor_payload.markdown }}</textarea>
+        </label>
+        <section>
+          <span>Live preview</span>
+          <div class="wiki-editor-preview md-body" data-wiki-preview-target>
+            <p class="text-muted">Start writing markdown to preview your page.</p>
+          </div>
+        </section>
+      </div>
+
+      <div class="modal-actions">
+        <button class="secondary-btn" type="submit" name="save_intent" value="draft">Save Draft</button>
+        <button class="primary-btn" type="submit" name="save_intent" value="publish">
+          {% if editor_payload.is_draft %}Publish Draft{% else %}Publish{% endif %}
+        </button>
+      </div>
+    </section>
+  </form>
+
+  {% if editor_mode == 'edit' and request.user.is_superuser %}
+  <section class="table-wrap settings-panel">
+    <div class="table-actions">
+      <form method="post" action="{% url 'wiki_delete_page' editor_page.id %}" onsubmit="return confirm('Delete this page?');">
+        {% csrf_token %}
+        <button class="icon-btn danger" type="submit">Delete page</button>
+      </form>
+    </div>
+  </section>
+  {% endif %}
+</section>
+
+<script src="{% static 'js/marked.min.js' %}"></script>
+<script src="{% static 'js/purify.min.js' %}"></script>
+<script>
+  (function () {
+    const form = document.querySelector('[data-wiki-editor-form]');
+    if (!form) return;
+
+    const titleInput = form.querySelector('[data-wiki-title]');
+    const pathInput = form.querySelector('[data-wiki-path]');
+    const markdownInput = form.querySelector('[data-wiki-markdown-input]');
+    const previewTarget = form.querySelector('[data-wiki-preview-target]');
+    const isCreateMode = {% if editor_mode == 'create' %}true{% else %}false{% endif %};
+
+    const slugifyValue = (value) => {
+      return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9/_\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/\/+/g, '/')
+        .replace(/-+/g, '-')
+        .replace(/^\/+|\/+$/g, '');
+    };
+
+    const renderMarkdown = (value) => {
+      const source = String(value || '');
+      if (!source.trim()) {
+        return '<p class="text-muted">Start writing markdown to preview your page.</p>';
+      }
+
+      if (window.marked && typeof window.marked.parse === 'function') {
+        if (typeof window.marked.setOptions === 'function') {
+          window.marked.setOptions({
+            gfm: true,
+            breaks: true,
+            headerIds: false,
+            mangle: false,
+          });
+        }
+        const rendered = window.marked.parse(source);
+        if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
+          return window.DOMPurify.sanitize(rendered, {
+            ADD_TAGS: ['details', 'summary', 'kbd'],
+            ADD_ATTR: ['target', 'rel'],
+          });
+        }
+        return rendered;
+      }
+      return source
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/\n/g, '<br>');
+    };
+
+    let pathTouched = !!((pathInput && pathInput.value) || '').trim();
+
+    if (pathInput) {
+      pathInput.addEventListener('input', () => {
+        pathTouched = !!(pathInput.value || '').trim();
+      });
+    }
+    if (titleInput && pathInput && isCreateMode) {
+      titleInput.addEventListener('input', () => {
+        if (pathTouched) return;
+        pathInput.value = slugifyValue(titleInput.value);
+      });
+    }
+
+    const applyPreview = () => {
+      if (!previewTarget || !markdownInput) return;
+      previewTarget.innerHTML = renderMarkdown(markdownInput.value || '');
+    };
+    if (markdownInput) {
+      markdownInput.addEventListener('input', applyPreview);
+    }
+    applyPreview();
+  })();
+</script>
+{% endblock page_content %}

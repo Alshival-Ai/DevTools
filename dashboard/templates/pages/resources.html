@@ -3,162 +3,179 @@
 {% block title %}Resources{% endblock title %}
 
 {% block page_content %}
-<section class="hero">
-  <div>
-    <h1>Resource monitor</h1>
-    <p>Track the health of APIs, virtual machines, and background workers from one place.</p>
-    <div class="hero-actions">
-      <button class="primary-btn" type="button" data-modal-open="resource">Add resource</button>
-      <button class="secondary-btn" type="button">Configure alerts</button>
-    </div>
-  </div>
-  <div class="hero-card">
-    <h3>Service uptime</h3>
-    <div class="metric">
-      <span class="metric-value">99.2%</span>
-      <span class="metric-label">Past 7 days</span>
-    </div>
-    <div class="progress">
-      <span style="width: 72%"></span>
-    </div>
-    <div class="hero-meta">
-      <span>14 endpoints</span>
-      <span>6 regions</span>
-    </div>
-  </div>
-</section>
-
-<section class="grid">
-  <article class="card">
-    <h3>API endpoints</h3>
-    <p>6 healthy, 2 degraded, 1 down.</p>
-    <div class="tag-row">
-      <span class="tag">Latency</span>
-      <span class="tag">Errors</span>
-      <span class="tag">Throughput</span>
-    </div>
-  </article>
-  <article class="card">
-    <h3>Virtual machines</h3>
-    <ul class="list">
-      <li>VM-east-02 (CPU 58%)</li>
-      <li>VM-central-07 (Memory 71%)</li>
-      <li>VM-eu-04 (Disk 64%)</li>
-    </ul>
-  </article>
-  <article class="card">
-    <h3>Background jobs</h3>
-    <p>3 queues within SLA, 1 backlog spike.</p>
-    <div class="metric-row">
-      <div>
-        <div class="metric-value">0.9s</div>
-        <div class="metric-label">Avg latency</div>
-      </div>
-      <div>
-        <div class="metric-value">412</div>
-        <div class="metric-label">Pending jobs</div>
+<section class="resources-layout">
+  <aside class="team-folder-panel card">
+    <div class="team-folder-title">Folders</div>
+    <div class="team-folder-subtitle">Browse by team scope</div>
+    <div class="team-folder-tree">
+      <button class="team-folder-btn is-active" type="button" data-team-folder="all" data-team-label="All Resources">
+        <span class="folder-icon" aria-hidden="true">📁</span>
+        <span>All Resources</span>
+      </button>
+      <button class="team-folder-btn" type="button" data-team-folder="mine" data-team-label="My Resources">
+        <span class="folder-icon" aria-hidden="true">📂</span>
+        <span>My Resources</span>
+      </button>
+      <div class="team-folder-group">
+        <div class="team-folder-group-label">Teams</div>
+        {% if member_teams %}
+          {% for team_name in member_teams %}
+          <button
+            class="team-folder-btn"
+            type="button"
+            data-team-folder="{{ team_name|lower|slugify }}"
+            data-team-label="{{ team_name }}">
+            <span class="folder-icon" aria-hidden="true">🗂</span>
+            <span>{{ team_name }}</span>
+          </button>
+          {% endfor %}
+        {% else %}
+          <div class="text-muted small">No team memberships yet.</div>
+        {% endif %}
       </div>
     </div>
-  </article>
-</section>
+  </aside>
 
-<section class="table-wrap">
-  <div class="table-header">
-    <h3>Resources</h3>
-    <div class="table-actions">
-      <button class="ghost-btn" type="button" data-modal-open="resource">Add resource</button>
-      <button class="ghost-btn" type="button">Export</button>
+  <div class="resources-main">
+    <div class="team-filter-banner">
+      <span class="text-muted small">Viewing</span>
+      <strong data-team-view-label>All Resources</strong>
     </div>
-  </div>
-  <table>
-    <thead>
-      <tr>
-        <th>Resource</th>
-        <th>Type</th>
-        <th>Target</th>
-        <th>Added</th>
-        <th class="table-actions-col">Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% if resources %}
-        {% for item in resources %}
-        <tr>
-          <td>
-            <span class="resource-cell">
-              <span class="status-slot">
-                <button
-                  class="status-orb"
-                  type="button"
-                  aria-label="Run health check"
-                  title="Run health check"
-                  data-health-check
-                  data-resource-id="{{ item.id }}"
-                  data-status="{{ item.last_status|default:'unknown' }}">
-                </button>
-                <span class="status-loader" aria-hidden="true">
-                  <span class="typing-indicator">
-                    <span class="typing-circle"></span>
-                    <span class="typing-circle"></span>
-                    <span class="typing-circle"></span>
-                    <span class="typing-shadow"></span>
-                    <span class="typing-shadow"></span>
-                    <span class="typing-shadow"></span>
+
+    <section class="grid">
+      <article class="card">
+        <h3>API endpoints</h3>
+        <p>6 healthy, 2 degraded, 1 down.</p>
+        <div class="tag-row">
+          <span class="tag">Latency</span>
+          <span class="tag">Errors</span>
+          <span class="tag">Throughput</span>
+        </div>
+      </article>
+      <article class="card card-wide">
+        <h3>Service uptime</h3>
+        <div class="metric">
+          <span class="metric-value">99.2%</span>
+          <span class="metric-label">Past 7 days</span>
+        </div>
+        <div class="progress">
+          <span style="width: 72%"></span>
+        </div>
+        <div class="hero-meta">
+          <span>14 endpoints</span>
+          <span>6 regions</span>
+        </div>
+      </article>
+    </section>
+
+    <section class="table-wrap">
+      <div class="table-header">
+        <h3>Resources</h3>
+        <div class="table-actions">
+          <button class="ghost-btn" type="button" data-modal-open="resource">Add resource</button>
+          <button class="ghost-btn" type="button">Export</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Resource</th>
+            <th>Type</th>
+            <th>Target</th>
+            <th>Added</th>
+            <th class="table-actions-col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if resources %}
+            {% for item in resources %}
+            <tr
+              data-resource-row
+              data-resource-scope="{{ item.access_scope }}"
+              data-resource-teams="{% for team_name in item.team_names %}{% if not forloop.first %}|{% endif %}{{ team_name|lower|slugify }}{% endfor %}">
+              <td>
+                <span class="resource-cell">
+                  <span class="status-slot">
+                    <button
+                      class="status-orb"
+                      type="button"
+                      aria-label="Run health check"
+                      title="Run health check"
+                      data-health-check
+                      data-resource-id="{{ item.id }}"
+                      data-status="{{ item.last_status|default:'unknown' }}">
+                    </button>
+                    <span class="status-loader" aria-hidden="true">
+                      <span class="typing-indicator">
+                        <span class="typing-circle"></span>
+                        <span class="typing-circle"></span>
+                        <span class="typing-circle"></span>
+                        <span class="typing-shadow"></span>
+                        <span class="typing-shadow"></span>
+                        <span class="typing-shadow"></span>
+                      </span>
+                    </span>
+                  </span>
+                  <span>
+                    <a class="resource-link" href="{{ item.detail_url }}">
+                      {{ item.name }}
+                    </a>
+                    {% if item.notes %}
+                      <div class="text-muted small">{{ item.notes }}</div>
+                    {% endif %}
                   </span>
                 </span>
-              </span>
-              <span>
-                <a class="resource-link" href="{% url 'resource_detail' item.id %}">
-                  {{ item.name }}
-                </a>
-                {% if item.notes %}
-                  <div class="text-muted small">{{ item.notes }}</div>
-                {% endif %}
-              </span>
-            </span>
-          </td>
-          <td>{{ item.resource_type|title }}</td>
-          <td>{{ item.target }}</td>
-          <td>{{ item.created_at }}</td>
-          <td class="row-actions">
-            <button
-              class="icon-btn icon-btn-small"
-              type="button"
-              data-modal-open="edit-resource"
-              data-resource-id="{{ item.id }}"
-              data-resource-name="{{ item.name|escape }}"
-              data-resource-type="{{ item.resource_type }}"
-              data-resource-target="{{ item.target|escape }}"
-              data-resource-address="{{ item.address|escape }}"
-              data-resource-port="{{ item.port|escape }}"
-              data-resource-db-type="{{ item.db_type|escape }}"
-              data-resource-healthcheck-url="{{ item.healthcheck_url|escape }}"
-              data-resource-notes="{{ item.notes|escape }}"
-              data-resource-ssh-key-name="{{ item.ssh_key_name|escape }}"
-              data-resource-ssh-username="{{ item.ssh_username|escape }}"
-              data-resource-ssh-key-present="{% if item.ssh_key_present %}1{% else %}0{% endif %}"
-              data-resource-ssh-credential-id="{{ item.ssh_credential_id|escape }}"
-              data-resource-ssh-credential-scope="{{ item.ssh_credential_scope|escape }}"
-              data-resource-ssh-port="{{ item.ssh_port|escape }}">
-              ✎
-            </button>
-            <form method="post" action="{% url 'delete_resource_item' item.id %}" class="inline-form" onsubmit="return confirm('Delete this resource?');">
-              {% csrf_token %}
-              <button class="icon-btn icon-btn-small danger" type="submit">🗑</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      {% else %}
-        <tr>
-          <td colspan="5" class="text-muted">No resources added yet.</td>
-        </tr>
-      {% endif %}
-    </tbody>
-  </table>
-</section>
+              </td>
+              <td>{{ item.resource_type|title }}</td>
+              <td>{{ item.target }}</td>
+              <td>{{ item.created_at }}</td>
+              <td class="row-actions">
+                <button
+                  class="icon-btn icon-btn-small"
+                  type="button"
+                  data-modal-open="edit-resource"
+                  data-resource-id="{{ item.id }}"
+                  data-resource-name="{{ item.name|escape }}"
+                  data-resource-type="{{ item.resource_type }}"
+                  data-resource-target="{{ item.target|escape }}"
+                  data-resource-address="{{ item.address|escape }}"
+                  data-resource-port="{{ item.port|escape }}"
+                  data-resource-db-type="{{ item.db_type|escape }}"
+                  data-resource-healthcheck-url="{{ item.healthcheck_url|escape }}"
+                  data-resource-notes="{{ item.notes|escape }}"
+                  data-resource-scope="{{ item.access_scope }}"
+                  data-resource-team-names="{% for team_name in item.team_names %}{% if not forloop.first %},{% endif %}{{ team_name|escape }}{% endfor %}"
+                  data-resource-ssh-key-name="{{ item.ssh_key_name|escape }}"
+                  data-resource-ssh-username="{{ item.ssh_username|escape }}"
+                  data-resource-ssh-key-present="{% if item.ssh_key_present %}1{% else %}0{% endif %}"
+                  data-resource-ssh-credential-id="{{ item.ssh_credential_id|escape }}"
+                  data-resource-ssh-credential-scope="{{ item.ssh_credential_scope|escape }}"
+                  data-resource-ssh-port="{{ item.ssh_port|escape }}">
+                  ✎
+                </button>
+                <form method="post" action="{% url 'delete_resource_item' item.id %}" class="inline-form" onsubmit="return confirm('Delete this resource?');">
+                  {% csrf_token %}
+                  <button class="icon-btn icon-btn-small danger" type="submit">🗑</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr>
+              <td colspan="5" class="text-muted">No resources added yet.</td>
+            </tr>
+          {% endif %}
+        </tbody>
+      </table>
+      <div class="text-muted small team-filter-note d-none" data-resource-filter-note>
+        Showing resources for the selected folder.
+      </div>
+      <div class="text-muted small d-none" data-resource-empty-filter>
+        No resources available for this team.
+      </div>
+    </section>
 
-<section class="resource-ops-grid">
+    <section class="resource-ops-grid">
   <article class="table-wrap alerts-wrap">
     <div class="table-header alerts-header">
       <h3>Alerts</h3>
@@ -167,7 +184,7 @@
     <div class="alerts-list">
       {% if resource_alerts %}
         {% for alert in resource_alerts %}
-        <a class="alert-item alert-item-{{ alert.tone }}" href="{% url 'resource_detail' alert.resource_id %}">
+        <a class="alert-item alert-item-{{ alert.tone }}" href="{{ alert.detail_url }}">
           <span class="alert-dot" aria-hidden="true"></span>
           <div class="alert-main">
             <div class="alert-top">
@@ -207,13 +224,16 @@
       <tbody>
         {% if ssh_credential_choices %}
           {% for item in ssh_credential_choices %}
-          <tr>
+          <tr
+            data-ssh-row
+            data-ssh-scope="{{ item.scope }}"
+            data-ssh-teams="{% for team_name in item.team_names %}{% if not forloop.first %}|{% endif %}{{ team_name|lower|slugify }}{% endfor %}">
             <td>{{ item.name }}</td>
             <td>
               {% if item.scope == 'team' %}
-                Team{% if item.team_name %} ({{ item.team_name }}){% endif %}
+                Team{% if item.team_names %} ({{ item.team_names|join:', ' }}){% endif %}
               {% elif item.scope == 'global_team' %}
-                Global{% if item.team_name %} ({{ item.team_name }}){% endif %}
+                Global{% if item.team_names %} ({{ item.team_names|join:', ' }}){% endif %}
               {% else %}
                 Account
               {% endif %}
@@ -236,6 +256,9 @@
             </td>
           </tr>
           {% endfor %}
+          <tr class="d-none" data-ssh-empty-filter>
+            <td colspan="4" class="text-muted">No SSH keys available for this team.</td>
+          </tr>
         {% else %}
           <tr>
             <td colspan="4" class="text-muted">No saved SSH keys yet.</td>
@@ -244,6 +267,8 @@
       </tbody>
     </table>
   </section>
+    </section>
+  </div>
 </section>
 
 <div class="modal" data-modal="ssh-key" aria-hidden="true">
@@ -270,9 +295,8 @@
         </select>
       </label>
       <label data-library-team-field class="d-none">
-        <span>Team</span>
-        <select name="team_name">
-          <option value="">Select a team</option>
+        <span>Teams</span>
+        <select name="team_names" multiple size="5">
           {% for team_name in member_teams %}
           <option value="{{ team_name }}">{{ team_name }}</option>
           {% endfor %}
@@ -380,9 +404,9 @@
                 {% for item in ssh_credential_choices %}
                 <option value="{{ item.id_value }}" data-scope="{{ item.scope_level }}">
                   {% if item.scope == 'team' %}
-                    Team{% if item.team_name %} ({{ item.team_name }}){% endif %}: {{ item.name }}
+                    Team{% if item.team_names %} ({{ item.team_names|join:', ' }}){% endif %}: {{ item.name }}
                   {% elif item.scope == 'global_team' %}
-                    Global{% if item.team_name %} ({{ item.team_name }}){% endif %}: {{ item.name }}
+                    Global{% if item.team_names %} ({{ item.team_names|join:', ' }}){% endif %}: {{ item.name }}
                   {% else %}
                     Account: {{ item.name }}
                   {% endif %}
@@ -404,8 +428,12 @@
               </select>
             </label>
             <label>
-              <span>Team name (optional)</span>
-              <input type="text" name="ssh_team_name" placeholder="Platform Ops" />
+              <span>Teams</span>
+              <select name="ssh_team_names" multiple size="5">
+                {% for team_name in member_teams %}
+                <option value="{{ team_name }}">{{ team_name }}</option>
+                {% endfor %}
+              </select>
             </label>
             <label>
               <span>Key name</span>
@@ -426,6 +454,24 @@
       <label data-resource-type-show="api,vm,database,queue,service,other" class="d-none">
         <span>Notes</span>
         <textarea name="notes" rows="3" placeholder="Optional context"></textarea>
+      </label>
+      <label>
+        <span>Access scope</span>
+        <select name="resource_scope">
+          <option value="account">Account</option>
+          <option value="team">Team</option>
+          {% if request.user.is_superuser %}
+          <option value="global">Global</option>
+          {% endif %}
+        </select>
+      </label>
+      <label data-resource-scope-team-field class="d-none">
+        <span>Teams</span>
+        <select name="resource_team_names" multiple size="5">
+          {% for team_name in member_teams %}
+          <option value="{{ team_name }}">{{ team_name }}</option>
+          {% endfor %}
+        </select>
       </label>
       <div class="modal-actions">
         <button class="ghost-btn" type="button" data-modal-close>Cancel</button>
@@ -520,9 +566,9 @@
                 {% for item in ssh_credential_choices %}
                 <option value="{{ item.id_value }}">
                   {% if item.scope == 'team' %}
-                    Team{% if item.team_name %} ({{ item.team_name }}){% endif %}: {{ item.name }}
+                    Team{% if item.team_names %} ({{ item.team_names|join:', ' }}){% endif %}: {{ item.name }}
                   {% elif item.scope == 'global_team' %}
-                    Global{% if item.team_name %} ({{ item.team_name }}){% endif %}: {{ item.name }}
+                    Global{% if item.team_names %} ({{ item.team_names|join:', ' }}){% endif %}: {{ item.name }}
                   {% else %}
                     Account: {{ item.name }}
                   {% endif %}
@@ -544,8 +590,12 @@
               </select>
             </label>
             <label>
-              <span>Team name (optional)</span>
-              <input type="text" name="ssh_team_name" placeholder="Platform Ops" />
+              <span>Teams</span>
+              <select name="ssh_team_names" multiple size="5">
+                {% for team_name in member_teams %}
+                <option value="{{ team_name }}">{{ team_name }}</option>
+                {% endfor %}
+              </select>
             </label>
             <label>
               <span>Key name</span>
@@ -571,6 +621,24 @@
         <span>Notes</span>
         <textarea name="notes" rows="3"></textarea>
       </label>
+      <label>
+        <span>Access scope</span>
+        <select name="resource_scope">
+          <option value="account">Account</option>
+          <option value="team">Team</option>
+          {% if request.user.is_superuser %}
+          <option value="global">Global</option>
+          {% endif %}
+        </select>
+      </label>
+      <label data-resource-scope-team-field class="d-none">
+        <span>Teams</span>
+        <select name="resource_team_names" multiple size="5">
+          {% for team_name in member_teams %}
+          <option value="{{ team_name }}">{{ team_name }}</option>
+          {% endfor %}
+        </select>
+      </label>
       <div class="modal-actions">
         <button class="ghost-btn" type="button" data-modal-close>Cancel</button>
         <button class="primary-btn" type="submit">Save changes</button>
@@ -587,6 +655,13 @@
     const addForm = document.querySelector('[data-add-form]');
     const sshLibraryForm = document.querySelector('[data-ssh-library-form]');
     const healthButtons = document.querySelectorAll('[data-health-check]');
+    const teamFolderButtons = document.querySelectorAll('[data-team-folder]');
+    const teamViewLabel = document.querySelector('[data-team-view-label]');
+    const resourceFilterNote = document.querySelector('[data-resource-filter-note]');
+    const resourceRows = document.querySelectorAll('[data-resource-row]');
+    const resourceEmptyFilter = document.querySelector('[data-resource-empty-filter]');
+    const sshRows = document.querySelectorAll('[data-ssh-row]');
+    const sshEmptyFilterRow = document.querySelector('[data-ssh-empty-filter]');
     const updateTypeVisibility = (form) => {
       if (!form) return;
       const typeSelect = form.querySelector('select[name="resource_type"]');
@@ -700,13 +775,15 @@
       if (!form) return;
       const sshModeSelect = form.querySelector('select[name="ssh_mode"]');
       const sshScopeSelect = form.querySelector('select[name="ssh_scope"]');
-      const sshTeamInput = form.querySelector('input[name="ssh_team_name"]');
+      const sshTeamSelect = form.querySelector('select[name="ssh_team_names"]');
       const sshCredentialSelect = form.querySelector('select[name="ssh_credential_id"]');
       const sshUsernameInput = form.querySelector('input[name="ssh_username"]');
       const sshPortInput = form.querySelector('input[name="ssh_port"]');
       if (sshModeSelect) sshModeSelect.value = 'inline';
       if (sshScopeSelect) sshScopeSelect.value = 'account';
-      if (sshTeamInput) sshTeamInput.value = '';
+      if (sshTeamSelect) {
+        Array.from(sshTeamSelect.options).forEach((option) => { option.selected = false; });
+      }
       if (sshCredentialSelect) sshCredentialSelect.value = '';
       if (sshUsernameInput) sshUsernameInput.value = '';
       if (sshPortInput) sshPortInput.value = '22';
@@ -716,12 +793,24 @@
       if (!sshLibraryForm) return;
       const scopeSelect = sshLibraryForm.querySelector('select[name="scope"]');
       const teamField = sshLibraryForm.querySelector('[data-library-team-field]');
-      const teamSelect = sshLibraryForm.querySelector('select[name="team_name"]');
+      const teamSelect = sshLibraryForm.querySelector('select[name="team_names"]');
       if (!scopeSelect || !teamField || !teamSelect) return;
       const showTeam = scopeSelect.value === 'team';
       teamField.classList.toggle('d-none', !showTeam);
       if (!showTeam) {
-        teamSelect.value = '';
+        Array.from(teamSelect.options).forEach((option) => { option.selected = false; });
+      }
+    };
+    const updateResourceScopeField = (form) => {
+      if (!form) return;
+      const scopeSelect = form.querySelector('select[name="resource_scope"]');
+      const teamField = form.querySelector('[data-resource-scope-team-field]');
+      const teamSelect = form.querySelector('select[name="resource_team_names"]');
+      if (!scopeSelect || !teamField || !teamSelect) return;
+      const showTeam = scopeSelect.value === 'team';
+      teamField.classList.toggle('d-none', !showTeam);
+      if (!showTeam) {
+        Array.from(teamSelect.options).forEach((option) => { option.selected = false; });
       }
     };
 
@@ -745,6 +834,22 @@
         sshModeSelect.addEventListener('change', () => updateSshModeSections(form));
       }
       updateSshModeSections(form);
+      const resourceScopeSelect = form.querySelector('select[name="resource_scope"]');
+      if (resourceScopeSelect) {
+        resourceScopeSelect.addEventListener('change', () => updateResourceScopeField(form));
+      }
+      updateResourceScopeField(form);
+      const resourceTeamSelect = form.querySelector('select[name="resource_team_names"]');
+      if (resourceScopeSelect && resourceTeamSelect) {
+        form.addEventListener('submit', (event) => {
+          if (resourceScopeSelect.value !== 'team') return;
+          const selected = Array.from(resourceTeamSelect.selectedOptions || []);
+          if (selected.length === 0) {
+            event.preventDefault();
+            resourceTeamSelect.focus();
+          }
+        });
+      }
       const sshUsernameInput = form.querySelector('input[name="ssh_username"]');
       const sshKeyTextInput = form.querySelector('textarea[name="ssh_key_text"]');
       const sshKeyFileInput = form.querySelector('input[name="ssh_key_file"]');
@@ -864,6 +969,11 @@
           }
           editForm.querySelector('textarea[name="notes"]').value = button.getAttribute('data-resource-notes') || '';
           const sshKeyName = button.getAttribute('data-resource-ssh-key-name') || '';
+          const resourceScope = button.getAttribute('data-resource-scope') || 'account';
+          const resourceTeamNames = (button.getAttribute('data-resource-team-names') || '')
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean);
           const sshUsername = button.getAttribute('data-resource-ssh-username') || '';
           const sshKeyPresent = button.getAttribute('data-resource-ssh-key-present') === '1';
           const sshCredentialId = button.getAttribute('data-resource-ssh-credential-id') || '';
@@ -874,18 +984,28 @@
           const sshPortInput = editForm.querySelector('input[name="ssh_port"]');
           const sshModeSelect = editForm.querySelector('select[name="ssh_mode"]');
           const sshScopeSelect = editForm.querySelector('select[name="ssh_scope"]');
-          const sshTeamInput = editForm.querySelector('input[name="ssh_team_name"]');
+          const sshTeamSelect = editForm.querySelector('select[name="ssh_team_names"]');
           const sshCredentialSelect = editForm.querySelector('select[name="ssh_credential_id"]');
           const sshKeyTextInput = editForm.querySelector('textarea[name="ssh_key_text"]');
           const sshKeyFileInput = editForm.querySelector('input[name="ssh_key_file"]');
           const clearKeyInput = editForm.querySelector('input[name="clear_ssh_key"]');
+          const resourceScopeSelect = editForm.querySelector('select[name="resource_scope"]');
+          const resourceTeamSelect = editForm.querySelector('select[name="resource_team_names"]');
           if (sshKeyNameInput) sshKeyNameInput.value = sshKeyName;
+          if (resourceScopeSelect) resourceScopeSelect.value = resourceScope;
+          if (resourceTeamSelect) {
+            Array.from(resourceTeamSelect.options).forEach((option) => {
+              option.selected = resourceTeamNames.includes(option.value);
+            });
+          }
           if (sshUsernameInput) sshUsernameInput.value = sshUsername;
           if (sshPortInput) sshPortInput.value = sshPort || '22';
           if (sshScopeSelect) {
             sshScopeSelect.value = scopeLevelFromStored(sshCredentialId, sshCredentialScope);
           }
-          if (sshTeamInput) sshTeamInput.value = '';
+          if (sshTeamSelect) {
+            Array.from(sshTeamSelect.options).forEach((option) => { option.selected = false; });
+          }
           if (sshModeSelect) sshModeSelect.value = sshCredentialId ? 'saved' : 'inline';
           if (sshCredentialSelect) sshCredentialSelect.value = sshCredentialId;
           updateSshModeSections(editForm);
@@ -894,12 +1014,18 @@
           if (clearKeyInput) clearKeyInput.checked = false;
           resetSshPanel(editForm);
           updateTypeVisibility(editForm);
+          updateResourceScopeField(editForm);
           updateSshKeyStatus(editForm, sshKeyName, sshKeyPresent);
         }
         if (modalName === 'resource') {
           resetSshFields(addForm);
           resetSshPanel(addForm);
           updateTypeVisibility(addForm);
+          if (addForm) {
+            const resourceScopeSelect = addForm.querySelector('select[name="resource_scope"]');
+            if (resourceScopeSelect) resourceScopeSelect.value = 'account';
+            updateResourceScopeField(addForm);
+          }
         }
         if (modalName === 'ssh-key' && sshLibraryForm) {
           sshLibraryForm.reset();
@@ -970,6 +1096,66 @@
       });
     });
 
+    const applyTeamFolder = (teamKey, teamLabel) => {
+      const normalized = teamKey || 'all';
+      const label = teamLabel || 'All Resources';
+      teamFolderButtons.forEach((button) => {
+        button.classList.toggle('is-active', button.getAttribute('data-team-folder') === normalized);
+      });
+      if (teamViewLabel) {
+        teamViewLabel.textContent = label;
+      }
+      if (resourceFilterNote) {
+        resourceFilterNote.classList.toggle('d-none', normalized === 'all');
+      }
+      let visibleResourceRows = 0;
+      resourceRows.forEach((row) => {
+        const rowScope = row.getAttribute('data-resource-scope') || 'account';
+        const rowTeams = (row.getAttribute('data-resource-teams') || '')
+          .split('|')
+          .map((value) => value.trim())
+          .filter(Boolean);
+        let show = false;
+        if (normalized === 'all') {
+          show = true;
+        } else if (normalized === 'mine') {
+          show = rowScope === 'account';
+        } else {
+          show = rowScope === 'team' && rowTeams.includes(normalized);
+        }
+        row.classList.toggle('d-none', !show);
+        if (show) visibleResourceRows += 1;
+      });
+      if (resourceEmptyFilter) {
+        const showResourceEmpty = normalized !== 'all' && visibleResourceRows === 0;
+        resourceEmptyFilter.classList.toggle('d-none', !showResourceEmpty);
+      }
+      let visibleSshRows = 0;
+      sshRows.forEach((row) => {
+        const rowScope = row.getAttribute('data-ssh-scope') || 'account';
+        const rowTeams = (row.getAttribute('data-ssh-teams') || '')
+          .split('|')
+          .map((value) => value.trim())
+          .filter(Boolean);
+        const show = normalized === 'all' || rowScope === 'global_team' || rowTeams.includes(normalized);
+        row.classList.toggle('d-none', !show);
+        if (show) visibleSshRows += 1;
+      });
+      if (sshEmptyFilterRow) {
+        const showEmpty = normalized !== 'all' && visibleSshRows === 0;
+        sshEmptyFilterRow.classList.toggle('d-none', !showEmpty);
+      }
+    };
+
+    teamFolderButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const teamKey = button.getAttribute('data-team-folder') || 'all';
+        const teamLabel = button.getAttribute('data-team-label') || 'All Resources';
+        applyTeamFolder(teamKey, teamLabel);
+      });
+    });
+    applyTeamFolder('all', 'All Resources');
+
     const params = new URLSearchParams(window.location.search);
     if (params.get('add') === '1') {
       resetSshFields(addForm);
@@ -980,13 +1166,14 @@
 
     if (sshLibraryForm) {
       const scopeSelect = sshLibraryForm.querySelector('select[name="scope"]');
-      const teamSelect = sshLibraryForm.querySelector('select[name="team_name"]');
+      const teamSelect = sshLibraryForm.querySelector('select[name="team_names"]');
       if (scopeSelect) {
         scopeSelect.addEventListener('change', updateLibraryTeamField);
       }
       sshLibraryForm.addEventListener('submit', (event) => {
         if (!scopeSelect || !teamSelect) return;
-        if (scopeSelect.value === 'team' && !teamSelect.value) {
+        const selectedTeamCount = Array.from(teamSelect.selectedOptions || []).length;
+        if (scopeSelect.value === 'team' && selectedTeamCount === 0) {
           event.preventDefault();
           teamSelect.focus();
         }
