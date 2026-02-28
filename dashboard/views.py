@@ -4018,6 +4018,7 @@ def _asana_overview_payload_from_api(
             "user_name": str(me_data.get("name") or "").strip(),
             "tasks": task_rows,
             "truncated": bool(truncated),
+            "includes_project_tasks": True,
         },
         None,
     )
@@ -4202,6 +4203,7 @@ def _asana_overview_context_for_user(
         for task in cached_tasks
     ) if cached_tasks else True
     cache_has_board_fields = isinstance(cached_payload.get("boards"), list)
+    cache_has_project_tasks = bool(cached_payload.get("includes_project_tasks"))
     cache_is_fresh = (
         bool(cached_payload)
         and cached_epoch > 0
@@ -4210,6 +4212,7 @@ def _asana_overview_context_for_user(
         and bool(cache_has_completed_at_fields)
         and bool(cache_has_notes_fields)
         and bool(cache_has_board_fields)
+        and bool(cache_has_project_tasks)
     )
     if cache_is_fresh and not force_refresh:
         context["tasks"] = cached_payload.get("tasks") if isinstance(cached_payload.get("tasks"), list) else []

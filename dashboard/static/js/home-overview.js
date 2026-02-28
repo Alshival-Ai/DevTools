@@ -1894,14 +1894,35 @@
 
   const openAsanaAgendaSections = (context) => {
     const view = String(context && context.view ? context.view : '').trim().toLowerCase();
-    if (view !== 'agenda') return [];
+    if (view !== 'agenda' && view !== 'month-list') return [];
     const activeFilter = String(context && context.activeFilter ? context.activeFilter : 'all').trim().toLowerCase();
     if (activeFilter !== 'all') return [];
     const includeCompletedWindow = true;
     outlookTeamsJoinByAgendaItemId.clear();
 
+    // For month-list, derive month boundaries from the calendarCursor passed in context
+    let monthStartKey = '';
+    let monthEndKey = '';
+    if (view === 'month-list') {
+      const cursorStr = String(context && context.calendarCursor ? context.calendarCursor : '').trim();
+      if (cursorStr) {
+        const cursorDate = new Date(`${cursorStr}T00:00:00`);
+        if (!Number.isNaN(cursorDate.getTime())) {
+          const mStart = new Date(cursorDate.getFullYear(), cursorDate.getMonth(), 1);
+          const mEnd = new Date(cursorDate.getFullYear(), cursorDate.getMonth() + 1, 0);
+          monthStartKey = toYmdLocal(mStart);
+          monthEndKey = toYmdLocal(mEnd);
+        }
+      }
+    }
+
     const candidateRows = asanaTasks.filter((row) => {
       if (!row || typeof row !== 'object') return false;
+      if (monthStartKey) {
+        const rowDate = String(row.due_date || '').trim();
+        // keep tasks that fall in the month or have no due date
+        if (rowDate && (rowDate < monthStartKey || rowDate > monthEndKey)) return false;
+      }
       if (!Boolean(row.completed)) return true;
       return includeCompletedWindow && isTaskCompletedWithinWindow(row);
     });

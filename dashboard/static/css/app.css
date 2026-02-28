@@ -2544,6 +2544,10 @@ p {
   display: none;
 }
 
+.planner-panel--agenda .planner-agenda {
+  max-height: 65vh;
+}
+
 .planner-calendar {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));

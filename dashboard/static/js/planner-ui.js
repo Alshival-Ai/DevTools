@@ -379,6 +379,7 @@
             activeFilter,
             items,
             filteredItems: filteredItems(),
+            calendarCursor: toYmd(calendarCursor),
           })
         );
       } catch (error) {
@@ -427,7 +428,7 @@
         const view = String(button.getAttribute('data-planner-view') || '').trim().toLowerCase();
         button.classList.toggle('is-active', view === activeView);
       });
-      root.classList.toggle('planner-panel--agenda', activeView === 'agenda');
+      root.classList.toggle('planner-panel--agenda', activeView === 'agenda' || activeView === 'month-list');
     };
 
     const buildAgendaItem = (item) => {
@@ -912,9 +913,75 @@
       }
     };
 
+    const renderAgendaMonthList = () => {
+      const monthStart = monthFloor(calendarCursor);
+      const nextMonthStart = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 1);
+      const monthEnd = addDays(nextMonthStart, -1) || monthStart;
+      const startKey = toYmd(monthStart);
+      const endKey = toYmd(monthEnd);
+
+      if (agendaTitle) agendaTitle.textContent = prettyMonth(calendarCursor);
+      selectedLabel.textContent = `${prettyDay(startKey)} → ${prettyDay(endKey)}`;
+
+      const timelineItems = showTimelineItemsForView('month-list')
+        ? filteredItems()
+          .filter((item) => item.date >= startKey && item.date <= endKey)
+          .sort((a, b) => `${a.date} ${a.time || '99:99'}`.localeCompare(`${b.date} ${b.time || '99:99'}`))
+        : [];
+      const extraSections = resolveAgendaSections('month-list');
+
+      if (!timelineItems.length && !extraSections.length) {
+        renderAgendaEmpty('No tasks for this month.');
+        return;
+      }
+
+      while (agenda.firstChild) agenda.removeChild(agenda.firstChild);
+
+      let currentDateKey = '';
+      let group = null;
+      let groupBody = null;
+      timelineItems.forEach((item) => {
+        if (item.date !== currentDateKey) {
+          currentDateKey = item.date;
+          group = document.createElement('section');
+          group.className = 'planner-agenda-group';
+
+          const head = document.createElement('header');
+          head.className = 'planner-agenda-group__head';
+
+          const dateLabel = document.createElement('strong');
+          dateLabel.textContent = prettyDay(item.date);
+          head.appendChild(dateLabel);
+
+          const count = timelineItems.filter((entry) => entry.date === item.date).length;
+          const countLabel = document.createElement('span');
+          countLabel.className = 'text-muted small';
+          countLabel.textContent = `${count} item${count === 1 ? '' : 's'}`;
+          head.appendChild(countLabel);
+
+          groupBody = document.createElement('div');
+          groupBody.className = 'planner-agenda-group__items';
+          group.appendChild(head);
+          group.appendChild(groupBody);
+          agenda.appendChild(group);
+        }
+        if (groupBody) groupBody.appendChild(buildAgendaItem(item));
+      });
+
+      if (extraSections.length) {
+        appendAgendaSections(extraSections);
+      } else {
+        agendaSectionToggleIndex.clear();
+        agendaSectionItemIndex.clear();
+        agendaSectionActionIndex.clear();
+      }
+    };
+
     const renderAgenda = () => {
       if (activeView === 'agenda') {
         renderAgendaList();
+      } else if (activeView === 'month-list') {
+        renderAgendaMonthList();
       } else {
         renderAgendaMonth();
       }
@@ -1120,7 +1187,9 @@
     viewButtons.forEach((button) => {
       button.addEventListener('click', () => {
         const nextView = String(button.getAttribute('data-planner-view') || '').trim().toLowerCase();
-        activeView = nextView === 'agenda' ? 'agenda' : 'month';
+        if (nextView === 'agenda') activeView = 'agenda';
+        else if (nextView === 'month-list') activeView = 'month-list';
+        else activeView = 'month';
         render();
       });
     });
