@@ -4,25 +4,45 @@
       <div class="sidenav-title">Core</div>
       <nav class="sidenav-nav">
         <a class="nav-item{% if request.path == '/' %} active{% endif %}" href="{% url 'home' %}">Overview</a>
+        <a class="nav-item{% if request.path == '/team/' %} active{% endif %}" href="{% url 'team_page' %}">Team</a>
         <a class="nav-item{% if '/resources/' in request.path %} active{% endif %}" href="{% url 'resources' %}">Resources</a>
-        <a class="nav-item" href="#">Incidents</a>
-        <a class="nav-item{% if '/wiki/' in request.path %} active{% endif %}" href="{% url 'wiki' %}">Wiki</a>
-        <a class="nav-item{% if request.path == '/settings/' %} active{% endif %}" href="{% url 'app_settings' %}">Settings</a>
+        <a class="nav-item{% if '/wiki/' in request.path and '/resources/' not in request.path %} active{% endif %}" href="{% url 'wiki' %}">Wiki</a>
       </nav>
     </div>
     {% if request.user.is_superuser %}
     <div class="sidenav-section">
       <div class="sidenav-title">Admin</div>
       <nav class="sidenav-nav">
-        <a class="nav-item{% if '/team-directory/' in request.path %} active{% endif %}" href="{% url 'team_directory' %}">Team Directory</a>
-        <a class="nav-item{% if '/settings/connectors/' in request.path %} active{% endif %}" href="{% url 'connector_settings' %}">Connectors</a>
+        <a class="nav-item{% if '/team-directory/' in request.path %} active{% endif %}" href="{% url 'team_directory' %}">Directory</a>
       </nav>
     </div>
     {% endif %}
-    <div class="sidenav-card">
-      <div class="sidenav-card-title">Today's focus</div>
-      <p>2 incidents triaged, 5 deploys scheduled, 1 compliance review.</p>
-      <button class="ghost-btn" type="button">Open command center</button>
+    <div class="sidenav-card sidenav-widget">
+      <div class="sidenav-card-title">Workspace Pulse</div>
+      <p class="sidenav-widget-subtitle">Live account summary and shortcuts.</p>
+      <div class="sidenav-widget-stats">
+        <a class="sidenav-widget-stat" href="{% url 'resources' %}">
+          <span class="sidenav-widget-stat__label">Resources</span>
+          <strong>{{ sidebar_workspace_widget.resources_total }}</strong>
+        </a>
+        <a class="sidenav-widget-stat" href="{% url 'home' %}">
+          <span class="sidenav-widget-stat__label">Unread Alerts</span>
+          <strong>{{ sidebar_workspace_widget.unread_notifications }}</strong>
+        </a>
+        <a class="sidenav-widget-stat" href="{% url 'resources' %}">
+          <span class="sidenav-widget-stat__label">Need Attention</span>
+          <strong>{{ sidebar_workspace_widget.resources_attention }}</strong>
+        </a>
+        <a class="sidenav-widget-stat" href="{% url 'team_page' %}">
+          <span class="sidenav-widget-stat__label">Teams</span>
+          <strong>{{ sidebar_workspace_widget.team_count }}</strong>
+        </a>
+      </div>
+      <div class="sidenav-widget-tags">
+        <span class="tag">Healthy {{ sidebar_workspace_widget.resources_healthy }}</span>
+        <span class="tag">Unhealthy {{ sidebar_workspace_widget.resources_unhealthy }}</span>
+        <span class="tag">Unknown {{ sidebar_workspace_widget.resources_unknown }}</span>
+      </div>
     </div>
   </div>
 </aside>

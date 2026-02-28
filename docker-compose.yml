@@ -4,6 +4,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        APP_UID: "${LOCAL_UID:-1000}"
+        APP_GID: "${LOCAL_GID:-1000}"
     image: alshival:latest
     ports:
       - "8000:8000"
@@ -15,6 +18,13 @@ services:
       SQLITE_PATH: "/app/var/db.sqlite3"
       USER_DATA_ROOT: "/app/var/user_data"
       STATIC_ROOT: "/app/var/staticfiles"
+    command: ["uvicorn", "alshival.asgi:application", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/accounts/login/', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     volumes:
       - ./var:/app/var
     restart: unless-stopped
@@ -22,7 +32,8 @@ services:
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     image: alshival:latest
     depends_on:
-      - web
+      web:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -37,11 +48,52 @@ services:
     volumes:
       - ./var:/app/var
     restart: unless-stopped
+  reminder-worker:
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    image: alshival:latest
+    depends_on:
+      web:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DEBUG: "0"
+      ALLOWED_HOSTS: "127.0.0.1,localhost"
+      SQLITE_PATH: "/app/var/db.sqlite3"
+      USER_DATA_ROOT: "/app/var/user_data"
+      STATIC_ROOT: "/app/var/staticfiles"
+      RUN_MIGRATE: "0"
+      RUN_COLLECTSTATIC: "0"
+    command: ["python", "manage.py", "run_reminder_worker", "--interval-seconds", "60"]
+    volumes:
+      - ./var:/app/var
+    restart: unless-stopped
+  support-inbox-worker:
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    image: alshival:latest
+    depends_on:
+      web:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DEBUG: "0"
+      ALLOWED_HOSTS: "127.0.0.1,localhost"
+      SQLITE_PATH: "/app/var/db.sqlite3"
+      USER_DATA_ROOT: "/app/var/user_data"
+      STATIC_ROOT: "/app/var/staticfiles"
+      RUN_MIGRATE: "0"
+      RUN_COLLECTSTATIC: "0"
+    command: ["python", "manage.py", "run_support_inbox_worker", "--interval-seconds", "60"]
+    volumes:
+      - ./var:/app/var
+    restart: unless-stopped
   global-key-worker:
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     image: alshival:latest
     depends_on:
-      - web
+      web:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -60,7 +112,8 @@ services:
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     image: alshival:latest
     depends_on:
-      - web
+      web:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -79,8 +132,10 @@ services:
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     image: alshival:latest
     depends_on:
-      - web
-      - github-mcp
+      web:
+        condition: service_healthy
+      github-mcp:
+        condition: service_started
     env_file:
       - .env
     environment:

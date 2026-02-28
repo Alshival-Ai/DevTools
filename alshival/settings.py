@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 from urllib.parse import urlparse
@@ -34,6 +35,23 @@ if _app_base_url and _app_base_url.scheme and _app_base_url.netloc:
     if _app_origin not in CSRF_TRUSTED_ORIGINS:
         CSRF_TRUSTED_ORIGINS.append(_app_origin)
 
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
+if _app_base_url and _app_base_url.scheme == 'https':
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+if _app_base_url and _app_base_url.scheme in {'http', 'https'}:
+    ACCOUNT_DEFAULT_HTTP_PROTOCOL = _app_base_url.scheme
+else:
+    ACCOUNT_DEFAULT_HTTP_PROTOCOL = 'http'
+
+_SOCIAL_PROVIDER_APPS = [
+    'allauth.socialaccount.providers.microsoft',
+    'allauth.socialaccount.providers.github',
+]
+if importlib.util.find_spec('allauth.socialaccount.providers.asana') is not None:
+    _SOCIAL_PROVIDER_APPS.append('allauth.socialaccount.providers.asana')
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -46,8 +64,7 @@ INSTALLED_APPS = [
     'allauth',
     'allauth.account',
     'allauth.socialaccount',
-    'allauth.socialaccount.providers.microsoft',
-    'allauth.socialaccount.providers.github',
+    *_SOCIAL_PROVIDER_APPS,
 ]
 
 MIDDLEWARE = [
@@ -75,6 +92,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'dashboard.context_processors.sidebar_workspace_widget',
             ],
         },
     },
@@ -129,6 +147,8 @@ ACCOUNT_LOGOUT_REDIRECT_URL = '/accounts/login/'
 ACCOUNT_EMAIL_VERIFICATION = 'none'
 ACCOUNT_LOGIN_METHODS = {'username', 'email'}
 ACCOUNT_SIGNUP_FIELDS = ['email', 'username*', 'password1*', 'password2*']
+SOCIALACCOUNT_LOGIN_ON_GET = True
+SOCIALACCOUNT_STORE_TOKENS = True
 ALSHIVAL_INGEST_API_KEY = os.getenv('ALSHIVAL_INGEST_API_KEY', '').strip()
 
 _ssh_keys_env = os.getenv('ALSHIVAL_SSH_KEY_MASTER_KEYS', '').strip()

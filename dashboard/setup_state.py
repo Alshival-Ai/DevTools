@@ -117,6 +117,28 @@ def is_github_login_enabled() -> bool:
     return is_github_connector_configured()
 
 
+def is_asana_connector_configured() -> bool:
+    try:
+        from allauth.socialaccount.models import SocialApp
+    except Exception:
+        return False
+
+    try:
+        asana_app = (
+            SocialApp.objects.filter(provider="asana")
+            .exclude(client_id__exact="")
+            .exclude(secret__exact="")
+            .order_by("id")
+            .first()
+        )
+    except (OperationalError, ProgrammingError):
+        return False
+    except Exception:
+        return False
+
+    return asana_app is not None
+
+
 def is_twilio_configured() -> bool:
     setup = get_setup_state()
     twilio_account_sid = str(getattr(setup, "twilio_account_sid", "") or "").strip() if setup else ""
@@ -173,3 +195,15 @@ def is_email_provider_configured() -> bool:
         return False
 
     return False
+
+
+def is_support_inbox_email_alerts_enabled() -> bool:
+    setup = get_setup_state()
+    if setup is None:
+        return False
+    if not bool(getattr(setup, "support_inbox_monitoring_enabled", False)):
+        return False
+    mailbox = str(getattr(setup, "microsoft_mailbox_email", "") or "").strip().lower()
+    if not mailbox:
+        return False
+    return is_microsoft_connector_configured()

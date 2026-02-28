@@ -512,16 +512,45 @@
       <h3>Send invite</h3>
       <button class="icon-btn" type="button" data-modal-close>✕</button>
     </div>
-    <form method="post" action="{% url 'team_directory_invite_user' %}" data-user-invite-form class="modal-form">
+    <form method="post" action="{% url 'team_directory_invite_user' %}" data-user-invite-form data-preview-url="{% url 'team_directory_invite_preview' %}" class="modal-form">
       {% csrf_token %}
       <label>
-        <span>Username</span>
-        <input type="text" name="username" placeholder="jdoe" required />
+        <span>Username (optional)</span>
+        <input type="text" name="username" placeholder="jdoe" />
       </label>
       <label>
-        <span>Email</span>
-        <input type="email" name="email" placeholder="jdoe@example.com" required />
+        <span>Email (for email invite)</span>
+        <input type="email" name="email" placeholder="jdoe@example.com" />
       </label>
+      <label>
+        <span>Phone (for SMS invite)</span>
+        <input type="text" name="phone_number" placeholder="+15551234567" />
+      </label>
+      <label>
+        <span>Delivery channel</span>
+        <select name="invite_channel">
+          <option value="email" selected>Email</option>
+          <option value="sms">SMS</option>
+        </select>
+      </label>
+      <label>
+        <span>Invite Note (optional)</span>
+        <textarea name="invite_note" rows="4" placeholder="Add a personal note for the invite recipient."></textarea>
+      </label>
+      <fieldset class="modal-fieldset">
+        <legend>Allowed sign-in methods</legend>
+        <div class="directory-feature-grid">
+          {% for method in available_invite_methods %}
+          <label class="checkbox">
+            <input type="checkbox" name="signup_methods" value="{{ method.key }}"{% if method.key in invite_default_method_keys %} checked{% endif %} />
+            <span>
+              <strong>{{ method.label }}</strong>
+              <small class="text-muted">{{ method.description }}</small>
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+      </fieldset>
       <label>
         <span>Teams</span>
         <select name="team_names" multiple size="5">
@@ -556,7 +585,15 @@
         <input type="checkbox" name="is_superuser" value="1" />
         <span>Grant Platform Admin access</span>
       </label>
-      <div class="text-muted small">An email is sent with login details and a temporary password.</div>
+      <div class="text-muted small">An invite link is sent by email or SMS. The recipient chooses their sign-in method and gets these permissions.</div>
+      <div class="modal-fieldset">
+        <div class="text-muted small"><strong>Invite preview</strong></div>
+        <div class="invite-preview mt-1">
+          <div class="text-muted small" data-invite-preview-meta>Preview will load when the modal opens.</div>
+          <iframe class="invite-preview-frame d-none" data-invite-preview-frame title="Invite recipient preview" sandbox=""></iframe>
+          <pre class="invite-preview-text d-none" data-invite-preview-text></pre>
+        </div>
+      </div>
       <div class="modal-actions">
         <button class="ghost-btn" type="button" data-modal-close>Cancel</button>
         <button class="primary-btn" type="submit">Send invite</button>
@@ -843,7 +880,128 @@
 
     const renameForm = document.querySelector('[data-team-rename-form]');
     const inviteForm = document.querySelector('[data-user-invite-form]');
+    const invitePreviewMeta = inviteForm ? inviteForm.querySelector('[data-invite-preview-meta]') : null;
+    const invitePreviewFrame = inviteForm ? inviteForm.querySelector('[data-invite-preview-frame]') : null;
+    const invitePreviewText = inviteForm ? inviteForm.querySelector('[data-invite-preview-text]') : null;
     const createForm = document.querySelector('[data-user-create-form]');
+    let invitePreviewTimer = null;
+
+    const invitePreviewPayload = (form) => {
+      const payload = new URLSearchParams();
+      const read = (name) => {
+        const field = form.querySelector(`[name="${name}"]`);
+        if (!field) return '';
+        return String(field.value || '').trim();
+      };
+      payload.set('username', read('username'));
+      payload.set('email', read('email'));
+      payload.set('phone_number', read('phone_number'));
+      payload.set('invite_channel', read('invite_channel') || 'email');
+      payload.set('invite_note', read('invite_note'));
+      form.querySelectorAll('input[name="signup_methods"]:checked').forEach((item) => payload.append('signup_methods', item.value));
+      const teamSelect = form.querySelector('select[name="team_names"]');
+      if (teamSelect) {
+        Array.from(teamSelect.selectedOptions || []).forEach((option) => payload.append('team_names', option.value));
+      }
+      form.querySelectorAll('input[name="feature_keys"]:checked').forEach((item) => payload.append('feature_keys', item.value));
+      return payload;
+    };
+
+    const setInvitePreviewState = (message, showText) => {
+      if (invitePreviewMeta) {
+        invitePreviewMeta.textContent = String(message || '').trim() || 'Invite preview';
+      }
+      if (invitePreviewFrame) {
+        invitePreviewFrame.classList.add('d-none');
+        invitePreviewFrame.srcdoc = '';
+      }
+      if (invitePreviewText) {
+        invitePreviewText.textContent = showText ? String(message || '').trim() : '';
+        invitePreviewText.classList.toggle('d-none', !showText);
+      }
+    };
+
+    const renderInvitePreview = (payload) => {
+      const channel = String(payload.channel || '').trim().toLowerCase();
+      const subject = String(payload.subject || '').trim();
+      const messageHtml = String(payload.message_html || '').trim();
+      const messageText = String(payload.message_text || payload.message || '').trim();
+
+      if (invitePreviewMeta) {
+        if (channel === 'email') {
+          invitePreviewMeta.textContent = subject ? `Recipient email preview - Subject: ${subject}` : 'Recipient email preview';
+        } else if (channel === 'sms') {
+          invitePreviewMeta.textContent = 'Recipient SMS preview';
+        } else {
+          invitePreviewMeta.textContent = 'Recipient invite preview';
+        }
+      }
+
+      if (channel === 'email' && messageHtml && invitePreviewFrame) {
+        invitePreviewFrame.srcdoc = messageHtml;
+        invitePreviewFrame.classList.remove('d-none');
+        if (invitePreviewText) {
+          invitePreviewText.textContent = '';
+          invitePreviewText.classList.add('d-none');
+        }
+        return;
+      }
+
+      if (invitePreviewFrame) {
+        invitePreviewFrame.classList.add('d-none');
+        invitePreviewFrame.srcdoc = '';
+      }
+      if (invitePreviewText) {
+        invitePreviewText.textContent = messageText || 'No preview generated.';
+        invitePreviewText.classList.remove('d-none');
+      }
+    };
+
+    const loadInvitePreview = async () => {
+      if (!inviteForm || (!invitePreviewMeta && !invitePreviewFrame && !invitePreviewText)) return;
+      const previewUrl = inviteForm.getAttribute('data-preview-url') || '';
+      if (!previewUrl) return;
+      const csrfTokenInput = inviteForm.querySelector('input[name="csrfmiddlewaretoken"]');
+      const csrfToken = csrfTokenInput ? String(csrfTokenInput.value || '').trim() : '';
+      setInvitePreviewState('Generating preview...', false);
+      try {
+        const response = await fetch(previewUrl, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+            'X-CSRFToken': csrfToken,
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: invitePreviewPayload(inviteForm).toString(),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setInvitePreviewState(`Preview unavailable (${String(payload.error || 'request_failed')}).`, true);
+          return;
+        }
+        renderInvitePreview(payload || {});
+      } catch (error) {
+        setInvitePreviewState('Preview unavailable right now.', true);
+      }
+    };
+
+    const scheduleInvitePreview = () => {
+      if (!inviteForm) return;
+      const inviteModal = inviteForm.closest('[data-modal="user-invite"]');
+      if (inviteModal && !inviteModal.classList.contains('is-active')) return;
+      if (invitePreviewTimer) {
+        window.clearTimeout(invitePreviewTimer);
+      }
+      invitePreviewTimer = window.setTimeout(() => {
+        loadInvitePreview();
+      }, 250);
+    };
+
+    if (inviteForm) {
+      inviteForm.addEventListener('input', scheduleInvitePreview);
+      inviteForm.addEventListener('change', scheduleInvitePreview);
+    }
 
     document.querySelectorAll('[data-modal-open]').forEach((button) => {
       button.addEventListener('click', () => {
@@ -870,6 +1028,9 @@
           inviteForm.reset();
           const isActiveInput = inviteForm.querySelector('input[name="is_active"]');
           if (isActiveInput) isActiveInput.checked = true;
+          window.setTimeout(() => {
+            loadInvitePreview();
+          }, 0);
         }
 
         openModal(modalName);

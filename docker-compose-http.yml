@@ -5,7 +5,8 @@ services:
   nginx-http:
     image: nginx:1.27-alpine
     depends_on:
-      - web
+      web:
+        condition: service_healthy
     ports:
       - "80:80"
     volumes:

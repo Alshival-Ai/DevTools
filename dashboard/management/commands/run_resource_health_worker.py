@@ -22,6 +22,24 @@ from dashboard.setup_state import is_global_monitoring_enabled
 class Command(BaseCommand):
     help = "Run periodic health checks for resources discovered in user/team/global data roots."
 
+    def _safe_cleanup_stale_knowledge_records(self) -> dict[str, int]:
+        try:
+            cleanup = cleanup_stale_knowledge_records()
+        except Exception as exc:
+            self.stderr.write(f"[health-worker] cleanup skipped (non-fatal): {exc}")
+            return {
+                "scanned": 0,
+                "removed_knowledge": 0,
+                "removed_snapshots": 0,
+            }
+        if not isinstance(cleanup, dict):
+            return {
+                "scanned": 0,
+                "removed_knowledge": 0,
+                "removed_snapshots": 0,
+            }
+        return cleanup
+
     def add_arguments(self, parser):
         parser.add_argument(
             "--interval-seconds",
@@ -178,7 +196,7 @@ class Command(BaseCommand):
 
     def _run_cycle(self, users_per_worker: int, max_workers: int) -> tuple[int, int, int, int, int, int, int, int, int]:
         if not is_global_monitoring_enabled():
-            cleanup = cleanup_stale_knowledge_records()
+            cleanup = self._safe_cleanup_stale_knowledge_records()
             return (
                 0,
                 0,
@@ -193,7 +211,7 @@ class Command(BaseCommand):
         targets, discovery_errors, unresolved, discovered_total = self._discover_targets()
         target_count = len(targets)
         if target_count == 0:
-            cleanup = cleanup_stale_knowledge_records()
+            cleanup = self._safe_cleanup_stale_knowledge_records()
             return (
                 0,
                 int(discovery_errors),
@@ -229,7 +247,7 @@ class Command(BaseCommand):
                     error_count += 1
                     self.stderr.write(f"[health-worker] worker failure: {exc}")
 
-        cleanup = cleanup_stale_knowledge_records()
+        cleanup = self._safe_cleanup_stale_knowledge_records()
         return (
             checked_count,
             error_count,

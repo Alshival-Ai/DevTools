@@ -8,35 +8,26 @@
     <span class="brand-title">Alshival</span>
   </div>
   <div class="topbar-actions">
-    <label class="search">
+    <label
+      class="search"
+      data-topbar-search
+      data-search-url="{% url 'search_kb_suggestions' %}"
+      {% if request.resolver_match and request.resolver_match.kwargs.resource_uuid %}
+      data-resource-uuid="{{ request.resolver_match.kwargs.resource_uuid }}"
+      {% endif %}>
       <span class="search-icon">⌕</span>
-      <input type="search" placeholder="Search docs, incidents, wiki" />
-    </label>
-    <div
-      class="notification-menu"
-      data-notification-menu
-      data-list-url="{% url 'notifications_feed' %}"
-      data-mark-read-url="{% url 'notifications_mark_all_read' %}"
-      data-clear-url="{% url 'notifications_clear_all' %}"
-    >
-      <button class="icon-btn notification-toggle" type="button" aria-label="Open notifications" aria-expanded="false" data-notification-toggle>
-        <span aria-hidden="true">🔔</span>
-        <span class="notification-badge d-none" data-notification-badge>0</span>
-      </button>
-      <section class="notification-dropdown" aria-label="Notifications" hidden data-notification-dropdown>
-        <header class="notification-dropdown__header">
-          <h3 class="notification-dropdown__title">Notifications</h3>
-          <div class="notification-dropdown__actions">
-            <button class="notification-dropdown__clear" type="button" data-notification-mark-read>Mark all read</button>
-            <button class="notification-dropdown__trash" type="button" data-notification-clear-all aria-label="Clear notifications" title="Clear notifications">🗑</button>
-          </div>
-        </header>
-        <div class="notification-list" data-notification-list>
-          <p class="notification-empty">No alerts yet.</p>
-        </div>
+      <input
+        type="search"
+        placeholder="Search resources and wiki"
+        autocomplete="off"
+        spellcheck="false"
+        aria-label="Search knowledge base"
+        data-topbar-search-input />
+      <section class="topbar-search-dropdown" hidden data-topbar-search-dropdown>
+        <div class="topbar-search-results" data-topbar-search-results></div>
+        <p class="topbar-search-empty" data-topbar-search-empty>Type at least 2 characters.</p>
       </section>
-    </div>
-    <a class="icon-btn{% if '/settings/' in request.path %} is-active{% endif %}" href="{% url 'app_settings' %}" aria-label="Open settings">⚙</a>
+    </label>
     <label class="theme-switcher" aria-label="Light/Dark Mode">
       <input class="theme__toggle theme-switcher__input" type="checkbox" role="switch" name="theme" value="dark">
       <span class="theme-switcher__slider">
@@ -96,9 +87,21 @@
         </span>
       </span>
     </label>
-    <form method="post" action="{% url 'account_logout' %}">
-      {% csrf_token %}
-      <button class="icon-btn" type="submit">Log out</button>
-    </form>
+    <details class="user-menu">
+      <summary class="user-menu__toggle" aria-label="Open user menu">
+        {% if topbar_user_menu.avatar_url %}
+        <img class="user-menu__avatar" src="{{ topbar_user_menu.avatar_url }}" alt="Your avatar">
+        {% else %}
+        <span class="user-menu__avatar-fallback" aria-hidden="true">{{ topbar_user_menu.initial }}</span>
+        {% endif %}
+      </summary>
+      <div class="user-menu__dropdown">
+        <a class="user-menu__item{% if '/settings/' in request.path %} is-active{% endif %}" href="{% url 'app_settings' %}">Settings</a>
+        <form method="post" action="{% url 'account_logout' %}">
+          {% csrf_token %}
+          <button class="user-menu__item user-menu__item-btn" type="submit">Log out</button>
+        </form>
+      </div>
+    </details>
   </div>
 </header>

@@ -4,6 +4,8 @@
   const DEFAULT_FEATURES = 'width=1100,height=760,resizable=yes,scrollbars=no';
   const FONT_PREF_KEY = 'devtools_terminal_font_size';
   const ASK_CHAT_ENDPOINT = '/chat/ask/';
+  const ASK_VOICE_TOKEN_ENDPOINT = '/chat/voice-token/';
+  const ASK_VOICE_LOG_ENDPOINT = '/chat/voice-log/';
 
   let xtermLoaderPromise = null;
   let askWidget = null;
@@ -319,6 +321,7 @@
 
     const query = Object.assign({}, options.sessionQuery || {});
     if (resourceId) query.resource_id = String(resourceId);
+    if (options.resourceUuid) query.resource_uuid = String(options.resourceUuid);
     const fullWsPath = buildWsPath(wsPath, query);
 
     const popupName = popupNamePrefix + (resourceId ? String(resourceId) : String(options.popupName || 'session'));
@@ -332,6 +335,7 @@
     popup.focus();
 
     const holder = popup.document.getElementById('holder');
+    if (!holder) return false;
     const inject = (tag) => popup.document.head.appendChild(tag);
 
     const css = popup.document.createElement('link');
@@ -347,77 +351,84 @@
       inject(s);
     });
 
-    await Promise.all([
-      load('https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js'),
-      load('https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js'),
-      load('https://cdn.jsdelivr.net/npm/xterm-addon-web-links/lib/xterm-addon-web-links.js'),
-    ]);
+    try {
+      await Promise.all([
+        load('https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js'),
+        load('https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js'),
+        load('https://cdn.jsdelivr.net/npm/xterm-addon-web-links/lib/xterm-addon-web-links.js'),
+      ]);
 
-    popup.Terminal = popup.Terminal || popup.window.Terminal;
-    popup.FitAddon = popup.FitAddon || popup.window.FitAddon;
-    popup.WebLinksAddon = popup.WebLinksAddon || popup.window.WebLinksAddon;
+      popup.Terminal = popup.Terminal || popup.window.Terminal;
+      popup.FitAddon = popup.FitAddon || popup.window.FitAddon;
+      popup.WebLinksAddon = popup.WebLinksAddon || popup.window.WebLinksAddon;
 
-    const client = await (async () => {
-      const wrap = popup.document.createElement('div');
-      wrap.style.height = '100%';
-      holder.appendChild(wrap);
+      const client = await (async () => {
+        const wrap = popup.document.createElement('div');
+        wrap.style.height = '100%';
+        holder.appendChild(wrap);
 
-      const term = new popup.Terminal({
-        cursorBlink: true,
-        scrollback: 50000,
-        fontFamily: '"SFMono-Regular","Menlo","Monaco","Consolas","Liberation Mono","Courier New",monospace',
-        fontSize: 14,
-        theme: { background: '#0a0e12', foreground: '#d7e2f2', cursor: '#6be4a8', selection: 'rgba(107, 228, 168, 0.3)' },
-      });
-      const fit = new popup.FitAddon.FitAddon();
-      term.loadAddon(fit);
-      if (popup.WebLinksAddon && popup.WebLinksAddon.WebLinksAddon) {
-        term.loadAddon(new popup.WebLinksAddon.WebLinksAddon((event, uri) => {
-          if (!shouldActivateTerminalLink(event)) return;
-          openTerminalLink(popup, uri);
-        }));
-      }
-      term.open(wrap);
-      fit.fit();
-
-      const scheme = popup.location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new popup.WebSocket(scheme + '://' + popup.location.host + fullWsPath);
-      ws.binaryType = 'arraybuffer';
-
-      const sendResize = () => {
-        const dims = fit.proposeDimensions();
-        if (!dims || ws.readyState !== popup.WebSocket.OPEN) return;
-        ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
-      };
-
-      ws.onopen = () => sendResize();
-      ws.onmessage = (event) => {
-        if (event.data instanceof ArrayBuffer) term.write(new Uint8Array(event.data));
-        else term.write(event.data);
-      };
-      ws.onclose = () => term.write('\r\n[terminal session closed]\r\n');
-
-      term.onData((data) => {
-        if (ws.readyState === popup.WebSocket.OPEN) ws.send(data);
-      });
-
-      const onResize = () => {
+        const term = new popup.Terminal({
+          cursorBlink: true,
+          scrollback: 50000,
+          fontFamily: '"SFMono-Regular","Menlo","Monaco","Consolas","Liberation Mono","Courier New",monospace',
+          fontSize: 14,
+          theme: { background: '#0a0e12', foreground: '#d7e2f2', cursor: '#6be4a8', selection: 'rgba(107, 228, 168, 0.3)' },
+        });
+        const fit = new popup.FitAddon.FitAddon();
+        term.loadAddon(fit);
+        if (popup.WebLinksAddon && popup.WebLinksAddon.WebLinksAddon) {
+          term.loadAddon(new popup.WebLinksAddon.WebLinksAddon((event, uri) => {
+            if (!shouldActivateTerminalLink(event)) return;
+            openTerminalLink(popup, uri);
+          }));
+        }
+        term.open(wrap);
         fit.fit();
-        sendResize();
-      };
-      popup.addEventListener('resize', onResize);
 
-      return {
-        close: () => {
-          try { ws.close(); } catch (err) {}
-          popup.removeEventListener('resize', onResize);
-          try { term.dispose(); } catch (err) {}
-        },
-      };
-    })();
+        const wsOrigin = window.location.origin.replace(/^http/i, 'ws');
+        const ws = new popup.WebSocket(wsOrigin + fullWsPath);
+        ws.binaryType = 'arraybuffer';
 
-    popup.addEventListener('beforeunload', () => client.close());
-    return true;
+        const sendResize = () => {
+          const dims = fit.proposeDimensions();
+          if (!dims || ws.readyState !== popup.WebSocket.OPEN) return;
+          ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+        };
+
+        ws.onopen = () => sendResize();
+        ws.onmessage = (event) => {
+          if (event.data instanceof ArrayBuffer) term.write(new Uint8Array(event.data));
+          else term.write(event.data);
+        };
+        ws.onclose = () => term.write('\r\n[terminal session closed]\r\n');
+
+        term.onData((data) => {
+          if (ws.readyState === popup.WebSocket.OPEN) ws.send(data);
+        });
+
+        const onResize = () => {
+          fit.fit();
+          sendResize();
+        };
+        popup.addEventListener('resize', onResize);
+
+        return {
+          close: () => {
+            try { ws.close(); } catch (err) {}
+            popup.removeEventListener('resize', onResize);
+            try { term.dispose(); } catch (err) {}
+          },
+        };
+      })();
+
+      popup.addEventListener('beforeunload', () => client.close());
+      return true;
+    } catch (error) {
+      try {
+        popup.document.body.innerHTML = '<div style="padding:16px;font:14px/1.4 ui-sans-serif,system-ui;color:#d7e2f2;background:#050b12">Failed to start terminal.</div>';
+      } catch (err) {}
+      return false;
+    }
   };
 
   const removeAskWidget = () => {
@@ -588,9 +599,9 @@
                   d="m6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"></path>
               </svg>
             </div>
-            <button class="resource-note-label-send" type="submit" aria-label="Send message" data-ask-send>
+            <button class="resource-note-label-send" type="submit" aria-label="Start voice call" data-ask-send data-ask-action="call">
               <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">
-                <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 12l7-7l7 7m-7 7V5"></path>
+                <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2" d="M12 4v16m4-13v10M8 7v10m12-6v2M4 11v2"></path>
               </svg>
             </button>
           </div>
@@ -620,25 +631,133 @@
     const inputEl = askWidget.querySelector('[data-ask-input]');
     const sendEl = askWidget.querySelector('[data-ask-send]');
     let pending = false;
+    let chatInitialized = false;
+    let voiceState = 'idle';
+    let activeCall = null;
+    let streamingBubble = null;
+    let streamingText = '';
+    let assistantLogged = false;
+    const audioSink = document.createElement('audio');
+    audioSink.autoplay = true;
+    audioSink.playsInline = true;
+    audioSink.style.display = 'none';
+    askWidget.appendChild(audioSink);
+
+    const ACTION_ICONS = {
+      voice: `
+        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2" d="M12 4v16m4-13v10M8 7v10m12-6v2M4 11v2"></path>
+        </svg>
+      `,
+      send: `
+        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 12l7-7l7 7m-7 7V5"></path>
+        </svg>
+      `,
+      stop: `
+        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2" d="M6 6l12 12M18 6l-12 12"></path>
+        </svg>
+      `,
+      loading: `
+        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="56.5" stroke-dashoffset="42"></circle>
+        </svg>
+      `,
+    };
 
     const addMessage = (role, text) => {
       const node = document.createElement('div');
       node.className = `ask-chat-msg ${role === 'user' ? 'ask-chat-msg--user' : 'ask-chat-msg--assistant'}`;
       node.textContent = String(text || '').trim();
       messagesEl.appendChild(node);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (!chatInitialized) {
+        messagesEl.scrollTop = 0;
+        chatInitialized = true;
+      }
+    };
+
+    const getPageContextText = () => {
+      const selected = String((window.getSelection && window.getSelection().toString()) || '').trim();
+      const title = String(document.title || '').trim();
+      const bodyText = String((document.body && (document.body.innerText || document.body.textContent)) || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 3000);
+      return [selected ? `Selected text: ${selected}` : '', title ? `Page title: ${title}` : '', bodyText ? `Page text: ${bodyText}` : '']
+        .filter(Boolean)
+        .join('\n\n')
+        .slice(0, 4000);
+    };
+
+    const logVoiceMessage = async (role, content) => {
+      const payload = {
+        role: String(role || '').trim().toLowerCase(),
+        content: String(content || '').trim(),
+        conversation_id: 'default',
+      };
+      if (!payload.content) return;
+      try {
+        await fetch(ASK_VOICE_LOG_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken'),
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify(payload),
+        });
+      } catch (err) {}
+    };
+
+    const updateActionButton = () => {
+      const hasText = String(inputEl.value || '').trim().length > 0;
+      sendEl.classList.add('ask-chat-widget__action');
+      sendEl.classList.toggle('is-voice-active', voiceState === 'active');
+      if (voiceState === 'connecting') {
+        sendEl.dataset.askAction = 'call';
+        sendEl.setAttribute('aria-label', 'Connecting voice call');
+        sendEl.innerHTML = ACTION_ICONS.loading;
+        sendEl.disabled = true;
+        return;
+      }
+      if (voiceState === 'active') {
+        sendEl.dataset.askAction = 'call';
+        sendEl.setAttribute('aria-label', 'End voice call');
+        sendEl.innerHTML = ACTION_ICONS.stop;
+        sendEl.disabled = false;
+        return;
+      }
+      if (hasText) {
+        sendEl.dataset.askAction = 'send';
+        sendEl.setAttribute('aria-label', 'Send message');
+        sendEl.innerHTML = ACTION_ICONS.send;
+        sendEl.disabled = pending;
+        return;
+      }
+      sendEl.dataset.askAction = 'call';
+      sendEl.setAttribute('aria-label', 'Start voice call');
+      sendEl.innerHTML = ACTION_ICONS.voice;
+      sendEl.disabled = pending;
+    };
+
+    const setVoiceState = (nextState) => {
+      voiceState = String(nextState || 'idle');
+      inputEl.disabled = pending || voiceState !== 'idle';
+      updateActionButton();
     };
 
     const setPending = (next) => {
       pending = Boolean(next);
-      sendEl.disabled = pending;
-      inputEl.disabled = pending;
+      inputEl.disabled = pending || voiceState !== 'idle';
+      updateActionButton();
     };
 
     inputEl.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter') return;
       if (event.shiftKey) return;
       if (event.isComposing) return;
+      if (!String(inputEl.value || '').trim()) return;
       event.preventDefault();
       if (typeof formEl.requestSubmit === 'function') {
         formEl.requestSubmit();
@@ -647,10 +766,189 @@
       formEl.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     });
 
+    const connectVoice = async () => {
+      if (activeCall && typeof activeCall.cleanup === 'function') {
+        activeCall.cleanup();
+        addMessage('assistant', 'Voice call ended.');
+        return;
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof window.RTCPeerConnection !== 'function') {
+        addMessage('assistant', 'Voice calls are unavailable in this browser.');
+        return;
+      }
+      setVoiceState('connecting');
+      addMessage('assistant', 'Starting a voice call...');
+      try {
+        const tokenResponse = await fetch(ASK_VOICE_TOKEN_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken'),
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify({
+            page_url: window.location && window.location.href ? window.location.href : '',
+            page_text: getPageContextText(),
+          }),
+        });
+        const tokenPayload = await tokenResponse.json().catch(() => ({}));
+        if (!tokenResponse.ok) {
+          throw new Error(String(tokenPayload.error || 'voice_token_failed'));
+        }
+        const clientSecret = String(tokenPayload.client_secret || '').trim();
+        const model = String(tokenPayload.model || '').trim() || 'gpt-4o-realtime-preview';
+        const voice = String(tokenPayload.voice || '').trim() || 'alloy';
+        const instructions = String(tokenPayload.instructions || '').trim();
+        if (!clientSecret) throw new Error('voice_credentials_missing');
+
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        pc.addTransceiver('audio', { direction: 'sendrecv' });
+        pc.addEventListener('track', (event) => {
+          if (event.track.kind !== 'audio') return;
+          const inbound = new MediaStream([event.track]);
+          audioSink.srcObject = inbound;
+          audioSink.play().catch(() => {});
+        });
+
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream.getTracks().forEach((track) => pc.addTrack(track, micStream));
+        let dc = pc.createDataChannel('oai-events');
+        dc.binaryType = 'arraybuffer';
+
+        const cleanup = () => {
+          try { dc && dc.close(); } catch (err) {}
+          try { pc.close(); } catch (err) {}
+          try { micStream.getTracks().forEach((track) => track.stop()); } catch (err) {}
+          try { audioSink.srcObject = null; } catch (err) {}
+          activeCall = null;
+          streamingBubble = null;
+          streamingText = '';
+          assistantLogged = false;
+          setVoiceState('idle');
+        };
+
+        const setupDataChannelHandlers = () => {
+          if (!dc) return;
+          dc.addEventListener('open', () => {
+            setVoiceState('active');
+            dc.send(JSON.stringify({
+              type: 'session.update',
+              session: {
+                input_audio_transcription: { model: 'gpt-4o-mini-transcribe' },
+                voice,
+                model,
+                instructions,
+              },
+            }));
+            dc.send(JSON.stringify({
+              type: 'response.create',
+              response: {
+                modalities: ['text', 'audio'],
+                instructions: 'Use voice to assist the user.',
+                voice,
+              },
+            }));
+          }, { once: true });
+
+          dc.addEventListener('message', (ev) => {
+            let payload = null;
+            try { payload = JSON.parse(ev.data); } catch (err) {}
+            if (!payload || typeof payload !== 'object') return;
+            if (payload.type === 'response.created') {
+              streamingBubble = null;
+              streamingText = '';
+              assistantLogged = false;
+              return;
+            }
+            if (payload.type === 'response.audio_transcript.delta' && payload.delta) {
+              if (!streamingBubble) {
+                streamingBubble = document.createElement('div');
+                streamingBubble.className = 'ask-chat-msg ask-chat-msg--assistant';
+                streamingBubble.textContent = '';
+                messagesEl.appendChild(streamingBubble);
+              }
+              streamingText += String(payload.delta || '');
+              streamingBubble.textContent = streamingText;
+              messagesEl.scrollTop = messagesEl.scrollHeight;
+              return;
+            }
+            if (payload.type === 'response.audio_transcript.done') {
+              if (!assistantLogged && streamingText) {
+                logVoiceMessage('assistant', streamingText);
+                assistantLogged = true;
+              }
+              streamingBubble = null;
+              streamingText = '';
+              return;
+            }
+            if (payload.type === 'response.message' && Array.isArray(payload.content)) {
+              const chunks = payload.content
+                .map((part) => String((part && (part.text || part.transcript || '')) || '').trim())
+                .filter(Boolean);
+              if (!chunks.length) return;
+              const combined = chunks.join('\n');
+              addMessage('assistant', combined);
+              logVoiceMessage('assistant', combined);
+              assistantLogged = true;
+              streamingBubble = null;
+              streamingText = '';
+              return;
+            }
+            if (
+              payload.type === 'input_audio_transcription.done'
+              || payload.type === 'input_audio_transcription.completed'
+              || payload.type === 'input_audio_transcript.done'
+            ) {
+              const transcript = String(payload.transcript || payload.text || '').trim();
+              if (!transcript) return;
+              addMessage('user', transcript);
+              logVoiceMessage('user', transcript);
+            }
+          });
+        };
+
+        pc.addEventListener('datachannel', (ev) => {
+          dc = ev.channel;
+          dc.binaryType = 'arraybuffer';
+          setupDataChannelHandlers();
+        });
+        setupDataChannelHandlers();
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
+          method: 'POST',
+          body: offer.sdp,
+          headers: {
+            Authorization: `Bearer ${clientSecret}`,
+            'Content-Type': 'application/sdp',
+            'OpenAI-Beta': 'realtime=v1',
+          },
+        });
+        if (!sdpResponse.ok) {
+          throw new Error(`sdp_error_${sdpResponse.status}`);
+        }
+        const answerSdp = await sdpResponse.text();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+        dc.addEventListener('close', cleanup);
+        dc.addEventListener('error', cleanup);
+        activeCall = { pc, dc, cleanup };
+      } catch (error) {
+        setVoiceState('idle');
+        addMessage('assistant', 'Unable to start a voice call right now.');
+      }
+    };
+
     formEl.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (pending) return;
       const message = String(inputEl.value || '').trim();
+      const action = String(sendEl.dataset.askAction || '').trim().toLowerCase();
+      const isCallSubmit = action === 'call' && (!message) && (event.submitter === sendEl);
+      if (isCallSubmit) {
+        await connectVoice();
+        return;
+      }
       if (!message) return;
 
       addMessage('user', message);
@@ -680,8 +978,27 @@
       }
     });
 
+    inputEl.addEventListener('input', () => {
+      updateActionButton();
+    });
+    sendEl.addEventListener('click', async (event) => {
+      const action = String(sendEl.dataset.askAction || '').trim().toLowerCase();
+      const message = String(inputEl.value || '').trim();
+      if (action !== 'call' || message) return;
+      event.preventDefault();
+      if (pending) return;
+      await connectVoice();
+    });
+
+    updateActionButton();
     inputEl.focus();
-    askClient = { close: () => {} };
+    askClient = {
+      close: () => {
+        if (activeCall && typeof activeCall.cleanup === 'function') {
+          activeCall.cleanup();
+        }
+      },
+    };
   };
 
   const openAskWidget = async ({ mode, title, hintText }) => {

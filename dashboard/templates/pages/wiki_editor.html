@@ -6,31 +6,103 @@
 {% block page_content %}
 <section class="wiki-editor-page">
   {% if status_message %}
-  <section class="table-wrap">
+  <section class="table-wrap wiki-editor-status-panel">
     <div class="team-status team-status-{{ status_tone }}">{{ status_message }}</div>
   </section>
   {% endif %}
 
   <form
     method="post"
-    action="{% if editor_mode == 'create' %}{% url 'wiki_create_page' %}{% else %}{% url 'wiki_update_page' editor_page.id %}{% endif %}"
+    action="{% if editor_mode == 'create' %}{{ wiki_create_page_url }}{% else %}{{ wiki_update_page_url }}{% endif %}"
     class="wiki-editor-form"
     data-wiki-editor-form>
     {% csrf_token %}
 
-    <section class="hero wiki-editor-header">
-      <div class="hero-card wiki-editor-header-card">
-        <div class="wiki-editor-meta">
-          <label>
-            <span>Wiki title</span>
-            <input type="text" name="title" value="{{ editor_payload.title }}" required data-wiki-title />
-          </label>
-          <label>
-            <span>Path</span>
-            <input type="text" name="path" value="{{ editor_payload.path }}" placeholder="docs/getting-started" required data-wiki-path />
-          </label>
+    <section class="wiki-editor-topbar card">
+      <a class="ghost-btn wiki-editor-back" href="{{ wiki_back_url }}">Back to Wiki</a>
+      <div class="wiki-editor-topbar-meta">
+        <div class="wiki-editor-derived">
+          <span class="text-muted small">Title from first markdown <code>#</code></span>
+          <strong data-wiki-derived-title>{% if editor_payload.title %}{{ editor_payload.title }}{% else %}Add a <code># Title</code> heading{% endif %}</strong>
         </div>
-        <label class="wiki-editor-team-field">
+        {% if editor_payload.scope == 'resource' %}
+        <div class="status info">Resource: {{ editor_payload.resource_name|default:editor_payload.resource_uuid }}</div>
+        {% endif %}
+        {% if editor_payload.scope == 'team' %}
+        <div class="status info">Team: {{ editor_payload.team_name|default:editor_payload.team_id }}</div>
+        {% endif %}
+        {% if editor_mode == 'edit' %}
+        <div class="text-muted small">Updated: {{ editor_payload.updated_display }}</div>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="table-wrap settings-panel wiki-editor-main">
+      <div class="wiki-editor-grid">
+        <label>
+          <span>Markdown source</span>
+          <textarea name="body_markdown" rows="20" placeholder="# Page title" data-wiki-markdown-input>{{ editor_payload.markdown }}</textarea>
+        </label>
+        <section>
+          <span>Rendered preview</span>
+          <div class="wiki-editor-preview md-body" data-wiki-preview-target>
+            <p class="text-muted">Start writing markdown to preview your page.</p>
+          </div>
+        </section>
+      </div>
+
+      <div class="modal-actions wiki-editor-actions">
+        <button class="secondary-btn" type="submit" name="save_intent" value="draft">Save Draft</button>
+        <button class="primary-btn" type="submit" name="save_intent" value="publish">
+          {% if editor_payload.is_draft %}Publish Draft{% else %}Publish{% endif %}
+        </button>
+      </div>
+    </section>
+
+    <section class="table-wrap settings-panel wiki-editor-settings">
+      <h3>Page settings</h3>
+      <p class="text-muted small">Path, scope, and visibility settings live here. Title is automatically taken from the first markdown <code>#</code> heading.</p>
+      <div class="wiki-editor-settings-grid">
+        <label>
+          <span>Path</span>
+          <input type="text" name="path" value="{{ editor_payload.path }}" placeholder="docs/getting-started" required data-wiki-path />
+        </label>
+        {% if wiki_scope_locked %}
+        <input type="hidden" name="wiki_scope" value="resource" />
+        <input type="hidden" name="resource_uuid" value="{{ wiki_resource_uuid }}" />
+        <section class="wiki-editor-scope-lock">
+          <span class="status info">Scope locked to resource wiki</span>
+          <span class="text-muted small">{{ wiki_resource_name|default:wiki_resource_uuid }}</span>
+        </section>
+        {% else %}
+        <label>
+          <span>Scope</span>
+          <select name="wiki_scope" data-wiki-editor-scope>
+            <option value="workspace"{% if editor_payload.scope == 'workspace' %} selected{% endif %}>Workspace Wiki</option>
+            <option value="team"{% if editor_payload.scope == 'team' %} selected{% endif %}>Team Wiki</option>
+            <option value="resource"{% if editor_payload.scope == 'resource' %} selected{% endif %}>Resource Wiki</option>
+          </select>
+        </label>
+        <label class="wiki-editor-team-field{% if editor_payload.scope != 'team' %} d-none{% endif %}" data-wiki-editor-team-field>
+          <span>Team</span>
+          <select name="team_id" data-wiki-editor-team>
+            <option value="">Select a team</option>
+            {% for item in wiki_team_options %}
+            <option value="{{ item.team_id }}"{% if editor_payload.team_id == item.team_id %} selected{% endif %}>{{ item.team_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="wiki-editor-resource-field{% if editor_payload.scope != 'resource' %} d-none{% endif %}" data-wiki-editor-resource-field>
+          <span>Resource</span>
+          <select name="resource_uuid" data-wiki-editor-resource>
+            <option value="">Select a resource</option>
+            {% for item in wiki_resource_options %}
+            <option value="{{ item.resource_uuid }}"{% if editor_payload.resource_uuid == item.resource_uuid %} selected{% endif %}>{{ item.resource_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <label class="wiki-editor-team-field{% if editor_payload.scope == 'team' %} d-none{% endif %}" data-wiki-editor-team-visibility-field>
           <span>Restrict to teams (optional)</span>
           <select name="team_names" multiple size="4">
             {% for team_name in member_teams %}
@@ -39,46 +111,13 @@
           </select>
         </label>
       </div>
-
-      <div class="hero-card wiki-editor-header-side">
-        <div class="hero-actions">
-          <a class="ghost-btn" href="{% url 'wiki' %}{% if editor_page %}?page={{ editor_page.path|urlencode }}{% endif %}">Back to Wiki</a>
-        </div>
-        <p class="text-muted small">Draft pages are only visible to their creator and admins.</p>
-        {% if editor_mode == 'edit' %}
-        <div class="text-muted small">Created: {{ editor_payload.created_display }}</div>
-        <div class="text-muted small">Updated: {{ editor_payload.updated_display }}</div>
-        {% endif %}
-      </div>
-    </section>
-
-    <section class="table-wrap settings-panel">
-      <div class="wiki-editor-grid">
-        <label>
-          <span>Markdown</span>
-          <textarea name="body_markdown" rows="20" data-wiki-markdown-input>{{ editor_payload.markdown }}</textarea>
-        </label>
-        <section>
-          <span>Live preview</span>
-          <div class="wiki-editor-preview md-body" data-wiki-preview-target>
-            <p class="text-muted">Start writing markdown to preview your page.</p>
-          </div>
-        </section>
-      </div>
-
-      <div class="modal-actions">
-        <button class="secondary-btn" type="submit" name="save_intent" value="draft">Save Draft</button>
-        <button class="primary-btn" type="submit" name="save_intent" value="publish">
-          {% if editor_payload.is_draft %}Publish Draft{% else %}Publish{% endif %}
-        </button>
-      </div>
     </section>
   </form>
 
   {% if editor_mode == 'edit' and request.user.is_superuser %}
   <section class="table-wrap settings-panel">
     <div class="table-actions">
-      <form method="post" action="{% url 'wiki_delete_page' editor_page.id %}" onsubmit="return confirm('Delete this page?');">
+      <form method="post" action="{{ wiki_delete_page_url }}" onsubmit="return confirm('Delete this page?');">
         {% csrf_token %}
         <button class="icon-btn danger" type="submit">Delete page</button>
       </form>
@@ -89,15 +128,23 @@
 
 <script src="{% static 'js/marked.min.js' %}"></script>
 <script src="{% static 'js/purify.min.js' %}"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="{% static 'js/wiki-markdown.js' %}"></script>
 <script>
   (function () {
     const form = document.querySelector('[data-wiki-editor-form]');
     if (!form) return;
 
-    const titleInput = form.querySelector('[data-wiki-title]');
+    const derivedTitle = form.querySelector('[data-wiki-derived-title]');
     const pathInput = form.querySelector('[data-wiki-path]');
     const markdownInput = form.querySelector('[data-wiki-markdown-input]');
     const previewTarget = form.querySelector('[data-wiki-preview-target]');
+    const scopeInput = form.querySelector('[data-wiki-editor-scope]');
+    const teamField = form.querySelector('[data-wiki-editor-team-field]');
+    const teamInput = form.querySelector('[data-wiki-editor-team]');
+    const resourceField = form.querySelector('[data-wiki-editor-resource-field]');
+    const resourceInput = form.querySelector('[data-wiki-editor-resource]');
+    const visibilityField = form.querySelector('[data-wiki-editor-team-visibility-field]');
     const isCreateMode = {% if editor_mode == 'create' %}true{% else %}false{% endif %};
 
     const slugifyValue = (value) => {
@@ -111,37 +158,37 @@
         .replace(/^\/+|\/+$/g, '');
     };
 
-    const renderMarkdown = (value) => {
-      const source = String(value || '');
-      if (!source.trim()) {
-        return '<p class="text-muted">Start writing markdown to preview your page.</p>';
+    const extractMarkdownTitle = (value) => {
+      const lines = String(value || '').replace(/\r\n?/g, '\n').split('\n');
+      let inFence = false;
+      for (const rawLine of lines) {
+        const line = String(rawLine || '');
+        const trimmed = line.trim();
+        if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+          inFence = !inFence;
+          continue;
+        }
+        if (inFence) continue;
+        const match = line.match(/^\s{0,3}#\s+(.+?)\s*$/);
+        if (!match) continue;
+        const title = String(match[1] || '').replace(/\s+#+\s*$/, '').trim();
+        if (title) return title;
       }
+      return '';
+    };
 
-      if (window.marked && typeof window.marked.parse === 'function') {
-        if (typeof window.marked.setOptions === 'function') {
-          window.marked.setOptions({
-            gfm: true,
-            breaks: true,
-            headerIds: false,
-            mangle: false,
-          });
+    const applyDerivedTitle = () => {
+      const markdownTitle = extractMarkdownTitle(markdownInput ? markdownInput.value : '');
+      if (derivedTitle) {
+        if (markdownTitle) {
+          derivedTitle.textContent = markdownTitle;
+        } else {
+          derivedTitle.textContent = 'Add a "# Title" heading';
         }
-        const rendered = window.marked.parse(source);
-        if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
-          return window.DOMPurify.sanitize(rendered, {
-            ADD_TAGS: ['details', 'summary', 'kbd'],
-            ADD_ATTR: ['target', 'rel'],
-          });
-        }
-        return rendered;
       }
-      return source
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\"/g, '&quot;')
-        .replace(/'/g, '&#39;')
-        .replace(/\n/g, '<br>');
+      if (pathInput && isCreateMode && !pathTouched && markdownTitle) {
+        pathInput.value = slugifyValue(markdownTitle);
+      }
     };
 
     let pathTouched = !!((pathInput && pathInput.value) || '').trim();
@@ -151,21 +198,92 @@
         pathTouched = !!(pathInput.value || '').trim();
       });
     }
-    if (titleInput && pathInput && isCreateMode) {
-      titleInput.addEventListener('input', () => {
-        if (pathTouched) return;
-        pathInput.value = slugifyValue(titleInput.value);
+
+    const applyScopeInputs = () => {
+      if (!scopeInput) return;
+      const isTeam = (scopeInput.value || '') === 'team';
+      const isResource = (scopeInput.value || '') === 'resource';
+      if (teamField && teamInput) {
+        teamField.classList.toggle('d-none', !isTeam);
+        teamInput.disabled = !isTeam;
+        teamInput.required = isTeam;
+      }
+      if (resourceField && resourceInput) {
+        resourceField.classList.toggle('d-none', !isResource);
+        resourceInput.disabled = !isResource;
+        resourceInput.required = isResource;
+      }
+      if (visibilityField) {
+        visibilityField.classList.toggle('d-none', isTeam);
+      }
+    };
+
+    if (scopeInput) {
+      scopeInput.addEventListener('change', applyScopeInputs);
+    }
+    applyScopeInputs();
+
+    const markdown = window.AlshivalWikiMarkdown;
+    const applyPreview = () => {
+      if (!previewTarget || !markdownInput || !markdown || typeof markdown.renderInto !== 'function') return;
+      markdown.renderInto(previewTarget, markdownInput.value || '', markdown.GH_PREVIEW_EMPTY);
+    };
+
+    const scrollRatio = (element) => {
+      if (!element) return 0;
+      const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      if (maxScrollTop <= 0) return 0;
+      return element.scrollTop / maxScrollTop;
+    };
+
+    const applyScrollRatio = (element, ratio) => {
+      if (!element) return;
+      const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      if (maxScrollTop <= 0) {
+        element.scrollTop = 0;
+        return;
+      }
+      element.scrollTop = Math.max(0, Math.min(1, ratio || 0)) * maxScrollTop;
+    };
+
+    let syncingFromSource = false;
+    let syncingFromPreview = false;
+
+    const syncPreviewToSource = () => {
+      if (!markdownInput || !previewTarget || syncingFromPreview) return;
+      syncingFromSource = true;
+      applyScrollRatio(previewTarget, scrollRatio(markdownInput));
+      window.requestAnimationFrame(() => {
+        syncingFromSource = false;
       });
+    };
+
+    const syncSourceToPreview = () => {
+      if (!markdownInput || !previewTarget || syncingFromSource) return;
+      syncingFromPreview = true;
+      applyScrollRatio(markdownInput, scrollRatio(previewTarget));
+      window.requestAnimationFrame(() => {
+        syncingFromPreview = false;
+      });
+    };
+
+    if (markdownInput) {
+      markdownInput.addEventListener('input', () => {
+        applyDerivedTitle();
+        applyPreview();
+        window.requestAnimationFrame(syncPreviewToSource);
+      });
+      markdownInput.addEventListener('scroll', syncPreviewToSource, { passive: true });
     }
 
-    const applyPreview = () => {
-      if (!previewTarget || !markdownInput) return;
-      previewTarget.innerHTML = renderMarkdown(markdownInput.value || '');
-    };
-    if (markdownInput) {
-      markdownInput.addEventListener('input', applyPreview);
+    if (previewTarget) {
+      previewTarget.addEventListener('scroll', syncSourceToPreview, { passive: true });
     }
+
+    window.addEventListener('resize', syncPreviewToSource);
+    applyDerivedTitle();
     applyPreview();
+    window.requestAnimationFrame(syncPreviewToSource);
   })();
 </script>
 {% endblock page_content %}

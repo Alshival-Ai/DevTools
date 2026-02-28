@@ -3,21 +3,21 @@
 
 {% block title %}Overview{% endblock title %}
 
-{% block page_css %}
-{{ block.super }}
-<style>
-  .floating-ask-alshival {
-    display: none;
-  }
-</style>
-{% endblock page_css %}
-
 {% block page_content %}
 <section
   class="overview-dashboard"
   data-overview-dashboard
   data-superuser="{% if request.user.is_superuser %}1{% else %}0{% endif %}"
   data-chat-url="{% url 'ask_alshival_chat' %}"
+  data-asana-complete-url-template="{% url 'update_asana_task_completion' task_gid='__TASK_GID__' %}"
+  data-asana-board-task-create-url-template="{% url 'create_asana_board_task' board_gid='__BOARD_GID__' %}"
+  data-asana-task-delete-url-template="{% url 'delete_asana_task' task_gid='__TASK_GID__' %}"
+  data-asana-comments-url-template="{% url 'list_asana_task_comments' task_gid='__TASK_GID__' %}"
+  data-asana-comment-add-url-template="{% url 'add_asana_task_comment' task_gid='__TASK_GID__' %}"
+  data-asana-board-map-url-template="{% url 'update_asana_board_resource_mapping' board_gid='__BOARD_GID__' %}"
+  data-asana-task-map-url-template="{% url 'update_asana_task_resource_mapping' task_gid='__TASK_GID__' %}"
+  data-agenda-item-map-url="{% url 'update_overview_agenda_item_resource_mapping' %}"
+  data-asana-completed-window-days="{{ asana_completed_window_days }}"
   data-notifications-url="{% url 'notifications_feed' %}"
   data-notifications-mark-read-url="{% url 'notifications_mark_all_read' %}"
   data-notifications-clear-url="{% url 'notifications_clear_all' %}">
@@ -25,7 +25,7 @@
     <article class="card overview-intro">
       <div>
         <h2>Operational Overview</h2>
-        <p>Live resource health and cloud log telemetry across your workspace.</p>
+        <p>Workspace status, upcoming tasks, and operational follow-ups.</p>
       </div>
       <div class="overview-intro-meta">
         <span class="tag">Updated {{ dashboard_generated_display }}</span>
@@ -57,31 +57,190 @@
     </section>
 
     <section class="overview-panels">
-      <article class="card overview-panel">
-        <div class="overview-panel-head">
-          <h3>Resource health trend</h3>
-          <span class="text-muted small">Healthy / Unhealthy / Unknown</span>
+      <article class="card overview-panel team-planner-panel planner-panel overview-planner-panel" data-overview-planner>
+        <header class="planner-head">
+          <div class="planner-title">
+            <h3>Calendar</h3>
+            <p class="text-muted small">Coordinate operations, releases, and follow-ups.</p>
+          </div>
+          <div class="planner-head-actions">
+            <button
+              class="icon-btn detail-alert-btn planner-notify-btn"
+              type="button"
+              aria-label="Open calendar notifications"
+              data-calendar-alert-open>
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.4-1.4a2 2 0 0 1-.6-1.4V11a6 6 0 1 0-12 0v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0a3 3 0 0 1-6 0" />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <section class="planner-stats" aria-label="Planner summary">
+          <article class="planner-stat-card planner-stat-card--today">
+            <span>Today</span>
+            <strong data-planner-stat="today">0</strong>
+            <small>Open items</small>
+          </article>
+          <article class="planner-stat-card planner-stat-card--week">
+            <span>Next 7 days</span>
+            <strong data-planner-stat="week">0</strong>
+            <small>Scheduled</small>
+          </article>
+          <article class="planner-stat-card planner-stat-card--done">
+            <span>Completed</span>
+            <strong data-planner-stat="done">0</strong>
+            <small>Checked off</small>
+          </article>
+        </section>
+
+        <div class="planner-filters" aria-label="Planner category filters">
+          <div class="planner-filter-chips">
+            <button class="planner-filter-chip is-active" type="button" data-planner-filter="all">
+              All
+              <span data-planner-filter-count></span>
+            </button>
+            <button class="planner-filter-chip" type="button" data-planner-filter="meeting">
+              Meetings
+              <span data-planner-filter-count></span>
+            </button>
+            <button class="planner-filter-chip" type="button" data-planner-filter="delivery">
+              Deliveries
+              <span data-planner-filter-count></span>
+            </button>
+            <button class="planner-filter-chip" type="button" data-planner-filter="follow-up">
+              Follow-ups
+              <span data-planner-filter-count></span>
+            </button>
+            <button class="planner-filter-chip" type="button" data-planner-filter="review">
+              Reviews
+              <span data-planner-filter-count></span>
+            </button>
+          </div>
+          <div class="planner-toolbar">
+            <div class="planner-nav">
+              <button class="icon-btn icon-btn-small" type="button" data-planner-prev aria-label="Previous month">&#8249;</button>
+              <button class="ghost-btn planner-today-btn" type="button" data-planner-today>Today</button>
+              <button class="icon-btn icon-btn-small" type="button" data-planner-next aria-label="Next month">&#8250;</button>
+            </div>
+            <strong class="planner-month-label" data-planner-month></strong>
+            <div class="planner-view-switch" role="tablist" aria-label="Calendar view">
+              <button class="planner-view-btn is-active" type="button" data-planner-view="month">Month</button>
+              <button class="planner-view-btn" type="button" data-planner-view="agenda">Agenda</button>
+            </div>
+          </div>
         </div>
-        <canvas class="overview-chart-canvas" data-health-chart aria-label="Resource health trend chart"></canvas>
-        <div class="overview-legend">
-          <span><i class="overview-dot overview-dot-healthy"></i>Healthy</span>
-          <span><i class="overview-dot overview-dot-unhealthy"></i>Unhealthy</span>
-          <span><i class="overview-dot overview-dot-unknown"></i>Unknown</span>
+
+        <div class="planner-body">
+          <section class="planner-calendar-shell">
+            <div class="planner-calendar" data-planner-grid></div>
+          </section>
+          <section class="planner-agenda-shell">
+            <div class="planner-agenda-head">
+              <h4 data-planner-agenda-title>Agenda</h4>
+              <span class="text-muted small" data-planner-selected></span>
+            </div>
+            <div class="planner-agenda" data-planner-agenda></div>
+          </section>
+        </div>
+
+        <form class="planner-quick-add" data-planner-form>
+          <label>
+            <span>Task</span>
+            <input type="text" maxlength="180" required data-planner-title placeholder="Sprint planning, customer review, deploy window..." />
+          </label>
+          <div class="planner-quick-grid">
+            <label>
+              <span>Date</span>
+              <input type="date" required data-planner-date />
+            </label>
+            <label>
+              <span>Time</span>
+              <input type="time" data-planner-time />
+            </label>
+            <label>
+              <span>Category</span>
+              <select data-planner-kind>
+                <option value="meeting">Meeting</option>
+                <option value="delivery">Delivery</option>
+                <option value="follow-up">Follow-up</option>
+                <option value="review">Review</option>
+              </select>
+            </label>
+            <div class="planner-submit-wrap">
+              <button type="submit" class="secondary-btn">Add event</button>
+            </div>
+          </div>
+        </form>
+
+        <div class="planner-integrations">
+          <div class="planner-integration-card">
+            <div>
+              <strong>Google Calendar</strong>
+              <p class="text-muted small">Two-way sync UI ready for event and attendee mapping.</p>
+            </div>
+            <span class="status warning">Staged</span>
+          </div>
+          <div class="planner-integration-card">
+            <div>
+              <strong>Project Milestones</strong>
+              <p class="text-muted small">Planned surfacing of release windows and handoff checkpoints.</p>
+            </div>
+            <span class="status warning">Staged</span>
+          </div>
         </div>
       </article>
 
-      <article class="card overview-panel">
-        <div class="overview-panel-head">
-          <h3>Cloud logs by severity</h3>
-          <span class="text-muted small">Error / Warning / Info</span>
+      <div class="modal resource-alert-modal" id="calendar-alerts" data-calendar-alert-modal aria-hidden="true">
+        <div class="modal-overlay" data-calendar-alert-close></div>
+        <div class="modal-content alert-modal-content" role="dialog" aria-modal="true" aria-label="Calendar notification settings">
+          <div class="modal-header">
+            <div>
+              <h3 class="detail-card-title">Calendar Notifications</h3>
+              <p class="text-muted small">Choose where calendar event notifications are delivered.</p>
+            </div>
+            <button class="icon-btn" type="button" aria-label="Close notification modal" data-calendar-alert-close>✕</button>
+          </div>
+          <form method="post" action="{% url 'update_overview_calendar_notification_settings' %}" class="alert-settings-form">
+            {% csrf_token %}
+            <div class="alert-modal-list">
+              <section class="alert-option-card">
+                <div class="alert-option-head">
+                  <h4>Delivery Channels</h4>
+                </div>
+                <div class="alert-option-grid">
+                  <label class="checkbox">
+                    <input type="checkbox" name="calendar_events_app_enabled" value="1"{% if calendar_notification_settings.calendar_events_app_enabled %} checked{% endif %}>
+                    <span>App</span>
+                  </label>
+                  {% if twilio_sms_available %}
+                  <label class="checkbox">
+                    <input type="checkbox" name="calendar_events_sms_enabled" value="1"{% if calendar_notification_settings.calendar_events_sms_enabled %} checked{% endif %}>
+                    <span>SMS</span>
+                  </label>
+                  {% endif %}
+                  {% if email_notifications_available %}
+                  <label class="checkbox">
+                    <input type="checkbox" name="calendar_events_email_enabled" value="1"{% if calendar_notification_settings.calendar_events_email_enabled %} checked{% endif %}>
+                    <span>Email</span>
+                  </label>
+                  {% endif %}
+                </div>
+              </section>
+              {% if not twilio_sms_available %}
+              <p class="text-muted small">SMS notifications are unavailable until Twilio is configured in Connector Settings.</p>
+              {% endif %}
+              {% if not email_notifications_available %}
+              <p class="text-muted small">Email notifications are unavailable until the Microsoft support inbox mailbox is configured and support inbox monitoring is enabled in Alshival Admin.</p>
+              {% endif %}
+            </div>
+            <div class="modal-actions">
+              <button class="ghost-btn" type="button" data-calendar-alert-close>Close</button>
+              <button class="primary-btn" type="submit">Save</button>
+            </div>
+          </form>
         </div>
-        <canvas class="overview-chart-canvas" data-log-chart aria-label="Cloud log severity chart"></canvas>
-        <div class="overview-legend">
-          <span><i class="overview-dot overview-dot-error"></i>Error</span>
-          <span><i class="overview-dot overview-dot-warning"></i>Warning</span>
-          <span><i class="overview-dot overview-dot-info"></i>Info</span>
-        </div>
-      </article>
+      </div>
     </section>
 
     <article class="card overview-table-panel">
@@ -149,27 +308,6 @@
   </div>
 
   <aside class="overview-side">
-    <article class="card overview-chat-card">
-      <div class="overview-panel-head overview-chat-head">
-        <h3>Ask Alshival</h3>
-        {% if request.user.is_superuser %}
-        <button type="button" class="ghost-btn overview-sudo-btn" data-ask-sudo>sudo mode</button>
-        {% endif %}
-      </div>
-      <p class="text-muted small">Runbook guidance, triage help, and context-aware actions.</p>
-      <div class="ask-chat-widget overview-chat-widget">
-        <div class="ask-chat-widget__messages overview-chat-messages" data-ask-messages aria-live="polite">
-          <div class="ask-chat-msg ask-chat-msg--assistant">How can I help with your resources today?</div>
-        </div>
-        <form class="overview-chat-form" data-ask-form>
-          <div class="overview-chat-compose">
-            <textarea rows="2" maxlength="8000" data-ask-input placeholder="Ask Alshival..."></textarea>
-            <button type="submit" class="primary-btn" data-ask-send>Send</button>
-          </div>
-        </form>
-      </div>
-    </article>
-
     <article class="card overview-notify-card">
       <div class="overview-panel-head">
         <h3>Notifications</h3>
@@ -185,12 +323,18 @@
     </article>
   </aside>
 </section>
+{{ overview_calendar_external_items|json_script:"overview-planner-external-items" }}
+{{ asana_overview.tasks|json_script:"overview-asana-tasks" }}
+{{ asana_overview.boards|json_script:"overview-asana-boards" }}
+{{ asana_resource_options|json_script:"overview-asana-resource-options" }}
+{{ agenda_item_resource_mappings|json_script:"overview-agenda-item-resource-mappings" }}
+{{ asana_board_resource_mappings|json_script:"overview-asana-board-resource-mappings" }}
+{{ asana_task_resource_mappings|json_script:"overview-asana-task-resource-mappings" }}
 
-{{ health_timeline|json_script:"overview-health-timeline" }}
-{{ cloud_log_timeline|json_script:"overview-log-timeline" }}
 {% endblock page_content %}
 
 {% block page_js %}
 {{ block.super }}
+<script src="{% static 'js/planner-ui.js' %}"></script>
 <script src="{% static 'js/home-overview.js' %}"></script>
 {% endblock page_js %}

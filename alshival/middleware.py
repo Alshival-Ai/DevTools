@@ -1,4 +1,6 @@
 from django.conf import settings
+from django.contrib.auth import logout
+from django.http import Http404
 from django.shortcuts import redirect
 
 from dashboard.request_context import clear_current_user, set_current_user
@@ -14,10 +16,14 @@ class LoginRequiredMiddleware:
         try:
             path = request.path
             setup_url = getattr(settings, "SETUP_URL", "/setup/")
+            accounts_prefix = "/accounts/"
 
             static_prefix = f"/{settings.STATIC_URL.lstrip('/')}"
             if path.startswith(static_prefix):
                 return self.get_response(request)
+            if request.user.is_authenticated and not request.user.is_staff:
+                logout(request)
+                raise Http404("Not found")
             if path.startswith('/admin/'):
                 return self.get_response(request)
             if path.startswith('/u/') and path.endswith('/logs/'):
@@ -31,6 +37,8 @@ class LoginRequiredMiddleware:
             if request.user.is_authenticated:
                 return self.get_response(request)
 
+            if path.startswith(accounts_prefix):
+                return self.get_response(request)
             if path.startswith(settings.LOGIN_URL):
                 return self.get_response(request)
             if path.startswith(setup_url):

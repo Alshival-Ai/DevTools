@@ -1,4 +1,5 @@
 {% extends 'vertical.html' %}
+{% load static %}
 
 {% block title %}Resource Details{% endblock title %}
 
@@ -13,9 +14,18 @@
       </span>
       <div class="detail-title-main">
         <div class="detail-title-row">
+          <a
+            class="icon-btn detail-back-link"
+            href="{% url 'resources' %}"
+            aria-label="Back to resources"
+            title="Back to resources">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m15 18l-6-6l6-6" />
+            </svg>
+          </a>
           <h1>{{ resource.name }}</h1>
           {% if resource.resource_type == 'vm' and resource.ssh_key_present %}
-          <button type="button" class="gradient-btn detail-connect-btn" data-ssh-toggle data-resource-id="{{ resource.id }}">Connect</button>
+          <button type="button" class="gradient-btn detail-connect-btn" data-ssh-toggle data-resource-id="{{ resource.id }}" data-resource-uuid="{{ resource.resource_uuid }}">Connect</button>
           {% endif %}
           <button
             type="button"
@@ -28,6 +38,47 @@
       </div>
     </div>
     <div class="detail-actions">
+      <a class="ghost-btn" href="{{ resource_wiki_url }}">Resource Wiki</a>
+      {% if can_manage_resource %}
+      <button
+        class="icon-btn detail-edit-btn"
+        type="button"
+        aria-label="Edit resource"
+        title="Edit resource"
+        data-resource-edit-open
+        data-resource-id="{{ resource.id }}"
+        data-resource-name="{{ resource.name|escape }}"
+        data-resource-type="{{ resource.resource_type }}"
+        data-resource-target="{{ resource.target|escape }}"
+        data-resource-address="{{ resource.address|escape }}"
+        data-resource-port="{{ resource.port|escape }}"
+        data-resource-db-type="{{ resource.db_type|escape }}"
+        data-resource-healthcheck-url="{{ resource.healthcheck_url|escape }}"
+        data-resource-notes="{{ resource.notes|escape }}"
+        data-resource-scope="{{ resource.access_scope }}"
+        data-resource-team-names="{% for team_name in resource.team_names %}{% if not forloop.first %},{% endif %}{{ team_name|escape }}{% endfor %}"
+        data-resource-ssh-key-name="{{ resource.ssh_key_name|escape }}"
+        data-resource-ssh-username="{{ resource.ssh_username|escape }}"
+        data-resource-ssh-key-present="{% if resource.ssh_key_present %}1{% else %}0{% endif %}"
+        data-resource-ssh-credential-id="{{ resource.ssh_credential_id|escape }}"
+        data-resource-ssh-credential-scope="{{ resource.ssh_credential_scope|escape }}"
+        data-resource-ssh-port="{{ resource.ssh_port|escape }}">
+        ✎
+      </button>
+      {% endif %}
+      <button
+        class="icon-btn detail-health-btn"
+        type="button"
+        data-health-check-btn
+        data-health-check-url="{{ resource_check_url }}"
+        data-health-ping-stream-url="{{ resource_ping_stream_url }}"
+        aria-label="Restart live ping stream"
+        title="Restart live ping stream">
+        <svg class="health-pulse-icon" width="18" height="18" viewBox="0 0 64 48" aria-hidden="true">
+          <polyline class="health-pulse-back" points="0.157 23.954, 14 23.954, 21.843 48, 43 0, 50 24, 64 24"></polyline>
+          <polyline class="health-pulse-front" points="0.157 23.954, 14 23.954, 21.843 48, 43 0, 50 24, 64 24"></polyline>
+        </svg>
+      </button>
       <button
         class="icon-btn detail-alert-btn"
         type="button"
@@ -37,7 +88,6 @@
           <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.4-1.4a2 2 0 0 1-.6-1.4V11a6 6 0 1 0-12 0v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0a3 3 0 0 1-6 0" />
         </svg>
       </button>
-      <a class="ghost-btn" href="{% url 'resources' %}">Back to Resources</a>
     </div>
   </div>
 
@@ -55,15 +105,6 @@
         <div class="overview-signal">
           <span class="text-muted small">Last checked</span>
           <strong data-last-checked>{{ last_checked_display }}</strong>
-        </div>
-        <div class="overview-signal overview-health-action">
-          <button
-            class="ghost-btn health-check-btn-muted"
-            type="button"
-            data-health-check-btn
-            data-health-check-url="{{ resource_check_url }}">
-            Run health check
-          </button>
         </div>
       </div>
       <div class="overview-meta-grid">
@@ -84,14 +125,15 @@
           <span class="overview-meta-value">{{ created_display }}</span>
         </div>
       </div>
-      <div class="health-chart-wrap{% if not health_history_chart %} d-none{% endif %}" data-health-chart-wrap>
-        <canvas class="health-chart-canvas" data-health-chart-canvas aria-label="Health history chart"></canvas>
-        <div class="health-chart-legend">
+      <div class="health-chart-wrap d-none" data-health-chart-wrap>
+        <canvas class="health-chart-canvas" data-health-chart-canvas aria-label="Live ping latency chart"></canvas>
+        <div class="health-chart-legend" data-health-chart-legend>
           <span><i class="health-dot latency"></i> Ping latency (ms)</span>
-          <span><i class="health-dot fallback"></i> Fallback check</span>
+          <span><i class="health-dot method"></i> Ping check</span>
         </div>
+        <div class="health-chart-summary text-muted small" data-health-chart-summary></div>
       </div>
-      <div class="placeholder-block" data-health-history-empty>No health checks yet.</div>
+      <div class="placeholder-block d-none" data-health-history-empty></div>
       {% if resource.notes %}
       <div class="overview-notes">
         <span class="text-muted small">Resource notes</span>
@@ -332,6 +374,141 @@
       <div class="placeholder-block">No logs yet for this resource.</div>
       {% endif %}
     </article>
+
+    <article
+      class="detail-card detail-card-full planner-panel resource-planner-panel"
+      data-resource-planner
+      data-resource-planner-id="{{ resource.id }}"
+      data-resource-uuid="{{ resource.resource_uuid }}"
+      data-asana-complete-url-template="{% url 'update_asana_task_completion' task_gid='__TASK_GID__' %}"
+      data-asana-board-task-create-url-template="{% url 'create_asana_board_task' board_gid='__BOARD_GID__' %}"
+      data-asana-task-delete-url-template="{% url 'delete_asana_task' task_gid='__TASK_GID__' %}"
+      data-asana-comments-url-template="{% url 'list_asana_task_comments' task_gid='__TASK_GID__' %}"
+      data-asana-comment-add-url-template="{% url 'add_asana_task_comment' task_gid='__TASK_GID__' %}"
+      data-asana-board-map-url-template="{% url 'update_asana_board_resource_mapping' board_gid='__BOARD_GID__' %}"
+      data-asana-task-map-url-template="{% url 'update_asana_task_resource_mapping' task_gid='__TASK_GID__' %}"
+      data-asana-completed-window-days="{{ asana_completed_window_days }}">
+      <header class="planner-head">
+        <div class="planner-title">
+          <h3>Resource Planner</h3>
+          <p class="text-muted small">Schedule maintenance windows, incident drills, and service follow-ups for this resource.</p>
+        </div>
+      </header>
+
+      <section class="planner-stats" aria-label="Planner summary">
+        <article class="planner-stat-card planner-stat-card--today">
+          <span>Today</span>
+          <strong data-planner-stat="today">0</strong>
+          <small>Open items</small>
+        </article>
+        <article class="planner-stat-card planner-stat-card--week">
+          <span>Next 7 days</span>
+          <strong data-planner-stat="week">0</strong>
+          <small>Scheduled</small>
+        </article>
+        <article class="planner-stat-card planner-stat-card--done">
+          <span>Completed</span>
+          <strong data-planner-stat="done">0</strong>
+          <small>Checked off</small>
+        </article>
+      </section>
+
+      <div class="planner-filters" aria-label="Planner category filters">
+        <div class="planner-filter-chips">
+          <button class="planner-filter-chip is-active" type="button" data-planner-filter="all">
+            All
+            <span data-planner-filter-count></span>
+          </button>
+          <button class="planner-filter-chip" type="button" data-planner-filter="meeting">
+            Meetings
+            <span data-planner-filter-count></span>
+          </button>
+          <button class="planner-filter-chip" type="button" data-planner-filter="delivery">
+            Deliveries
+            <span data-planner-filter-count></span>
+          </button>
+          <button class="planner-filter-chip" type="button" data-planner-filter="follow-up">
+            Follow-ups
+            <span data-planner-filter-count></span>
+          </button>
+          <button class="planner-filter-chip" type="button" data-planner-filter="review">
+            Reviews
+            <span data-planner-filter-count></span>
+          </button>
+        </div>
+        <div class="planner-toolbar">
+          <div class="planner-nav">
+            <button class="icon-btn icon-btn-small" type="button" data-planner-prev aria-label="Previous month">&#8249;</button>
+            <button class="ghost-btn planner-today-btn" type="button" data-planner-today>Today</button>
+            <button class="icon-btn icon-btn-small" type="button" data-planner-next aria-label="Next month">&#8250;</button>
+          </div>
+          <strong class="planner-month-label" data-planner-month></strong>
+          <div class="planner-view-switch" role="tablist" aria-label="Calendar view">
+            <button class="planner-view-btn is-active" type="button" data-planner-view="month">Month</button>
+            <button class="planner-view-btn" type="button" data-planner-view="agenda">Agenda</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="planner-body">
+        <section class="planner-calendar-shell">
+          <div class="planner-calendar" data-planner-grid></div>
+        </section>
+        <section class="planner-agenda-shell">
+          <div class="planner-agenda-head">
+            <h4 data-planner-agenda-title>Agenda</h4>
+            <span class="text-muted small" data-planner-selected></span>
+          </div>
+          <div class="planner-agenda" data-planner-agenda></div>
+        </section>
+      </div>
+
+      <form class="planner-quick-add" data-planner-form>
+        <label>
+          <span>Task</span>
+          <input type="text" maxlength="180" required data-planner-title placeholder="Patch rollout, backup verification, customer update..." />
+        </label>
+        <div class="planner-quick-grid">
+          <label>
+            <span>Date</span>
+            <input type="date" required data-planner-date />
+          </label>
+          <label>
+            <span>Time</span>
+            <input type="time" data-planner-time />
+          </label>
+          <label>
+            <span>Category</span>
+            <select data-planner-kind>
+              <option value="meeting">Meeting</option>
+              <option value="delivery">Delivery</option>
+              <option value="follow-up">Follow-up</option>
+              <option value="review">Review</option>
+            </select>
+          </label>
+          <div class="planner-submit-wrap">
+            <button type="submit" class="secondary-btn">Add event</button>
+          </div>
+        </div>
+      </form>
+
+      <div class="planner-integrations">
+        <div class="planner-integration-card">
+          <div>
+            <strong>Maintenance Windows</strong>
+            <p class="text-muted small">Planned mapping to deployment freeze windows and runbooks.</p>
+          </div>
+          <span class="status warning">Staged</span>
+        </div>
+        <div class="planner-integration-card">
+          <div>
+            <strong>Incident Timeline</strong>
+            <p class="text-muted small">Planned sync with incidents, postmortems, and on-call actions.</p>
+          </div>
+          <span class="status warning">Staged</span>
+        </div>
+      </div>
+    </article>
   </div>
 
   <div class="modal resource-alert-modal" id="alerts" data-resource-alert-modal aria-hidden="true">
@@ -397,7 +574,7 @@
         <p class="text-muted small">SMS notifications are unavailable until Twilio is configured in Connector Settings.</p>
         {% endif %}
         {% if not email_notifications_available %}
-        <p class="text-muted small">Email notifications are unavailable until an email provider is configured in Connector Settings.</p>
+        <p class="text-muted small">Email notifications are unavailable until the Microsoft support inbox mailbox is configured and support inbox monitoring is enabled in Alshival Admin.</p>
         {% endif %}
       </div>
       <div class="modal-actions">
@@ -407,12 +584,187 @@
       </form>
     </div>
   </div>
+  {% if can_manage_resource %}
+  <div class="modal" data-resource-edit-modal aria-hidden="true">
+    <div class="modal-overlay" data-resource-edit-close></div>
+    <div class="modal-content" role="dialog" aria-modal="true" aria-label="Edit resource">
+      <div class="modal-header">
+        <h3>Edit resource</h3>
+        <button class="icon-btn" type="button" data-resource-edit-close>✕</button>
+      </div>
+      <form method="post" action="{% url 'edit_resource_item' resource.id %}" data-resource-edit-form class="modal-form" enctype="multipart/form-data">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path|escape }}">
+        <label>
+          <span>Name</span>
+          <input type="text" name="name" required />
+        </label>
+        <label>
+          <span>Resource type</span>
+          <select name="resource_type" required>
+            <option value="api">API Endpoint</option>
+            <option value="vm">Virtual Machine</option>
+            <option value="database">Database</option>
+            <option value="queue">Queue</option>
+            <option value="service">Service</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label data-resource-type-show="api" class="d-none">
+          <span>Health endpoint</span>
+          <input type="url" name="healthcheck_url" />
+        </label>
+        <label data-resource-type-show="vm,database" class="d-none">
+          <span>Host or IP address</span>
+          <input type="text" name="address" />
+        </label>
+        <label data-resource-type-show="database" class="d-none">
+          <span>Database type</span>
+          <select name="db_type">
+            <option value="">Select database</option>
+            <option value="postgres">PostgreSQL</option>
+            <option value="mysql">MySQL</option>
+            <option value="mariadb">MariaDB</option>
+            <option value="mssql">SQL Server</option>
+            <option value="redis">Redis</option>
+            <option value="mongo">MongoDB</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label data-resource-type-show="database" class="d-none">
+          <span>Port</span>
+          <input type="number" name="port" min="1" max="65535" />
+        </label>
+        <label data-resource-type-show="service,queue,other" class="d-none">
+          <span>Target</span>
+          <input type="text" name="target" />
+        </label>
+        <div data-resource-type-show="vm" class="d-none ssh-group">
+          <div class="ssh-group-header">
+            <div>
+              <div class="ssh-group-title">SSH credentials</div>
+              <div class="text-muted small" data-ssh-key-status></div>
+            </div>
+            <button class="ghost-btn" type="button" data-ssh-toggle="keys" aria-expanded="false">Add SSH credentials</button>
+          </div>
+          <div class="ssh-group-body d-none" data-ssh-panel="keys">
+            <label>
+              <span>Credential source</span>
+              <select name="ssh_mode">
+                <option value="inline">Upload new key</option>
+                <option value="saved">Use saved key</option>
+              </select>
+            </label>
+            <label>
+              <span>SSH username</span>
+              <input type="text" name="ssh_username" />
+            </label>
+            <label>
+              <span>SSH port</span>
+              <input type="number" name="ssh_port" min="1" max="65535" value="22" />
+            </label>
+            <div data-ssh-mode-show="saved" class="d-none">
+              <label>
+                <span>Saved key</span>
+                <select name="ssh_credential_id">
+                  <option value="">Select saved key</option>
+                  {% for item in ssh_credential_choices %}
+                  <option value="{{ item.id_value }}">
+                    {% if item.scope == 'team' %}
+                      Team{% if item.team_names %} ({{ item.team_names|join:', ' }}){% endif %}: {{ item.name }}
+                    {% elif item.scope == 'global_team' %}
+                      Global{% if item.team_names %} ({{ item.team_names|join:', ' }}){% endif %}: {{ item.name }}
+                    {% else %}
+                      Account: {{ item.name }}
+                    {% endif %}
+                  </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <div class="text-muted small">Available keys from Account, Team, and Global libraries.</div>
+            </div>
+            <div data-ssh-mode-show="inline">
+              <label>
+                <span>Key level</span>
+                <select name="ssh_scope">
+                  <option value="account">Account</option>
+                  <option value="team">Team</option>
+                  {% if request.user.is_superuser %}
+                  <option value="global">Global</option>
+                  {% endif %}
+                </select>
+              </label>
+              <label>
+                <span>Teams</span>
+                <select name="ssh_team_names" multiple size="5">
+                  {% for team_name in member_teams %}
+                  <option value="{{ team_name }}">{{ team_name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>
+                <span>Key name</span>
+                <input type="text" name="ssh_key_name" />
+              </label>
+              <label>
+                <span>Private key</span>
+                <textarea name="ssh_key_text" rows="4" placeholder="Paste the private key to replace it"></textarea>
+              </label>
+              <label>
+                <span>Private key file</span>
+                <input type="file" name="ssh_key_file" />
+              </label>
+              <label>
+                <span>Clear stored key</span>
+                <input type="checkbox" name="clear_ssh_key" value="1" />
+              </label>
+              <div class="text-muted small">Leave private key blank to keep the current one. New inline keys are saved to the selected key level.</div>
+            </div>
+          </div>
+        </div>
+        <label data-resource-type-show="api,vm,database,queue,service,other" class="d-none">
+          <span>Notes</span>
+          <textarea name="notes" rows="3"></textarea>
+        </label>
+        <label>
+          <span>Access scope</span>
+          <select name="resource_scope">
+            <option value="account">Account</option>
+            <option value="team">Team</option>
+            {% if request.user.is_superuser %}
+            <option value="global">Global</option>
+            {% endif %}
+          </select>
+        </label>
+        <label data-resource-scope-team-field class="d-none">
+          <span>Teams</span>
+          <select name="resource_team_names" multiple size="5">
+            {% for team_name in member_teams %}
+            <option value="{{ team_name }}">{{ team_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="modal-actions">
+          <button class="ghost-btn" type="button" data-resource-edit-close>Cancel</button>
+          <button class="primary-btn" type="submit">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  {% endif %}
 </section>
+{{ resource_calendar_external_items|json_script:"resource-planner-external-items" }}
+{{ resource_asana_all_tasks|json_script:"resource-asana-tasks" }}
+{{ resource_asana_overview.boards|json_script:"resource-asana-boards" }}
+{{ asana_resource_options|json_script:"resource-asana-resource-options" }}
+{{ asana_board_resource_mappings|json_script:"resource-asana-board-resource-mappings" }}
+{{ asana_task_resource_mappings|json_script:"resource-asana-task-resource-mappings" }}
 {% endblock page_content %}
 
 {% block page_js %}
 {{ block.super }}
-{{ health_history_chart|json_script:"health-history-data" }}
+<script src="{% static 'js/planner-ui.js' %}"></script>
+<script src="{% static 'js/resource-planner.js' %}"></script>
 <script>
   (function () {
     const healthBtn = document.querySelector('[data-health-check-btn]');
@@ -421,24 +773,14 @@
     const checkedLabels = document.querySelectorAll('[data-last-checked]');
     const chartWrap = document.querySelector('[data-health-chart-wrap]');
     const historyCanvas = document.querySelector('[data-health-chart-canvas]');
+    const chartLegend = document.querySelector('[data-health-chart-legend]');
+    const chartSummary = document.querySelector('[data-health-chart-summary]');
     const historyEmpty = document.querySelector('[data-health-history-empty]');
     if (!healthBtn) return;
-    const historyDataNode = document.getElementById('health-history-data');
-    let healthSeries = [];
-    try {
-      healthSeries = JSON.parse(historyDataNode ? historyDataNode.textContent : '[]') || [];
-    } catch (err) {
-      healthSeries = [];
-    }
-
-    const getCookie = (name) => {
-      const cookies = document.cookie ? document.cookie.split(';') : [];
-      for (const cookie of cookies) {
-        const trimmed = cookie.trim();
-        if (trimmed.startsWith(name + '=')) return decodeURIComponent(trimmed.slice(name.length + 1));
-      }
-      return '';
-    };
+    let livePingSeries = [];
+    let pingStream = null;
+    const pingStreamUrl = String(healthBtn.getAttribute('data-health-ping-stream-url') || '').trim();
+    const MAX_LIVE_POINTS = 30;
 
     const formatTime = (value) => {
       if (!value) return '—';
@@ -447,14 +789,135 @@
       return parsed.toLocaleString();
     };
 
-    const healthColor = (item) => {
-      const method = String((item && item.check_method) || '').toLowerCase();
-      if (method && method.indexOf('ping+') === 0) return '#f59e0b';
-      return '#4fd1ff';
+    const latencyValue = (item) => {
+      const parsed = Number(item && item.latency_ms);
+      if (!Number.isFinite(parsed) || parsed < 0) return null;
+      return parsed;
     };
 
-    const drawHistoryChart = () => {
-      if (!historyCanvas || !healthSeries.length) return;
+    const normalizedStatus = (item) => {
+      const status = String((item && item.status) || '').toLowerCase();
+      if (status === 'healthy') return 'healthy';
+      if (status === 'unhealthy' || status === 'failed' || status === 'error') return 'unhealthy';
+      return 'unknown';
+    };
+
+    const normalizedMethod = (item) => String((item && item.check_method) || '').toLowerCase();
+    const isSuccessfulPingSample = (item) => (
+      normalizedMethod(item) === 'ping'
+      && normalizedStatus(item) === 'healthy'
+      && latencyValue(item) !== null
+    );
+
+    const methodSummaryLabel = (methodRaw) => {
+      const method = String(methodRaw || '').toLowerCase();
+      if (!method) return 'Check method varies';
+      if (method === 'ping') return 'Ping check';
+      if (method.indexOf('ping+') === 0) {
+        const fallbackMethod = method.slice(5).toUpperCase() || 'FALLBACK';
+        return `Ping + ${fallbackMethod} fallback`;
+      }
+      if (method === 'http') return 'HTTP endpoint check';
+      if (method === 'tcp') return 'TCP socket check';
+      if (method === 'ssh') return 'SSH port check';
+      if (method === 'disabled') return 'Monitoring disabled';
+      return `${method.toUpperCase()} check`;
+    };
+
+    const formatNumber = (value, digits = 1) => {
+      if (value === null || value === undefined) return '';
+      const fixed = Number(value).toFixed(digits);
+      return fixed.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+    };
+
+    const renderChartSummary = (latestItem) => {
+      if (!chartSummary) return;
+      if (!latestItem) {
+        chartSummary.textContent = '';
+        return;
+      }
+      const statusText = normalizedStatus(latestItem).toUpperCase();
+      const latency = latencyValue(latestItem);
+      const parts = ['Live ping'];
+      if (latency !== null) parts.push(`latest ${formatNumber(latency)} ms`);
+      parts.push(`status ${statusText}`);
+      chartSummary.textContent = parts.join(' · ');
+    };
+
+    const setLegendItems = (items) => {
+      if (!chartLegend) return;
+      chartLegend.textContent = '';
+      items.forEach((item) => {
+        const span = document.createElement('span');
+        const dot = document.createElement('i');
+        dot.className = `health-dot ${item.dot}`;
+        span.appendChild(dot);
+        span.appendChild(document.createTextNode(` ${item.label}`));
+        chartLegend.appendChild(span);
+      });
+    };
+
+    const renderLegend = (latestMethod) => {
+      setLegendItems([
+        { dot: 'latency', label: 'Live ping latency (ms)' },
+        { dot: 'method', label: methodSummaryLabel(latestMethod) },
+      ]);
+    };
+
+    const drawAgeLabels = (ctx, width, height, pad, count) => {
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.9)';
+      ctx.font = '11px ui-sans-serif, system-ui, -apple-system, sans-serif';
+      if (count > 0) ctx.fillText('Older', pad.left, height - 8);
+      if (count > 0) {
+        const label = 'Latest';
+        const metrics = ctx.measureText(label);
+        ctx.fillText(label, width - pad.right - metrics.width, height - 8);
+      }
+    };
+
+    const clearCanvas = () => {
+      if (!historyCanvas) return;
+      const ctx = historyCanvas.getContext('2d');
+      if (!ctx) return;
+      const width = Math.max(320, historyCanvas.clientWidth || 0);
+      const height = 180;
+      const dpr = window.devicePixelRatio || 1;
+      historyCanvas.width = Math.floor(width * dpr);
+      historyCanvas.height = Math.floor(height * dpr);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, width, height);
+    };
+
+    const hideLiveGraph = () => {
+      if (chartWrap) chartWrap.classList.add('d-none');
+      if (historyEmpty) historyEmpty.classList.add('d-none');
+      if (chartLegend) chartLegend.textContent = '';
+      if (chartSummary) chartSummary.textContent = '';
+      clearCanvas();
+    };
+
+    const showLiveGraph = () => {
+      if (chartWrap) chartWrap.classList.remove('d-none');
+      if (historyEmpty) historyEmpty.classList.add('d-none');
+    };
+
+    const drawLivePingChart = () => {
+      if (!historyCanvas || !livePingSeries.length) {
+        hideLiveGraph();
+        return;
+      }
+
+      const values = livePingSeries
+        .map((item) => latencyValue(item))
+        .filter((value) => value !== null);
+      if (!values.length) {
+        hideLiveGraph();
+        return;
+      }
+
+      showLiveGraph();
+
       const dpr = window.devicePixelRatio || 1;
       const width = Math.max(320, historyCanvas.clientWidth || 0);
       const height = 180;
@@ -462,6 +925,7 @@
       historyCanvas.height = Math.floor(height * dpr);
       const ctx = historyCanvas.getContext('2d');
       if (!ctx) return;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, width, height);
 
@@ -469,16 +933,12 @@
       const chartWidth = width - pad.left - pad.right;
       const chartHeight = height - pad.top - pad.bottom;
       if (chartWidth <= 0 || chartHeight <= 0) return;
-
-      const values = healthSeries
-        .map((item) => Number(item && item.latency_ms))
-        .filter((value) => Number.isFinite(value) && value >= 0);
-      const maxLatency = values.length ? Math.max(...values, 1) : 1;
+      const maxLatency = Math.max(...values, 1);
       const yMax = Math.max(10, Math.ceil(maxLatency / 10) * 10);
-      const rows = [0, 0.5, 1];
+
       ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
       ctx.lineWidth = 1;
-      rows.forEach((row) => {
+      [0, 0.5, 1].forEach((row) => {
         const y = pad.top + row * chartHeight;
         ctx.beginPath();
         ctx.moveTo(pad.left, y);
@@ -486,31 +946,40 @@
         ctx.stroke();
       });
 
-      const points = healthSeries.map((item, index) => {
-        const x = healthSeries.length === 1
+      const points = livePingSeries.map((item, index) => {
+        const x = livePingSeries.length === 1
           ? pad.left + chartWidth / 2
-          : pad.left + (index / (healthSeries.length - 1)) * chartWidth;
-        const latencyValue = Number(item && item.latency_ms);
-        const clampedValue = Number.isFinite(latencyValue) && latencyValue >= 0 ? Math.min(latencyValue, yMax) : null;
-        const y = clampedValue === null
-          ? pad.top + chartHeight
-          : pad.top + (1 - (clampedValue / yMax)) * chartHeight;
-        return { x, y, item, hasLatency: clampedValue !== null };
+          : pad.left + (index / (livePingSeries.length - 1)) * chartWidth;
+        const latency = latencyValue(item);
+        if (latency === null) {
+          return { x, y: pad.top + chartHeight, item, hasLatency: false };
+        }
+        const clamped = Math.min(latency, yMax);
+        const y = pad.top + (1 - (clamped / yMax)) * chartHeight;
+        return { x, y, item, hasLatency: true };
       });
 
       ctx.strokeStyle = '#4fd1ff';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      points.forEach((point, index) => {
-        if (!point.hasLatency) return;
-        if (index === 0) ctx.moveTo(point.x, point.y);
-        else ctx.lineTo(point.x, point.y);
+      let segmentOpen = false;
+      points.forEach((point) => {
+        if (!point.hasLatency) {
+          segmentOpen = false;
+          return;
+        }
+        if (!segmentOpen) {
+          ctx.moveTo(point.x, point.y);
+          segmentOpen = true;
+        } else {
+          ctx.lineTo(point.x, point.y);
+        }
       });
       ctx.stroke();
 
       points.forEach((point) => {
         if (!point.hasLatency) return;
-        ctx.fillStyle = healthColor(point.item);
+        ctx.fillStyle = '#4fd1ff';
         ctx.beginPath();
         ctx.arc(point.x, point.y, 3.5, 0, Math.PI * 2);
         ctx.fill();
@@ -518,72 +987,109 @@
 
       ctx.fillStyle = 'rgba(148, 163, 184, 0.9)';
       ctx.font = '11px ui-sans-serif, system-ui, -apple-system, sans-serif';
-      ctx.fillText(String(yMax) + ' ms', pad.left, pad.top - 2);
-      if (healthSeries[0]) ctx.fillText('Older', pad.left, height - 8);
-      if (healthSeries[healthSeries.length - 1]) {
-        const label = 'Latest';
-        const metrics = ctx.measureText(label);
-        ctx.fillText(label, width - pad.right - metrics.width, height - 8);
-      }
+      ctx.fillText(`${yMax} ms`, pad.left, pad.top - 2);
+      drawAgeLabels(ctx, width, height, pad, points.length);
+      const latestItem = livePingSeries[livePingSeries.length - 1];
+      renderLegend(normalizedMethod(latestItem));
+      renderChartSummary(latestItem);
     };
 
-    if (historyEmpty) historyEmpty.classList.toggle('d-none', healthSeries.length > 0);
-    if (chartWrap) chartWrap.classList.toggle('d-none', healthSeries.length === 0);
-    drawHistoryChart();
-    window.addEventListener('resize', drawHistoryChart);
-
-    healthBtn.addEventListener('click', async () => {
-      const endpoint = healthBtn.getAttribute('data-health-check-url');
-      if (!endpoint) return;
-      const previousText = healthBtn.textContent;
-      healthBtn.disabled = true;
-      healthBtn.textContent = 'Running...';
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'X-CSRFToken': getCookie('csrftoken'),
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-        });
-        if (!response.ok) throw new Error('Health check failed');
-        const payload = await response.json();
-        const status = String(payload.status || 'unknown').toLowerCase();
-        const checkedAt = String(payload.checked_at || '');
-        if (statusOrb) statusOrb.setAttribute('data-status', status);
-        if (overviewStatusBadge) {
-          overviewStatusBadge.textContent = status.toUpperCase();
-          overviewStatusBadge.classList.remove('success', 'danger', 'info');
-          if (status === 'healthy') overviewStatusBadge.classList.add('success');
-          else if (status === 'unhealthy' || status === 'failed' || status === 'error') overviewStatusBadge.classList.add('danger');
-          else overviewStatusBadge.classList.add('info');
-        }
-        checkedLabels.forEach((label) => {
-          label.textContent = formatTime(checkedAt);
-        });
-        healthSeries.push({
-          status,
-          checked_at: checkedAt,
-          check_method: String(payload.check_method || ''),
-          latency_ms: payload.latency_ms,
-        });
-        if (healthSeries.length > 30) healthSeries = healthSeries.slice(healthSeries.length - 30);
-        if (historyEmpty) historyEmpty.classList.add('d-none');
-        if (chartWrap) chartWrap.classList.remove('d-none');
-        drawHistoryChart();
-      } catch (err) {
-        window.alert('Health check failed. Please try again.');
-      } finally {
-        healthBtn.disabled = false;
-        healthBtn.textContent = previousText;
+    const applyLiveSample = (item) => {
+      const status = normalizedStatus(item);
+      if (statusOrb) statusOrb.setAttribute('data-status', status);
+      if (overviewStatusBadge) {
+        overviewStatusBadge.textContent = status.toUpperCase();
+        overviewStatusBadge.classList.remove('success', 'danger', 'info');
+        if (status === 'healthy') overviewStatusBadge.classList.add('success');
+        else if (status === 'unhealthy') overviewStatusBadge.classList.add('danger');
+        else overviewStatusBadge.classList.add('info');
       }
+      checkedLabels.forEach((label) => {
+        label.textContent = formatTime(item.checked_at);
+      });
+
+      if (!isSuccessfulPingSample(item)) {
+        livePingSeries = [];
+        hideLiveGraph();
+        return;
+      }
+
+      livePingSeries.push(item);
+      if (livePingSeries.length > MAX_LIVE_POINTS) {
+        livePingSeries = livePingSeries.slice(livePingSeries.length - MAX_LIVE_POINTS);
+      }
+      drawLivePingChart();
+    };
+
+    const stopLivePingStream = () => {
+      if (!pingStream) return;
+      pingStream.close();
+      pingStream = null;
+    };
+
+    const startLivePingStream = () => {
+      if (!pingStreamUrl || !window.EventSource) {
+        hideLiveGraph();
+        return;
+      }
+      stopLivePingStream();
+      livePingSeries = [];
+      hideLiveGraph();
+      setHealthCheckBusy(true);
+      const stream = new EventSource(`${pingStreamUrl}?interval=5`);
+      pingStream = stream;
+
+      const handleEvent = (event) => {
+        let payload = {};
+        try {
+          payload = JSON.parse(event && event.data ? event.data : '{}') || {};
+        } catch (err) {
+          return;
+        }
+        const item = {
+          status: String(payload.status || 'unknown').toLowerCase(),
+          checked_at: String(payload.checked_at || ''),
+          check_method: 'ping',
+          latency_ms: payload.latency_ms,
+          packet_loss_pct: payload.packet_loss_pct,
+        };
+        applyLiveSample(item);
+      };
+
+      stream.onopen = () => {
+        if (pingStream !== stream) return;
+        setHealthCheckBusy(false);
+      };
+      stream.addEventListener('ping', handleEvent);
+      stream.onmessage = handleEvent;
+      stream.onerror = () => {
+        if (pingStream !== stream) return;
+        setHealthCheckBusy(false);
+      };
+    };
+
+    const setHealthCheckBusy = (isBusy) => {
+      healthBtn.disabled = Boolean(isBusy);
+      healthBtn.classList.toggle('is-loading', Boolean(isBusy));
+      const label = isBusy ? 'Connecting live ping…' : 'Restart live ping stream';
+      healthBtn.setAttribute('aria-label', label);
+      healthBtn.setAttribute('title', label);
+    };
+
+    hideLiveGraph();
+    startLivePingStream();
+    window.addEventListener('resize', () => {
+      if (livePingSeries.length) drawLivePingChart();
+    });
+    window.addEventListener('beforeunload', stopLivePingStream);
+
+    healthBtn.addEventListener('click', () => {
+      startLivePingStream();
     });
   })();
 </script>
 <script>
   (function () {
-    if (window.openDevtoolsTerminalPopup) return;
-
     const DEFAULT_WS_PATH = '/terminal/ws/';
     const DEFAULT_HINT = 'Ctrl/Cmd+C copy selection, Ctrl/Cmd+click open links, Ctrl+Shift+V paste, Ctrl+/- zoom';
     const DEFAULT_FEATURES = 'width=1100,height=760,resizable=yes,scrollbars=no';
@@ -597,11 +1103,12 @@
       return '&#39;';
     });
 
-    const buildPopupHtml = (resourceId, wsPath, hintText) => {
+    const buildPopupHtml = (resourceId, resourceUuid, wsPath, hintText) => {
       const safeResourceId = escapeHtml(resourceId);
       const safeHintText = escapeHtml(hintText);
       const wsPathLiteral = JSON.stringify(String(wsPath || DEFAULT_WS_PATH));
       const resourceIdLiteral = JSON.stringify(String(resourceId));
+      const resourceUuidLiteral = JSON.stringify(String(resourceUuid || ''));
       const fontPrefKeyLiteral = JSON.stringify(FONT_PREF_KEY);
 
       return `<!doctype html>
@@ -646,6 +1153,7 @@
       const copyStatusEl = document.getElementById('copy-status');
       const baseWsPath = ${wsPathLiteral};
       const resourceId = ${resourceIdLiteral};
+      const resourceUuid = ${resourceUuidLiteral};
       const fontPrefKey = ${fontPrefKeyLiteral};
       const clampFontSize = (value) => Math.max(11, Math.min(22, value));
 
@@ -696,10 +1204,34 @@
       term.open(termEl);
       fit.fit();
 
+      const queryParams = new URLSearchParams();
+      if (resourceId) queryParams.set('resource_id', resourceId);
+      if (resourceUuid) queryParams.set('resource_uuid', resourceUuid);
       const queryPrefix = baseWsPath.indexOf('?') === -1 ? '?' : '&';
-      const wsPath = baseWsPath + queryPrefix + 'resource_id=' + encodeURIComponent(resourceId);
-      const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(scheme + '://' + window.location.host + wsPath);
+      const wsPath = baseWsPath + queryPrefix + queryParams.toString();
+      const resolveWsOrigin = () => {
+        try {
+          if (window.opener && window.opener.location && window.opener.location.origin) {
+            return String(window.opener.location.origin).replace(/^http/i, 'ws');
+          }
+        } catch (err) {}
+        try {
+          if (document.referrer) {
+            return String(new URL(document.referrer).origin).replace(/^http/i, 'ws');
+          }
+        } catch (err) {}
+        const currentOrigin = String(window.location.origin || '');
+        if (currentOrigin && currentOrigin !== 'null') {
+          return currentOrigin.replace(/^http/i, 'ws');
+        }
+        return '';
+      };
+      const wsOrigin = resolveWsOrigin();
+      if (!wsOrigin) {
+        term.write('\r\n[terminal session failed: origin unavailable]\r\n');
+        return;
+      }
+      const ws = new WebSocket(wsOrigin + wsPath);
       ws.binaryType = 'arraybuffer';
 
       let statusTimer = null;
@@ -880,7 +1412,7 @@
 </html>`;
     };
 
-    window.openDevtoolsTerminalPopup = (resourceId, options = {}) => {
+    const openResourceTerminalPopup = (resourceId, options = {}) => {
       if (!resourceId) return false;
       const popupNamePrefix = String(options.popupNamePrefix || 'resource_ssh_');
       const popupFeatures = String(options.popupFeatures || DEFAULT_FEATURES);
@@ -891,11 +1423,306 @@
       if (!popup) return false;
 
       popup.document.open();
-      popup.document.write(buildPopupHtml(resourceId, wsPath, hintText));
+      popup.document.write(buildPopupHtml(resourceId, options.resourceUuid || '', wsPath, hintText));
       popup.document.close();
       popup.focus();
       return true;
     };
+
+    window.openResourceTerminalPopup = openResourceTerminalPopup;
+    window.openDevtoolsTerminalPopup = openResourceTerminalPopup;
+  })();
+</script>
+<script>
+  (function () {
+    const openButton = document.querySelector('[data-resource-edit-open]');
+    const modal = document.querySelector('[data-resource-edit-modal]');
+    const form = document.querySelector('[data-resource-edit-form]');
+    if (!openButton || !modal || !form) return;
+
+    const updateTypeVisibility = (targetForm) => {
+      if (!targetForm) return;
+      const typeSelect = targetForm.querySelector('select[name="resource_type"]');
+      if (!typeSelect) return;
+      const type = typeSelect.value;
+      targetForm.querySelectorAll('[data-resource-type-show]').forEach((section) => {
+        const showFor = (section.getAttribute('data-resource-type-show') || '')
+          .split(',')
+          .map((value) => value.trim())
+          .filter(Boolean);
+        section.classList.toggle('d-none', showFor.length > 0 && !showFor.includes(type));
+      });
+    };
+
+    const updateResourceScopeField = (targetForm) => {
+      if (!targetForm) return;
+      const scopeSelect = targetForm.querySelector('select[name="resource_scope"]');
+      const teamField = targetForm.querySelector('[data-resource-scope-team-field]');
+      const teamSelect = targetForm.querySelector('select[name="resource_team_names"]');
+      if (!scopeSelect || !teamField || !teamSelect) return;
+      const showTeam = scopeSelect.value === 'team';
+      teamField.classList.toggle('d-none', !showTeam);
+      if (!showTeam) {
+        Array.from(teamSelect.options).forEach((option) => { option.selected = false; });
+      }
+    };
+
+    const updateSshKeyStatus = (targetForm, keyName, keyPresent) => {
+      if (!targetForm) return;
+      const status = targetForm.querySelector('[data-ssh-key-status]');
+      if (!status) return;
+      if (keyName) {
+        status.textContent = `Key on file: ${keyName}`;
+      } else if (keyPresent) {
+        status.textContent = 'Key on file';
+      } else {
+        status.textContent = 'No key stored';
+      }
+    };
+
+    const scopeLevelFromStored = (credentialId, credentialScope) => {
+      if ((credentialId || '').startsWith('global:') || (credentialScope || '').includes('global')) {
+        return 'global';
+      }
+      if ((credentialScope || '') === 'team') {
+        return 'team';
+      }
+      return 'account';
+    };
+
+    const updateSshModeSections = (targetForm) => {
+      if (!targetForm) return;
+      const modeSelect = targetForm.querySelector('select[name="ssh_mode"]');
+      const credentialSelect = targetForm.querySelector('select[name="ssh_credential_id"]');
+      const mode = modeSelect ? modeSelect.value : 'inline';
+      targetForm.querySelectorAll('[data-ssh-mode-show]').forEach((section) => {
+        const showFor = (section.getAttribute('data-ssh-mode-show') || '')
+          .split(',')
+          .map((value) => value.trim())
+          .filter(Boolean);
+        section.classList.toggle('d-none', showFor.length > 0 && !showFor.includes(mode));
+      });
+      if (credentialSelect) {
+        credentialSelect.disabled = credentialSelect.options.length <= 1;
+      }
+    };
+
+    const resetSshPanel = (targetForm) => {
+      if (!targetForm) return;
+      const panel = targetForm.querySelector('[data-ssh-panel="keys"]');
+      const toggle = targetForm.querySelector('[data-ssh-toggle="keys"]');
+      if (panel) panel.classList.add('d-none');
+      if (toggle) {
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.textContent = 'Add SSH credentials';
+      }
+    };
+
+    const toggleSshPanel = (button) => {
+      const targetForm = button.closest('form');
+      if (!targetForm) return;
+      const panel = targetForm.querySelector('[data-ssh-panel="keys"]');
+      if (!panel) return;
+      const isOpen = !panel.classList.contains('d-none');
+      panel.classList.toggle('d-none', isOpen);
+      button.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+      button.textContent = isOpen ? 'Add SSH credentials' : 'Hide SSH credentials';
+    };
+
+    const getSshUsernameError = (input) => {
+      if (!input) return null;
+      const container = input.parentElement;
+      if (!container) return null;
+      let error = container.querySelector('[data-ssh-username-error]');
+      if (!error) {
+        error = document.createElement('div');
+        error.className = 'text-danger small';
+        error.setAttribute('data-ssh-username-error', 'true');
+        input.insertAdjacentElement('afterend', error);
+      }
+      return error;
+    };
+
+    const setSshUsernameInvalid = (input, message) => {
+      if (!input) return;
+      const error = getSshUsernameError(input);
+      if (error) {
+        error.textContent = message || '';
+      }
+    };
+
+    const clearSshUsernameInvalid = (input) => {
+      if (!input) return;
+      const error = getSshUsernameError(input);
+      if (error) {
+        error.textContent = '';
+      }
+    };
+
+    const openModal = () => {
+      modal.classList.add('is-active');
+      modal.setAttribute('aria-hidden', 'false');
+      document.body.classList.add('modal-open');
+    };
+
+    const closeModal = () => {
+      modal.classList.remove('is-active');
+      modal.setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('modal-open');
+    };
+
+    const prefillForm = () => {
+      const resourceId = openButton.getAttribute('data-resource-id');
+      form.action = `/resources/${resourceId}/edit/`;
+      form.querySelector('input[name="name"]').value = openButton.getAttribute('data-resource-name') || '';
+      form.querySelector('select[name="resource_type"]').value = openButton.getAttribute('data-resource-type') || 'api';
+      const targetInput = form.querySelector('input[name="target"]');
+      const addressInput = form.querySelector('input[name="address"]');
+      const portInput = form.querySelector('input[name="port"]');
+      const dbTypeSelect = form.querySelector('select[name="db_type"]');
+      const healthInput = form.querySelector('input[name="healthcheck_url"]');
+      if (targetInput) targetInput.value = openButton.getAttribute('data-resource-target') || '';
+      if (addressInput) addressInput.value = openButton.getAttribute('data-resource-address') || '';
+      if (portInput) portInput.value = openButton.getAttribute('data-resource-port') || '';
+      if (dbTypeSelect) dbTypeSelect.value = openButton.getAttribute('data-resource-db-type') || '';
+      if (healthInput) healthInput.value = openButton.getAttribute('data-resource-healthcheck-url') || '';
+      form.querySelector('textarea[name="notes"]').value = openButton.getAttribute('data-resource-notes') || '';
+
+      const typeValue = form.querySelector('select[name="resource_type"]')?.value;
+      const fallbackTarget = openButton.getAttribute('data-resource-target') || '';
+      if (typeValue === 'api' && healthInput && !healthInput.value && fallbackTarget) {
+        healthInput.value = fallbackTarget;
+      }
+      if (typeValue === 'vm' && addressInput && !addressInput.value && fallbackTarget) {
+        addressInput.value = fallbackTarget;
+      }
+      if (typeValue === 'database' && fallbackTarget && addressInput && !addressInput.value) {
+        if (fallbackTarget.includes(':')) {
+          const parts = fallbackTarget.split(':');
+          const maybePort = parts.pop();
+          addressInput.value = parts.join(':');
+          if (portInput && !portInput.value) {
+            portInput.value = maybePort || '';
+          }
+        } else {
+          addressInput.value = fallbackTarget;
+        }
+      }
+
+      const resourceScope = openButton.getAttribute('data-resource-scope') || 'account';
+      const resourceTeamNames = (openButton.getAttribute('data-resource-team-names') || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const sshKeyName = openButton.getAttribute('data-resource-ssh-key-name') || '';
+      const sshUsername = openButton.getAttribute('data-resource-ssh-username') || '';
+      const sshKeyPresent = openButton.getAttribute('data-resource-ssh-key-present') === '1';
+      const sshCredentialId = openButton.getAttribute('data-resource-ssh-credential-id') || '';
+      const sshCredentialScope = openButton.getAttribute('data-resource-ssh-credential-scope') || '';
+      const sshPort = openButton.getAttribute('data-resource-ssh-port') || '';
+      const sshKeyNameInput = form.querySelector('input[name="ssh_key_name"]');
+      const sshUsernameInput = form.querySelector('input[name="ssh_username"]');
+      const sshPortInput = form.querySelector('input[name="ssh_port"]');
+      const sshModeSelect = form.querySelector('select[name="ssh_mode"]');
+      const sshScopeSelect = form.querySelector('select[name="ssh_scope"]');
+      const sshTeamSelect = form.querySelector('select[name="ssh_team_names"]');
+      const sshCredentialSelect = form.querySelector('select[name="ssh_credential_id"]');
+      const sshKeyTextInput = form.querySelector('textarea[name="ssh_key_text"]');
+      const sshKeyFileInput = form.querySelector('input[name="ssh_key_file"]');
+      const clearKeyInput = form.querySelector('input[name="clear_ssh_key"]');
+      const resourceScopeSelect = form.querySelector('select[name="resource_scope"]');
+      const resourceTeamSelect = form.querySelector('select[name="resource_team_names"]');
+
+      if (resourceScopeSelect) resourceScopeSelect.value = resourceScope;
+      if (resourceTeamSelect) {
+        Array.from(resourceTeamSelect.options).forEach((option) => {
+          option.selected = resourceTeamNames.includes(option.value);
+        });
+      }
+      if (sshKeyNameInput) sshKeyNameInput.value = sshKeyName;
+      if (sshUsernameInput) sshUsernameInput.value = sshUsername;
+      if (sshPortInput) sshPortInput.value = sshPort || '22';
+      if (sshScopeSelect) sshScopeSelect.value = scopeLevelFromStored(sshCredentialId, sshCredentialScope);
+      if (sshTeamSelect) Array.from(sshTeamSelect.options).forEach((option) => { option.selected = false; });
+      if (sshModeSelect) sshModeSelect.value = sshCredentialId ? 'saved' : 'inline';
+      if (sshCredentialSelect) sshCredentialSelect.value = sshCredentialId;
+      if (sshKeyTextInput) sshKeyTextInput.value = '';
+      if (sshKeyFileInput) sshKeyFileInput.value = '';
+      if (clearKeyInput) clearKeyInput.checked = false;
+
+      updateTypeVisibility(form);
+      updateResourceScopeField(form);
+      updateSshModeSections(form);
+      updateSshKeyStatus(form, sshKeyName, sshKeyPresent);
+      resetSshPanel(form);
+      if (sshUsernameInput) clearSshUsernameInvalid(sshUsernameInput);
+    };
+
+    const typeSelect = form.querySelector('select[name="resource_type"]');
+    if (typeSelect) {
+      typeSelect.addEventListener('change', () => updateTypeVisibility(form));
+    }
+    const resourceScopeSelect = form.querySelector('select[name="resource_scope"]');
+    if (resourceScopeSelect) {
+      resourceScopeSelect.addEventListener('change', () => updateResourceScopeField(form));
+    }
+    const sshModeSelect = form.querySelector('select[name="ssh_mode"]');
+    if (sshModeSelect) {
+      sshModeSelect.addEventListener('change', () => updateSshModeSections(form));
+    }
+    const sshToggle = form.querySelector('[data-ssh-toggle="keys"]');
+    if (sshToggle) {
+      sshToggle.addEventListener('click', (event) => {
+        event.preventDefault();
+        toggleSshPanel(sshToggle);
+      });
+    }
+
+    const sshUsernameInput = form.querySelector('input[name="ssh_username"]');
+    const sshKeyTextInput = form.querySelector('textarea[name="ssh_key_text"]');
+    const sshKeyFileInput = form.querySelector('input[name="ssh_key_file"]');
+    if (sshUsernameInput && sshKeyTextInput) {
+      form.addEventListener('submit', (event) => {
+        const modeSelect = form.querySelector('select[name="ssh_mode"]');
+        const credentialSelect = form.querySelector('select[name="ssh_credential_id"]');
+        const mode = modeSelect ? modeSelect.value : 'inline';
+        const username = sshUsernameInput.value.trim();
+        const hasSavedKey = mode === 'saved' && credentialSelect && !!credentialSelect.value;
+        if (hasSavedKey && !username) {
+          event.preventDefault();
+          setSshUsernameInvalid(sshUsernameInput, 'SSH username is required when attaching a key.');
+          sshUsernameInput.focus();
+          return;
+        }
+        const keyText = sshKeyTextInput.value.trim();
+        const hasFile = sshKeyFileInput && sshKeyFileInput.files && sshKeyFileInput.files.length > 0;
+        if (mode !== 'inline' || (!keyText && !hasFile)) {
+          clearSshUsernameInvalid(sshUsernameInput);
+          return;
+        }
+        if (!username) {
+          event.preventDefault();
+          setSshUsernameInvalid(sshUsernameInput, 'SSH username is required when attaching a key.');
+          sshUsernameInput.focus();
+        }
+      });
+      sshUsernameInput.addEventListener('input', () => {
+        if (sshUsernameInput.value.trim()) clearSshUsernameInvalid(sshUsernameInput);
+      });
+    }
+
+    openButton.addEventListener('click', () => {
+      prefillForm();
+      openModal();
+    });
+    modal.querySelectorAll('[data-resource-edit-close]').forEach((button) => {
+      button.addEventListener('click', closeModal);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (!modal.classList.contains('is-active')) return;
+      closeModal();
+    });
   })();
 </script>
 <script>
@@ -934,7 +1761,7 @@
   (function () {
     const notesFeed = document.querySelector('[data-notes-feed]');
     if (!notesFeed) return;
-    notesFeed.scrollTop = notesFeed.scrollHeight;
+    notesFeed.scrollTop = 0;
   })();
 </script>
 <script>
@@ -996,16 +1823,29 @@
 <script>
   (function () {
     const sshButton = document.querySelector('[data-ssh-toggle]');
-    if (!sshButton || !window.openDevtoolsTerminalPopup) return;
+    if (!sshButton) return;
 
-    sshButton.addEventListener('click', (event) => {
+    sshButton.addEventListener('click', async (event) => {
       event.preventDefault();
       const resourceId = sshButton.getAttribute('data-resource-id');
-      const opened = window.openDevtoolsTerminalPopup(resourceId, {
-        popupNamePrefix: 'resource_ssh_',
-      });
+      const resourceUuid = sshButton.getAttribute('data-resource-uuid');
+      const launcher = window.openResourceTerminalPopup || window.openDevtoolsTerminalPopup;
+      if (!launcher) {
+        window.alert('Terminal launcher unavailable on this page.');
+        return;
+      }
+      let opened = false;
+      try {
+        opened = await Promise.resolve(launcher(resourceId, {
+          popupNamePrefix: 'resource_ssh_',
+          resourceUuid,
+          sessionQuery: resourceUuid ? { resource_uuid: resourceUuid } : {},
+        }));
+      } catch (err) {
+        opened = false;
+      }
       if (!opened) {
-        window.alert('Popup blocked. Please allow popups for this site and try again.');
+        window.alert('Failed to start terminal. Please allow popups for this site and try again.');
       }
     });
   })();

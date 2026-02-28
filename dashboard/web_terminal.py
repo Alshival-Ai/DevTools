@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
+import logging
 import os
 import pwd
 import pty
@@ -9,6 +11,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import termios
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.cookies import SimpleCookie
@@ -21,11 +24,28 @@ from django.contrib.auth import get_user_model
 from django.contrib.sessions.backends.db import SessionStore
 from django.utils.text import slugify
 
+from dashboard.models import ResourcePackageOwner, ResourceRouteAlias, ResourceTeamShare
 from dashboard.global_ssh_store import get_global_ssh_private_key
-from dashboard.resources_store import get_resource, _decrypt_key_text, get_ssh_credential_private_key
+from dashboard.request_auth import user_can_access_resource
+from dashboard.resources_store import (
+    _decrypt_key_text,
+    get_resource,
+    get_resource_by_uuid,
+    get_ssh_credential_private_key,
+)
 
 
 WS_PATH = "/terminal/ws/"
+logger = logging.getLogger(__name__)
+
+
+def _ensure_terminal_env(env: dict[str, str]) -> dict[str, str]:
+    resolved = dict(env or {})
+    if not str(resolved.get("TERM", "") or "").strip():
+        resolved["TERM"] = "xterm-256color"
+    if not str(resolved.get("COLORTERM", "") or "").strip():
+        resolved["COLORTERM"] = "truecolor"
+    return resolved
 
 
 class TerminalWebSocketApp:
@@ -46,6 +66,7 @@ class TerminalWebSocketApp:
         try:
             session = await _build_terminal_session(scope, user)
         except Exception as exc:
+            logger.exception("Failed to build terminal session")
             await send({"type": "websocket.send", "text": f"Terminal error: {exc}\r\n"})
             await send({"type": "websocket.close", "code": 1008})
             return
@@ -53,15 +74,39 @@ class TerminalWebSocketApp:
         try:
             await session.start()
         except Exception as exc:
-            await send(
-                {
-                    "type": "websocket.send",
-                    "text": f"Failed to start terminal session: {exc}\r\n",
-                }
-            )
-            await send({"type": "websocket.close", "code": 1011})
-            await session.stop()
-            return
+            logger.exception("Failed to start terminal session")
+            if isinstance(session, HostShellSession):
+                try:
+                    fallback = LocalShellSession(user)
+                    await fallback.start()
+                    session = fallback
+                    await send(
+                        {
+                            "type": "websocket.send",
+                            "text": "Host shell unavailable; started local shell mode instead.\r\n",
+                        }
+                    )
+                except Exception as fallback_exc:
+                    logger.exception("Failed to start fallback local shell session")
+                    await send(
+                        {
+                            "type": "websocket.send",
+                            "text": f"Failed to start terminal session: {fallback_exc}\r\n",
+                        }
+                    )
+                    await send({"type": "websocket.close", "code": 1011})
+                    await session.stop()
+                    return
+            else:
+                await send(
+                    {
+                        "type": "websocket.send",
+                        "text": f"Failed to start terminal session: {exc}\r\n",
+                    }
+                )
+                await send({"type": "websocket.close", "code": 1011})
+                await session.stop()
+                return
 
         read_task = asyncio.create_task(session.stream_to_websocket(send))
         try:
@@ -151,7 +196,7 @@ class PTYProcessSession:
             stderr=self.slave_fd,
             env=env,
             cwd=cwd,
-            start_new_session=True,
+            preexec_fn=self._build_preexec(self.slave_fd),
         )
         os.close(self.slave_fd)
         self.slave_fd = None
@@ -160,10 +205,21 @@ class PTYProcessSession:
         raise NotImplementedError
 
     def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env.setdefault("TERM", "xterm-256color")
-        env.setdefault("COLORTERM", "truecolor")
-        return env
+        return _ensure_terminal_env(os.environ.copy())
+
+    @staticmethod
+    def _build_preexec(slave_fd: int):
+        def _preexec() -> None:
+            try:
+                os.setsid()
+            except Exception:
+                pass
+            try:
+                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+            except Exception:
+                pass
+
+        return _preexec
 
     def _build_cwd(self) -> str | None:
         return None
@@ -300,6 +356,25 @@ class HostShellSession(PTYProcessSession):
     def _is_root() -> bool:
         return os.geteuid() == 0
 
+    @classmethod
+    def _can_switch_users(cls) -> bool:
+        if cls._is_root():
+            return True
+        sudo_bin = cls._sudo_bin()
+        if not sudo_bin:
+            return False
+        try:
+            probe = subprocess.run(
+                [sudo_bin, "-n", "true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=2,
+            )
+            return probe.returncode == 0
+        except Exception:
+            return False
+
     def _privileged_prefix(self) -> list[str]:
         sudo_bin = self._sudo_bin()
         if sudo_bin:
@@ -327,7 +402,15 @@ class HostShellSession(PTYProcessSession):
         if self._target_username:
             return self._target_username
         configured = str(os.getenv("WEB_TERMINAL_HOST_USERNAME", "") or "").strip().lower()
-        if configured:
+        reserved_usernames = {"root", "app"}
+        extra_reserved = str(os.getenv("WEB_TERMINAL_RESERVED_USERNAMES", "") or "").strip()
+        if extra_reserved:
+            for token in extra_reserved.split(","):
+                token_value = str(token or "").strip().lower()
+                if token_value:
+                    reserved_usernames.add(token_value)
+
+        if configured and configured not in reserved_usernames:
             self._target_username = configured
             return self._target_username
 
@@ -339,7 +422,10 @@ class HostShellSession(PTYProcessSession):
             normalized = f"user-{int(getattr(self.user, 'pk', 0) or 0)}"
         if normalized[0].isdigit():
             normalized = f"u-{normalized}"
-        self._target_username = normalized[:32]
+        candidate = normalized[:32]
+        if candidate in reserved_usernames:
+            candidate = f"u-{candidate}"
+        self._target_username = candidate[:32]
         return self._target_username
 
     def _ensure_target_account(self) -> None:
@@ -492,8 +578,33 @@ path.write_text("\\n".join(lines).rstrip() + "\\n", encoding="utf-8")
         if not os.path.exists(shell):
             raise RuntimeError(f"host shell not found at {shell}")
         shell_name = os.path.basename(shell)
-        if shell_name == "bash":
-            shell_args = [shell, "--login", "-i"]
+        auto_launch_codex = str(os.getenv("WEB_TERMINAL_AUTO_LAUNCH_CODEX", "1") or "").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        if auto_launch_codex:
+            codex_command = str(os.getenv("WEB_TERMINAL_CODEX_COMMAND", "codex -p pro") or "").strip() or "codex -p pro"
+            if shell_name == "bash":
+                fallback_shell = f"exec {shlex.quote(shell)} --noprofile --norc -i"
+            elif shell_name == "zsh":
+                fallback_shell = f"exec {shlex.quote(shell)} -l -i"
+            else:
+                fallback_shell = f"exec {shlex.quote(shell)} -i"
+            startup_script = (
+                "set +e; "
+                "cd \"$HOME\" >/dev/null 2>&1 || true; "
+                "export TERM=\"${TERM:-xterm-256color}\"; "
+                "export COLORTERM=\"${COLORTERM:-truecolor}\"; "
+                "trap '' INT; "
+                f"{codex_command}; "
+                "trap - INT; "
+                f"{fallback_shell}"
+            )
+            shell_args = [shell, "-lc", startup_script]
+        elif shell_name == "bash":
+            shell_args = [shell, "--noprofile", "--norc", "-i"]
         elif shell_name == "zsh":
             shell_args = [shell, "-l", "-i"]
         else:
@@ -501,7 +612,7 @@ path.write_text("\\n".join(lines).rstrip() + "\\n", encoding="utf-8")
         return self._run_as_user_command(username, shell_args)
 
     def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
+        env = _ensure_terminal_env(os.environ.copy())
         username, home_dir, _shell = self._resolve_os_identity()
         if username:
             env["USER"] = username
@@ -551,13 +662,23 @@ class LocalShellSession(PTYProcessSession):
                 fallback_shell = f"exec {shlex.quote(shell)} -l -i"
             else:
                 fallback_shell = f"exec {shlex.quote(shell)} -i"
-            return [shell, "-lc", f"{codex_command} || {fallback_shell}"]
+            # Keep wrapper shell alive on Ctrl+C so Codex can exit and we still land in a shell prompt.
+            startup_script = (
+                "set +e; "
+                "export TERM=\"${TERM:-xterm-256color}\"; "
+                "export COLORTERM=\"${COLORTERM:-truecolor}\"; "
+                "trap '' INT; "
+                f"{codex_command}; "
+                "trap - INT; "
+                f"{fallback_shell}"
+            )
+            return [shell, "-lc", startup_script]
         if shell.endswith("bash"):
             return [shell, "--noprofile", "--norc", "-i"]
         return [shell]
 
     def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
+        env = _ensure_terminal_env(os.environ.copy())
         local_username, local_home = self._resolve_local_identity()
         venv_dir = self._venv_dir(local_home)
         venv_bin = os.path.join(venv_dir, "bin")
@@ -830,6 +951,103 @@ def _agent_response(command: str, user) -> str:
     return f"You said: {raw}"
 
 
+def _owner_for_resource_uuid(resource_uuid: str):
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return None
+
+    package = (
+        ResourcePackageOwner.objects.select_related("owner_user")
+        .filter(resource_uuid=resolved_uuid)
+        .first()
+    )
+    if package is not None and package.owner_user_id:
+        return package.owner_user
+
+    alias = (
+        ResourceRouteAlias.objects.select_related("owner_user")
+        .filter(resource_uuid=resolved_uuid, owner_user_id__isnull=False)
+        .order_by("-is_current", "-updated_at", "-created_at")
+        .first()
+    )
+    if alias is not None and alias.owner_user_id:
+        return alias.owner_user
+
+    share = (
+        ResourceTeamShare.objects.select_related("owner")
+        .filter(resource_uuid=resolved_uuid, owner_id__isnull=False)
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+    if share is not None and share.owner_id and bool(getattr(share.owner, "is_active", False)):
+        return share.owner
+    return None
+
+
+def _resolve_owner_and_resource_for_uuid(*, actor, resource_uuid: str):
+    resolved_uuid = str(resource_uuid or "").strip()
+    if not resolved_uuid:
+        return None, None
+
+    candidate_users: list[object] = []
+    seen_user_ids: set[int] = set()
+
+    owner = _owner_for_resource_uuid(resolved_uuid)
+    if owner is not None and bool(getattr(owner, "is_active", False)):
+        owner_id = int(getattr(owner, "id", 0) or 0)
+        if owner_id > 0:
+            candidate_users.append(owner)
+            seen_user_ids.add(owner_id)
+
+    for row in (
+        ResourceRouteAlias.objects.select_related("owner_user")
+        .filter(resource_uuid=resolved_uuid, owner_user_id__isnull=False)
+        .order_by("-is_current", "-updated_at")
+    ):
+        owner_user = row.owner_user
+        if owner_user is None or not bool(owner_user.is_active):
+            continue
+        owner_user_id = int(owner_user.id)
+        if owner_user_id in seen_user_ids:
+            continue
+        candidate_users.append(owner_user)
+        seen_user_ids.add(owner_user_id)
+
+    for row in (
+        ResourceTeamShare.objects.select_related("owner")
+        .filter(resource_uuid=resolved_uuid, owner_id__isnull=False)
+        .order_by("-updated_at", "-created_at")
+    ):
+        owner_user = row.owner
+        if owner_user is None or not bool(owner_user.is_active):
+            continue
+        owner_user_id = int(owner_user.id)
+        if owner_user_id in seen_user_ids:
+            continue
+        candidate_users.append(owner_user)
+        seen_user_ids.add(owner_user_id)
+
+    if actor is not None and bool(getattr(actor, "is_active", False)):
+        actor_id = int(getattr(actor, "id", 0) or 0)
+        if actor_id > 0 and actor_id not in seen_user_ids:
+            candidate_users.append(actor)
+            seen_user_ids.add(actor_id)
+
+    User = get_user_model()
+    for user in User.objects.filter(is_active=True).order_by("id"):
+        user_id = int(user.id)
+        if user_id in seen_user_ids:
+            continue
+        candidate_users.append(user)
+        seen_user_ids.add(user_id)
+
+    for owner_user in candidate_users:
+        resource = get_resource_by_uuid(owner_user, resolved_uuid)
+        if resource is not None:
+            return owner_user, resource
+    return None, None
+
+
 async def _build_terminal_session(scope, user):
     query = scope.get("query_string") or b""
     query_params = parse_qs(query.decode("utf-8", errors="ignore"))
@@ -838,23 +1056,56 @@ async def _build_terminal_session(scope, user):
     if mode == "shell":
         if not bool(getattr(user, "is_superuser", False)):
             raise PermissionError("Local shell access is restricted to superusers.")
+        # Prefer host-account shells for superusers so sessions open in the
+        # provisioned per-user OS home (for example /home/<username>). Fall
+        # back to local shell mode when sudo/root user switching is unavailable.
+        if HostShellSession._can_switch_users():
+            return HostShellSession(user)
         return LocalShellSession(user)
 
     if mode == "agent":
         return AgentSession(user)
 
     resource_id = str((query_params.get("resource_id") or [""])[0] or "").strip()
-    if not resource_id:
-        raise ValueError("resource_id is required.")
-    ssh_config = await _user_resource_ssh_config(user, resource_id)
+    resource_uuid = str((query_params.get("resource_uuid") or [""])[0] or "").strip().lower()
+    if not resource_id and not resource_uuid:
+        raise ValueError("resource_id or resource_uuid is required.")
+    ssh_config = await _user_resource_ssh_config(
+        user,
+        resource_id=resource_id,
+        resource_uuid=resource_uuid,
+    )
     return SSHSession(ssh_config)
 
 
 @sync_to_async
-def _user_resource_ssh_config(user, resource_id: str) -> SSHConfig:
-    resource = get_resource(user, int(resource_id))
+def _user_resource_ssh_config(user, *, resource_id: str = "", resource_uuid: str = "") -> SSHConfig:
+    resolved_uuid = str(resource_uuid or "").strip().lower()
+    owner_user = None
+    resource = None
+
+    if resolved_uuid:
+        if not user_can_access_resource(user=user, resource_uuid=resolved_uuid):
+            raise PermissionError("Resource access denied.")
+        owner_user, resource = _resolve_owner_and_resource_for_uuid(
+            actor=user,
+            resource_uuid=resolved_uuid,
+        )
+    else:
+        try:
+            resolved_resource_id = int(resource_id)
+        except (TypeError, ValueError):
+            raise ValueError("resource_id must be an integer.")
+        resource = get_resource(user, resolved_resource_id)
+        if resource is not None:
+            resolved_uuid = str(getattr(resource, "resource_uuid", "") or "").strip().lower()
+            if resolved_uuid and not user_can_access_resource(user=user, resource_uuid=resolved_uuid):
+                raise PermissionError("Resource access denied.")
+            owner_user = _owner_for_resource_uuid(resolved_uuid) if resolved_uuid else None
+
     if not resource:
         raise PermissionError("Resource access denied.")
+    credential_owner = owner_user or user
     if resource.resource_type != "vm":
         raise ValueError("Resource is not a virtual machine.")
     if not resource.address:
@@ -875,7 +1126,7 @@ def _user_resource_ssh_config(user, resource_id: str) -> SSHConfig:
             local_raw = raw_credential_id
             if raw_credential_id.startswith("local:"):
                 local_raw = raw_credential_id.split(":", 1)[1]
-            credential_lookup = get_ssh_credential_private_key(user, local_raw)
+            credential_lookup = get_ssh_credential_private_key(credential_owner, local_raw)
         if credential_lookup:
             key_text = credential_lookup
     if not key_text:

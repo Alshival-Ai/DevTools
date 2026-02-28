@@ -5,12 +5,15 @@ services:
   nginx-https:
     image: nginx:1.27-alpine
     depends_on:
-      - web
+      web:
+        condition: service_healthy
+    environment:
+      CERTBOT_CERT_NAME: ${CERTBOT_CERT_NAME:-${CERTBOT_DOMAIN:-dev.alshival.dev}}
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./docker/nginx-https.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/nginx-https.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./docker/certbot/www:/var/www/certbot:ro
       - ./docker/certbot/conf:/etc/letsencrypt:ro
     restart: unless-stopped

@@ -1,0 +1,103 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Invite{% endblock title %}
+
+{% block content %}
+<div class="auth-shell">
+  <section class="auth-card auth-card-split">
+    <div class="auth-panel">
+      <div class="auth-brand">
+        <img class="auth-brand__img" src="{% static 'img/branding/alshival-logo-469x317.png' %}" alt="Alshival wordmark" />
+      </div>
+      <h1>Alshival Invite</h1>
+      <p>Use this invite to join your team workspace with the permissions your admin preconfigured.</p>
+      <div class="auth-panel-foot">Invite target: {{ invite_target|default:"-" }}</div>
+    </div>
+    <div class="auth-form-wrap">
+      {% if invite_state == "active" or invite_state == "method_not_allowed" %}
+      <div class="auth-header">
+        <div>
+          <h2>Choose how to sign in</h2>
+          <p>You can continue with any method enabled for this invite.</p>
+        </div>
+      </div>
+
+      {% if invite_state == "method_not_allowed" %}
+      <div class="form-error">The currently signed-in account does not match an allowed sign-in method for this invite. Sign out, then continue with one of the methods below.</div>
+      {% endif %}
+
+      {% if invite_local_allowed %}
+      <div class="auth-form">
+        <a class="primary-btn" href="{{ local_login_url }}">Continue with username/password</a>
+        <a class="ghost-btn" href="{{ local_signup_url }}">Create local account</a>
+      </div>
+      {% endif %}
+
+      {% if invite_method_options %}
+      <div class="auth-social-login" aria-label="Third-party sign in options">
+        <div class="auth-social-login__heading">
+          <span class="auth-social-login__rule" aria-hidden="true"></span>
+          <span class="auth-social-login__label">{% if invite_local_allowed %}Or continue with{% else %}Continue with{% endif %}</span>
+          <span class="auth-social-login__rule" aria-hidden="true"></span>
+        </div>
+        <div class="auth-social-login__providers">
+          {% for item in invite_method_options %}
+          <a class="auth-social-provider auth-social-provider--{{ item.key }}" href="{{ item.url }}">
+            {% if item.key == "microsoft" %}
+            <img src="{% static 'img/branding/connectors/microsoft.svg' %}" alt="" aria-hidden="true" />
+            {% elif item.key == "github" %}
+            <img src="{% static 'img/branding/connectors/github.svg' %}" alt="" aria-hidden="true" />
+            {% elif item.key == "asana" %}
+            <img src="{% static 'img/branding/connectors/asana.svg' %}" alt="" aria-hidden="true" />
+            {% endif %}
+            <span>{{ item.label }}</span>
+          </a>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+      {% if not invite_local_allowed and not invite_method_options %}
+      <div class="auth-header">
+        <div>
+          <p>No sign-in methods are currently available for this invite. Ask an admin to send a new invite.</p>
+        </div>
+      </div>
+      {% endif %}
+      {% elif invite_state == "claimed" %}
+      <div class="auth-header">
+        <div>
+          <h2>Invite already used</h2>
+          <p>This invite was already claimed.</p>
+        </div>
+      </div>
+      <a class="primary-btn" href="{% url 'account_login' %}">Sign in</a>
+      {% elif invite_state == "expired" %}
+      <div class="auth-header">
+        <div>
+          <h2>Invite expired</h2>
+          <p>This invite link has expired. Ask an admin for a new invite.</p>
+        </div>
+      </div>
+      <a class="primary-btn" href="{% url 'account_login' %}">Sign in</a>
+      {% elif invite_state == "mismatch" %}
+      <div class="auth-header">
+        <div>
+          <h2>Invite target mismatch</h2>
+          <p>The signed-in account does not match this invite target. Sign out and retry with the invited identity.</p>
+        </div>
+      </div>
+      <a class="primary-btn" href="{% url 'home' %}">Back to home</a>
+      {% else %}
+      <div class="auth-header">
+        <div>
+          <h2>Invite not found</h2>
+          <p>This invite link is invalid. Ask an admin for a new invite.</p>
+        </div>
+      </div>
+      <a class="primary-btn" href="{% url 'account_login' %}">Sign in</a>
+      {% endif %}
+    </div>
+  </section>
+</div>
+{% endblock content %}

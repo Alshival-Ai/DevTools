@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import shutil
 import sqlite3
 from datetime import datetime, timezone
@@ -12,8 +13,14 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 
-from .models import ResourcePackageOwner
-from .resources_store import _user_owner_dir, get_resource_knowledge_db_path, get_resource_owner_context, list_resource_notes
+from .models import ResourcePackageOwner, WikiPage
+from .resources_store import (
+    _user_owner_dir,
+    get_resource_knowledge_db_path,
+    get_resource_owner_context,
+    list_resource_agenda_tasks,
+    list_resource_notes,
+)
 
 
 def _ensure_runtime_cache_dirs() -> None:
@@ -70,6 +77,11 @@ def _safe_json_dumps(value: Any) -> str:
         return "{}"
 
 
+def _stable_json_hash(value: Any) -> str:
+    payload = _safe_json_dumps(value)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _owner_sqlite_db_path(owner_root: Path, owner_scope: str) -> Path:
     scope = str(owner_scope or "").strip().lower()
     if scope == "global":
@@ -104,10 +116,19 @@ def _ensure_owner_snapshot_schema(conn: sqlite3.Connection) -> None:
             resource_metadata TEXT NOT NULL DEFAULT '{}',
             document_json TEXT NOT NULL DEFAULT '{}',
             document_text TEXT NOT NULL DEFAULT '',
+            context_hash TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         )
         """
     )
+    columns = {
+        str(row["name"] or "").strip().lower()
+        for row in conn.execute("PRAGMA table_info(resource_health_snapshots)").fetchall()
+    }
+    if "context_hash" not in columns:
+        conn.execute(
+            "ALTER TABLE resource_health_snapshots ADD COLUMN context_hash TEXT NOT NULL DEFAULT ''"
+        )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_res_health_snap_updated
@@ -159,6 +180,7 @@ def _build_chroma_metadata(
     packet_loss_pct: float | None,
     ssh_configured: bool,
     document_json: str,
+    context_hash: str,
 ) -> dict[str, Any]:
     return {
         "resource_uuid": resource_uuid,
@@ -168,8 +190,6 @@ def _build_chroma_metadata(
         "owner_team_id": owner_team_id,
         "status": str(status or "").strip(),
         "check_method": str(check_method or "").strip(),
-        "latency_ms": float(latency_ms) if latency_ms is not None else -1.0,
-        "packet_loss_pct": float(packet_loss_pct) if packet_loss_pct is not None else -1.0,
         "checked_at": str(checked_at or "").strip(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "name": str(getattr(resource, "name", "") or "").strip(),
@@ -177,6 +197,7 @@ def _build_chroma_metadata(
         "target": str(getattr(resource, "target", "") or "").strip(),
         "ssh_configured": bool(ssh_configured),
         "resource_document_json": document_json,
+        "resource_context_hash": str(context_hash or "").strip(),
     }
 
 
@@ -197,6 +218,29 @@ def _build_document(resource, owner_context: dict[str, Any], check_payload: dict
                 "attachment_content_type": str(getattr(row, "attachment_content_type", "") or ""),
                 "attachment_size": int(getattr(row, "attachment_size", 0) or 0),
             }
+            )
+
+    agenda_tasks_rows = list_resource_agenda_tasks(owner_context.get("owner_user"), resource_uuid, limit=300)
+    agenda_tasks_payload: list[dict[str, Any]] = []
+    for row in agenda_tasks_rows:
+        if not isinstance(row, dict):
+            continue
+        agenda_tasks_payload.append(
+            {
+                "item_id": str(row.get("item_id") or "").strip(),
+                "source": str(row.get("source") or "").strip(),
+                "source_item_id": str(row.get("source_item_id") or "").strip(),
+                "title": str(row.get("title") or "").strip(),
+                "due_date": str(row.get("due_date") or "").strip(),
+                "due_time": str(row.get("due_time") or "").strip(),
+                "due_at": str(row.get("due_at") or "").strip(),
+                "item_meta": str(row.get("item_meta") or "").strip(),
+                "is_completed": bool(row.get("is_completed")),
+                "assigned_by_user_id": int(row.get("assigned_by_user_id") or 0),
+                "assigned_by_username": str(row.get("assigned_by_username") or "").strip(),
+                "assigned_at": str(row.get("assigned_at") or "").strip(),
+                "updated_at": str(row.get("updated_at") or "").strip(),
+            }
         )
 
     ssh_username = str(getattr(resource, "ssh_username", "") or "").strip()
@@ -205,6 +249,36 @@ def _build_document(resource, owner_context: dict[str, Any], check_payload: dict
     ssh_configured = bool(
         ssh_username and (bool(getattr(resource, "ssh_key_present", False)) or ssh_key_name or ssh_credential_id)
     )
+
+    wiki_pages_payload: list[dict[str, Any]] = []
+    if resource_uuid:
+        wiki_rows = list(
+            WikiPage.objects.filter(
+                scope=WikiPage.SCOPE_RESOURCE,
+                resource_uuid=resource_uuid,
+            )
+            .prefetch_related("team_access")
+            .order_by("-updated_at", "path")[:100]
+        )
+        for page in wiki_rows:
+            team_names = sorted(
+                [
+                    str(team.name or "").strip()
+                    for team in page.team_access.all()
+                    if str(team.name or "").strip()
+                ]
+            )
+            wiki_pages_payload.append(
+                {
+                    "id": int(getattr(page, "id", 0) or 0),
+                    "path": str(getattr(page, "path", "") or "").strip(),
+                    "title": str(getattr(page, "title", "") or "").strip(),
+                    "is_draft": bool(getattr(page, "is_draft", False)),
+                    "team_names": team_names,
+                    "updated_at": str(getattr(page, "updated_at", "") or ""),
+                    "body_markdown": str(getattr(page, "body_markdown", "") or ""),
+                }
+            )
 
     document: dict[str, Any] = {
         "resource": {
@@ -240,13 +314,13 @@ def _build_document(resource, owner_context: dict[str, Any], check_payload: dict
             "owner_team_id": int(owner_context.get("owner_team_id") or 0),
         },
         "notes_thread": notes_payload,
+        "assigned_agenda_tasks": agenda_tasks_payload,
+        "resource_wiki_pages": wiki_pages_payload,
         "latest_health": {
             "status": str(check_payload.get("status") or ""),
             "checked_at": str(check_payload.get("checked_at") or ""),
             "error": str(check_payload.get("error") or ""),
             "check_method": str(check_payload.get("check_method") or ""),
-            "latency_ms": check_payload.get("latency_ms"),
-            "packet_loss_pct": check_payload.get("packet_loss_pct"),
         },
     }
 
@@ -264,8 +338,73 @@ def _build_document(resource, owner_context: dict[str, Any], check_payload: dict
         note_body = str(note.get("body") or "").strip()
         if note_body:
             doc_text_parts.append(note_body)
+    for task in agenda_tasks_payload:
+        task_title = str(task.get("title") or "").strip()
+        task_meta = str(task.get("item_meta") or "").strip()
+        task_status = "completed" if bool(task.get("is_completed")) else "open"
+        task_due = " ".join(
+            [
+                str(task.get("due_date") or "").strip(),
+                str(task.get("due_time") or "").strip(),
+            ]
+        ).strip()
+        task_source = str(task.get("source") or "").strip()
+        summary = " | ".join(
+            part for part in [task_title, task_meta, task_source, task_status, task_due] if part
+        ).strip()
+        if summary:
+            doc_text_parts.append(summary)
+    for page in wiki_pages_payload[:30]:
+        page_title = str(page.get("title") or "").strip()
+        page_path = str(page.get("path") or "").strip()
+        page_body = str(page.get("body_markdown") or "").strip()
+        if page_title:
+            doc_text_parts.append(page_title)
+        if page_path:
+            doc_text_parts.append(page_path)
+        if page_body:
+            doc_text_parts.append(page_body[:2000])
     document_text = " | ".join(part for part in doc_text_parts if str(part).strip())
     return document, document_text, ssh_configured
+
+
+def _resource_context_hash_from_document(document: dict[str, Any]) -> str:
+    payload = dict(document or {})
+    resource_block = payload.get("resource")
+    if isinstance(resource_block, dict):
+        normalized_resource = dict(resource_block)
+        normalized_resource.pop("last_checked_at", None)
+        payload["resource"] = normalized_resource
+
+    latest_health = payload.get("latest_health")
+    if isinstance(latest_health, dict):
+        normalized_latest = dict(latest_health)
+        normalized_latest.pop("checked_at", None)
+        normalized_latest.pop("latency_ms", None)
+        normalized_latest.pop("packet_loss_pct", None)
+        payload["latest_health"] = normalized_latest
+
+    return _stable_json_hash(payload)
+
+
+def _current_snapshot_context_hash(*, owner_root: Path, owner_scope: str, resource_uuid: str) -> str:
+    db_path = _owner_sqlite_db_path(owner_root, owner_scope)
+    if not db_path.exists():
+        return ""
+    conn = _connect_sqlite(db_path)
+    try:
+        _ensure_owner_snapshot_schema(conn)
+        row = conn.execute(
+            "SELECT context_hash FROM resource_health_snapshots WHERE resource_uuid = ?",
+            (str(resource_uuid or "").strip(),),
+        ).fetchone()
+        if row is None:
+            return ""
+        return str(row["context_hash"] or "").strip()
+    except Exception:
+        return ""
+    finally:
+        conn.close()
 
 
 def _upsert_owner_snapshot(
@@ -284,6 +423,7 @@ def _upsert_owner_snapshot(
     packet_loss_pct: float | None,
     document_json: str,
     document_text: str,
+    context_hash: str,
     ssh_configured: bool,
 ) -> None:
     db_path = _owner_sqlite_db_path(owner_root, owner_scope)
@@ -297,8 +437,8 @@ def _upsert_owner_snapshot(
                 resource_uuid, collection_name, name, owner_scope, owner_user_id, owner_team_id,
                 status, checked_at, check_method, latency_ms, packet_loss_pct, error,
                 target, address, port, healthcheck_url, resource_type, ssh_configured,
-                resource_metadata, document_json, document_text, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                resource_metadata, document_json, document_text, context_hash, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(resource_uuid) DO UPDATE SET
                 collection_name=excluded.collection_name,
                 name=excluded.name,
@@ -320,6 +460,7 @@ def _upsert_owner_snapshot(
                 resource_metadata=excluded.resource_metadata,
                 document_json=excluded.document_json,
                 document_text=excluded.document_text,
+                context_hash=excluded.context_hash,
                 updated_at=excluded.updated_at
             """,
             (
@@ -344,6 +485,7 @@ def _upsert_owner_snapshot(
                 _safe_json_dumps(getattr(resource, "resource_metadata", {}) or {}),
                 document_json,
                 document_text,
+                str(context_hash or "").strip(),
                 now_iso,
             ),
         )
@@ -404,6 +546,13 @@ def upsert_resource_health_knowledge(
         },
     )
     document_json = _safe_json_dumps(document)
+    context_hash = _resource_context_hash_from_document(document)
+    existing_context_hash = _current_snapshot_context_hash(
+        owner_root=owner_root,
+        owner_scope=owner_scope,
+        resource_uuid=resource_uuid,
+    )
+    skip_chroma_upsert = bool(existing_context_hash and existing_context_hash == context_hash)
 
     metadata = _build_chroma_metadata(
         resource_uuid=resource_uuid,
@@ -418,28 +567,42 @@ def upsert_resource_health_knowledge(
         packet_loss_pct=packet_loss_pct,
         ssh_configured=ssh_configured,
         document_json=document_json,
+        context_hash=context_hash,
     )
-    if owner_scope == "team" and owner_team_id > 0:
-        team = Group.objects.filter(id=owner_team_id).first()
-        team_members = list(team.user_set.filter(is_active=True).order_by("id")) if team is not None else []
-        for member in team_members:
-            member_kb_path = _user_owner_dir(member) / "knowledge.db"
-            member_collection = _get_chroma_collection(member_kb_path)
-            if member_collection is None:
-                continue
-            member_collection.upsert(
+    if not skip_chroma_upsert:
+        # Always keep a resource-scoped KB copy under the resource package directory.
+        resource_dir = Path(owner_context.get("resource_dir") or owner_root / "resources" / resource_uuid)
+        resource_dir.mkdir(parents=True, exist_ok=True)
+        resource_kb_path = resource_dir / "knowledge.db"
+        resource_collection = _get_chroma_collection(resource_kb_path)
+        if resource_collection is not None:
+            resource_collection.upsert(
                 ids=[resource_uuid],
                 documents=[document_text or str(getattr(resource, "name", "") or resource_uuid)],
                 metadatas=[metadata],
             )
-    else:
-        collection = _get_chroma_collection(knowledge_db_path)
-        if collection is not None:
-            collection.upsert(
-                ids=[resource_uuid],
-                documents=[document_text or str(getattr(resource, "name", "") or resource_uuid)],
-                metadatas=[metadata],
-            )
+
+        if owner_scope == "team" and owner_team_id > 0:
+            team = Group.objects.filter(id=owner_team_id).first()
+            team_members = list(team.user_set.filter(is_active=True).order_by("id")) if team is not None else []
+            for member in team_members:
+                member_kb_path = _user_owner_dir(member) / "knowledge.db"
+                member_collection = _get_chroma_collection(member_kb_path)
+                if member_collection is None:
+                    continue
+                member_collection.upsert(
+                    ids=[resource_uuid],
+                    documents=[document_text or str(getattr(resource, "name", "") or resource_uuid)],
+                    metadatas=[metadata],
+                )
+        else:
+            collection = _get_chroma_collection(knowledge_db_path)
+            if collection is not None:
+                collection.upsert(
+                    ids=[resource_uuid],
+                    documents=[document_text or str(getattr(resource, "name", "") or resource_uuid)],
+                    metadatas=[metadata],
+                )
 
     _upsert_owner_snapshot(
         owner_root=owner_root,
@@ -456,6 +619,7 @@ def upsert_resource_health_knowledge(
         packet_loss_pct=packet_loss_pct,
         document_json=document_json,
         document_text=document_text,
+        context_hash=context_hash,
         ssh_configured=ssh_configured,
     )
 

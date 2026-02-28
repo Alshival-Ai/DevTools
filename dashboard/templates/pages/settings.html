@@ -1,4 +1,5 @@
 {% extends 'vertical.html' %}
+{% load static %}
 
 {% block title %}Settings{% endblock title %}
 
@@ -29,13 +30,13 @@
           <span>API Key Settings</span>
         </a>
         {% if request.user.is_superuser %}
+        <a class="team-folder-btn settings-folder-link{% if active_tab == 'connectors' %} is-active{% endif %}" href="{% url 'app_settings' %}?tab=connectors">
+          <span class="folder-icon" aria-hidden="true">🗃</span>
+          <span>Connector Settings</span>
+        </a>
         <a class="team-folder-btn settings-folder-link{% if active_tab == 'admin' %} is-active{% endif %}" href="{% url 'app_settings' %}?tab=admin">
           <span class="folder-icon" aria-hidden="true">🛠</span>
           <span>Alshival Admin</span>
-        </a>
-        <a class="team-folder-btn settings-folder-link" href="{% url 'connector_settings' %}">
-          <span class="folder-icon" aria-hidden="true">🗃</span>
-          <span>Connector Settings</span>
         </a>
         {% endif %}
       </div>
@@ -51,7 +52,14 @@
           <div class="settings-form-grid">
             <label class="settings-field">
               <span>Display name</span>
-              <input type="text" value="{{ request.user.get_full_name|default:request.user.username }}" disabled />
+              <input
+                type="text"
+                name="display_name"
+                value="{{ request.user.get_full_name }}"
+                placeholder="{{ request.user.username }}"
+                maxlength="150"
+                autocomplete="name"
+              />
             </label>
             <label class="settings-field">
               <span>Username</span>
@@ -59,7 +67,24 @@
             </label>
             <label class="settings-field settings-field-full">
               <span>Email</span>
-              <input type="email" value="{{ request.user.email }}" placeholder="Add an email for account recovery and notifications" disabled />
+              {% if account_email_locked_to_microsoft %}
+              <input
+                type="email"
+                value="{{ account_email }}"
+                placeholder="Microsoft email"
+                autocomplete="email"
+                disabled
+              />
+              <small class="field-help">Email is managed by your connected Microsoft account.</small>
+              {% else %}
+              <input
+                type="text"
+                name="email"
+                value="{{ account_email }}"
+                placeholder="Add an email for account recovery and notifications"
+                autocomplete="email"
+              />
+              {% endif %}
             </label>
             <label class="settings-field settings-field-full">
               <span>Notification phone number</span>
@@ -76,6 +101,46 @@
             <button class="primary-btn" type="submit">Save account settings</button>
           </div>
         </form>
+
+        <article class="settings-key-card settings-account-connectors">
+          <h4>My Connected Accounts</h4>
+          <p class="text-muted small">Link third-party identities so you can sign in with your connected providers.</p>
+          <div class="settings-connector-list">
+            {% for connector in account_connector_cards %}
+            <article class="settings-connector-item{% if not connector.configured and not connector.connected %} is-disabled{% endif %}">
+              <div>
+                <h4>{{ connector.title }}</h4>
+                <p>{{ connector.description }}</p>
+                <div class="settings-connector-meta">
+                  {% if connector.connected %}
+                  <span class="status success">Connected</span>
+                  {% if connector.identity %}
+                  <span class="settings-connector-identity">{{ connector.identity }}</span>
+                  {% endif %}
+                  {% elif connector.configured %}
+                  <span class="status info">Available</span>
+                  {% else %}
+                  <span class="status warning">Not configured</span>
+                  <span class="settings-connector-identity">Ask a workspace admin to configure this connector.</span>
+                  {% endif %}
+                </div>
+              </div>
+              <div class="settings-connector-actions">
+                {% if connector.connected %}
+                <form method="post" action="{{ connector.disconnect_url }}">
+                  {% csrf_token %}
+                  <button class="secondary-btn" type="submit">Disconnect</button>
+                </form>
+                {% elif connector.configured %}
+                <a class="secondary-btn" href="{{ connector.connect_url }}">Connect</a>
+                {% else %}
+                <button class="secondary-btn" type="button" disabled>Unavailable</button>
+                {% endif %}
+              </div>
+            </article>
+            {% endfor %}
+          </div>
+        </article>
       </section>
       {% endif %}
 
@@ -127,31 +192,211 @@
 
       {% if active_tab == 'connectors' %}
       <section class="table-wrap settings-panel">
-        <h3>My Connectors</h3>
-        <p>Connect identity and platform tools used by your team.</p>
-        <div class="settings-connector-list">
-          <article class="settings-connector-item">
-            <div>
-              <h4>Microsoft Entra</h4>
-              <p>Single sign-on and identity federation.</p>
-            </div>
-            <button class="secondary-btn" type="button">Configure</button>
-          </article>
-          <article class="settings-connector-item">
-            <div>
-              <h4>GitHub</h4>
-              <p>Repository and organization metadata.</p>
-            </div>
-            <button class="secondary-btn" type="button">Connect</button>
-          </article>
-          <article class="settings-connector-item">
-            <div>
-              <h4>OpenAI</h4>
-              <p>AI workflow enablement for platform operations.</p>
-            </div>
-            <button class="secondary-btn" type="button">Configure</button>
-          </article>
+        <h3>Connector Settings</h3>
+        <p>Manage platform connectors configured for this workspace.</p>
+
+        {% if connector_errors %}
+        <div class="form-error">
+          {% for error in connector_errors %}
+            <div>{{ error }}</div>
+          {% endfor %}
         </div>
+        {% endif %}
+
+        <form method="post" class="auth-form" data-connector-form-root data-active-connector="{{ connector_active_connector|default:'' }}" action="{% url 'app_settings' %}?tab=connectors" novalidate>
+          {% csrf_token %}
+          <input type="hidden" name="setup_connector" value="{{ connector_active_connector|default:'' }}" data-connector-active-field />
+
+          <div class="connector-grid" data-connector-home>
+            <button class="connector-btn connector-btn-openai" type="button" data-connector-open="openai" aria-label="OpenAI connector">
+              <img class="connector-btn__logo" src="{% static 'img/branding/connectors/openai.svg' %}" alt="OpenAI logo" />
+              <span class="connector-btn__label">OpenAi</span>
+            </button>
+
+            <button class="connector-btn connector-btn-microsoft" type="button" data-connector-open="microsoft" aria-label="Microsoft connector">
+              <img class="connector-btn__logo" src="{% static 'img/branding/connectors/microsoft.svg' %}" alt="Microsoft logo" />
+              <span class="connector-btn__label">Microsoft</span>
+            </button>
+
+            <button class="connector-btn connector-btn-github" type="button" data-connector-open="github" aria-label="GitHub connector">
+              <img class="connector-btn__logo" src="{% static 'img/branding/connectors/github.svg' %}" alt="GitHub logo" />
+              <span class="connector-btn__label">GitHub</span>
+            </button>
+
+            <button class="connector-btn connector-btn-asana" type="button" data-connector-open="asana" aria-label="Asana connector">
+              <img class="connector-btn__logo" src="{% static 'img/branding/connectors/asana.svg' %}" alt="Asana logo" />
+              <span class="connector-btn__label">Asana</span>
+            </button>
+
+            <button class="connector-btn connector-btn-twilio" type="button" data-connector-open="twilio" aria-label="Twilio connector">
+              <span class="connector-btn__logo connector-btn__logo-mark">T</span>
+              <span class="connector-btn__label">Twilio</span>
+            </button>
+          </div>
+
+          <div class="connector-config d-none" data-connector-panel>
+            <div class="connector-config__top">
+              <h4 class="connector-config__title" data-connector-title>Connector setup</h4>
+            </div>
+
+            <div class="connector-config__body d-none" data-connector-form="openai">
+              <label class="field">
+                <span>OpenAI API key</span>
+                <input type="password" name="openai_api_key" value="{{ connector_initial.openai_api_key }}" autocomplete="off" />
+              </label>
+              <div class="connector-panel-actions">
+                <button class="secondary-btn" type="submit" name="setup_action" value="save_openai">Save OpenAI connector</button>
+              </div>
+            </div>
+
+            <div class="connector-config__body d-none" data-connector-form="microsoft">
+              <div class="connector-help">
+                <p><strong>Redirect URI</strong> (Web):</p>
+                <code>{{ microsoft_redirect_uri }}</code>
+                <p><strong>Basic Microsoft Graph permissions:</strong></p>
+                <ul>
+                  <li><code>User.Read</code></li>
+                  <li><code>Calendars.Read</code></li>
+                  <li><code>Mail.Read</code></li>
+                  <li><code>Mail.Send</code></li>
+                </ul>
+                <p><strong>Email Agent requirement:</strong> grant Microsoft Graph <strong>application permissions</strong> for <code>Mail.Read</code> and <code>Mail.Send</code>, then grant admin consent, so Alshival can operate its own mailbox inbox.</p>
+              </div>
+              <div class="connector-support">
+                <p>Update your Entra app values and test with a Microsoft account.</p>
+                <p>When you click Microsoft sign-in, changes are saved first, then login starts.</p>
+              </div>
+              <label class="field">
+                <span>Microsoft Entra Tenant ID</span>
+                <input type="text" name="microsoft_tenant_id" value="{{ connector_initial.microsoft_tenant_id }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Microsoft Entra Client ID</span>
+                <input type="text" name="microsoft_client_id" value="{{ connector_initial.microsoft_client_id }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Microsoft Entra App Client Secret Value</span>
+                <input type="password" name="microsoft_client_secret" value="{{ connector_initial.microsoft_client_secret }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Email Agent Mailbox (optional)</span>
+                <input type="email" name="microsoft_mailbox_email" value="{{ connector_initial.microsoft_mailbox_email }}" placeholder="alshival@yourdomain.com" autocomplete="off" />
+              </label>
+              <div class="connector-panel-actions">
+                <button class="secondary-btn" type="submit" name="setup_action" value="save_microsoft">Save Microsoft connector</button>
+                <button class="ms-signin-btn d-none" type="submit" name="setup_action" value="test_microsoft" data-ms-test-btn>
+                  <img src="{% static 'img/branding/connectors/ms-symbollockup_signin_dark_short.svg' %}" alt="Sign in with Microsoft" />
+                </button>
+              </div>
+            </div>
+
+            <div class="connector-config__body d-none" data-connector-form="github">
+              <div class="connector-help">
+                <p><strong>Callback URL</strong> (GitHub OAuth App):</p>
+                <code>{{ github_redirect_uri }}</code>
+                <p><strong>Recommended OAuth scopes for sign-in:</strong></p>
+                <ul>
+                  <li><code>read:user</code></li>
+                  <li><code>user:email</code></li>
+                </ul>
+              </div>
+              <div class="connector-support">
+                <p>Update your GitHub OAuth App credentials and test sign-in.</p>
+              </div>
+              <label class="field">
+                <span>GitHub OAuth Client ID</span>
+                <input type="text" name="github_client_id" value="{{ connector_initial.github_client_id }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>GitHub OAuth Client Secret</span>
+                <input type="password" name="github_client_secret" value="{{ connector_initial.github_client_secret }}" autocomplete="off" />
+              </label>
+              <div class="connector-panel-actions">
+                <button class="secondary-btn" type="submit" name="setup_action" value="save_github">Save GitHub connector</button>
+                <button class="github-signin-btn d-none" type="submit" name="setup_action" value="test_github" data-gh-test-btn>
+                  <img src="{% static 'img/branding/connectors/github.svg' %}" alt="" aria-hidden="true" />
+                  <span>Sign in with GitHub</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="connector-config__body d-none" data-connector-form="asana">
+              <div class="connector-help">
+                <p><strong>Redirect URI</strong> (Asana OAuth app):</p>
+                <code>{{ asana_redirect_uri }}</code>
+                <p><strong>Required OAuth scope:</strong></p>
+                <ul>
+                  <li><code>default</code></li>
+                </ul>
+              </div>
+              <div class="connector-support">
+                <p>Update your Asana OAuth app credentials and test sign-in.</p>
+              </div>
+              <label class="field">
+                <span>Asana OAuth Client ID</span>
+                <input type="text" name="asana_client_id" value="{{ connector_initial.asana_client_id }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Asana OAuth Client Secret</span>
+                <input type="password" name="asana_client_secret" value="{{ connector_initial.asana_client_secret }}" autocomplete="off" />
+              </label>
+              <div class="connector-panel-actions">
+                <button class="secondary-btn" type="submit" name="setup_action" value="save_asana">Save Asana connector</button>
+                <button class="asana-signin-btn d-none" type="submit" name="setup_action" value="test_asana" data-asana-test-btn>
+                  <img src="{% static 'img/branding/connectors/asana.svg' %}" alt="" aria-hidden="true" />
+                  <span>Sign in with Asana</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="connector-config__body d-none" data-connector-form="twilio">
+              <div class="connector-help">
+                <p><strong>Twilio Phone Number &rarr; Configure</strong></p>
+                <p>Use <strong>Webhook</strong> and <strong>HTTP POST</strong> for each webhook field in Twilio.</p>
+                <p><strong>Voice Configuration</strong></p>
+                <p><strong>A call comes in</strong>:</p>
+                <code>{{ twilio_voice_webhook_uri }}</code>
+                <p><strong>Primary handler fails</strong> (optional fallback):</p>
+                <code>{{ twilio_voice_webhook_uri }}</code>
+                <p><strong>Call status changes</strong>:</p>
+                <code>{{ twilio_voice_webhook_uri }}</code>
+                <p><strong>Messaging Configuration</strong></p>
+                <p><strong>A2P 10DLC:</strong> Twilio requires US messaging registration for US local numbers.</p>
+                <p><strong>A message comes in</strong>:</p>
+                <code>{{ twilio_sms_webhook_uri }}</code>
+                <p><strong>Primary handler fails</strong> (optional fallback):</p>
+                <code>{{ twilio_sms_group_webhook_uri }}</code>
+                <p><strong>Voice Media Streams</strong> (websocket):</p>
+                <code>{{ twilio_voice_stream_public_uri }}</code>
+                <p><strong>Voice Media Streams (internal/staff)</strong> (websocket):</p>
+                <code>{{ twilio_voice_stream_internal_uri }}</code>
+                <p><strong>Web chat voice session token</strong>:</p>
+                <code>{{ web_voice_token_uri }}</code>
+                <p><strong>Web chat voice transcript log</strong>:</p>
+                <code>{{ web_voice_log_uri }}</code>
+              </div>
+              <label class="field">
+                <span>Twilio Account SID</span>
+                <input type="text" name="twilio_account_sid" value="{{ connector_initial.twilio_account_sid }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Twilio Auth Token</span>
+                <input type="password" name="twilio_auth_token" value="{{ connector_initial.twilio_auth_token }}" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Twilio From Number</span>
+                <input type="text" name="twilio_from_number" value="{{ connector_initial.twilio_from_number }}" placeholder="+15551234567" autocomplete="off" />
+              </label>
+              <div class="connector-panel-actions">
+                <button class="secondary-btn" type="submit" name="setup_action" value="save_twilio">Save Twilio connector</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="setup-actions">
+            <button class="secondary-btn d-none" type="button" data-connector-back>Back</button>
+          </div>
+        </form>
       </section>
       {% endif %}
 
@@ -164,6 +409,7 @@
         {% endif %}
         <form method="post" action="{% url 'app_settings' %}?tab=admin">
           {% csrf_token %}
+          <input type="hidden" name="admin_action" value="save" data-admin-action-field />
           <div class="settings-form-grid">
             <label class="settings-field settings-field-full">
               <span>Alshival default model</span>
@@ -183,6 +429,13 @@
                 Enable maintenance mode banner state
               </span>
               <small class="field-help">Use this to signal temporary platform maintenance operations.</small>
+            </label>
+            <label class="settings-field settings-field-full">
+              <span>
+                <input type="checkbox" name="support_inbox_monitoring_enabled" value="1" {% if support_inbox_monitoring_enabled %}checked{% endif %} {% if not admin_setup_ready %}disabled{% endif %} />
+                Enable support inbox monitoring worker
+              </span>
+              <small class="field-help">When disabled, the support inbox monitoring process will not poll or ingest emails.</small>
             </label>
             {% if microsoft_connector_configured %}
             <label class="settings-field settings-field-full">
@@ -216,6 +469,22 @@
           </div>
           <div class="table-actions">
             <button class="primary-btn" type="submit" {% if not admin_setup_ready %}disabled{% endif %}>Save admin settings</button>
+            <button
+              class="secondary-btn"
+              type="button"
+              data-restart-open
+            >
+              Restart Docker App
+            </button>
+          </div>
+          <div class="team-status team-status-warning d-none" data-restart-warning>
+            <p>
+              Restart will begin in <strong><span data-restart-countdown>8</span></strong> seconds.
+              It may take a few minutes for the application to come back online.
+            </p>
+            <div class="table-actions">
+              <button class="secondary-btn" type="button" data-restart-cancel>Cancel restart</button>
+            </div>
           </div>
         </form>
       </section>
@@ -235,3 +504,169 @@
   </section>
 </section>
 {% endblock page_content %}
+
+{% block page_js %}
+<script>
+  (function () {
+    const form = document.querySelector('[data-connector-form-root]');
+    if (!form) return;
+
+    const connectorHome = form.querySelector('[data-connector-home]');
+    const connectorPanel = form.querySelector('[data-connector-panel]');
+    const connectorTitle = form.querySelector('[data-connector-title]');
+    const backButton = form.querySelector('[data-connector-back]');
+    const activeConnectorField = form.querySelector('[data-connector-active-field]');
+    const initialConnector = String(form.getAttribute('data-active-connector') || '').trim().toLowerCase();
+    const connectorButtons = form.querySelectorAll('[data-connector-open]');
+    const connectorForms = form.querySelectorAll('[data-connector-form]');
+    const microsoftTenantInput = form.querySelector('input[name="microsoft_tenant_id"]');
+    const microsoftClientIdInput = form.querySelector('input[name="microsoft_client_id"]');
+    const microsoftClientSecretInput = form.querySelector('input[name="microsoft_client_secret"]');
+    const microsoftTestButton = form.querySelector('[data-ms-test-btn]');
+    const githubClientIdInput = form.querySelector('input[name="github_client_id"]');
+    const githubClientSecretInput = form.querySelector('input[name="github_client_secret"]');
+    const githubTestButton = form.querySelector('[data-gh-test-btn]');
+    const asanaClientIdInput = form.querySelector('input[name="asana_client_id"]');
+    const asanaClientSecretInput = form.querySelector('input[name="asana_client_secret"]');
+    const asanaTestButton = form.querySelector('[data-asana-test-btn]');
+
+    const connectorTitles = {
+      openai: 'OpenAI connector',
+      microsoft: 'Microsoft Entra connector',
+      github: 'GitHub connector',
+      asana: 'Asana connector',
+      twilio: 'Twilio connector'
+    };
+
+    const showConnectorPanel = (connectorKey) => {
+      connectorHome?.classList.add('d-none');
+      connectorPanel?.classList.remove('d-none');
+      if (activeConnectorField) activeConnectorField.value = connectorKey;
+      backButton?.classList.remove('d-none');
+      if (connectorTitle) {
+        connectorTitle.textContent = connectorTitles[connectorKey] || 'Connector setup';
+      }
+      connectorForms.forEach((panel) => {
+        const shouldShow = panel.getAttribute('data-connector-form') === connectorKey;
+        panel.classList.toggle('d-none', !shouldShow);
+      });
+      if (connectorKey === 'microsoft') updateMicrosoftTestButton();
+      if (connectorKey === 'github') updateGithubTestButton();
+      if (connectorKey === 'asana') updateAsanaTestButton();
+    };
+
+    const showConnectorHome = () => {
+      connectorHome?.classList.remove('d-none');
+      connectorPanel?.classList.add('d-none');
+      if (activeConnectorField) activeConnectorField.value = '';
+      backButton?.classList.add('d-none');
+      connectorForms.forEach((panel) => panel.classList.add('d-none'));
+    };
+
+    const updateMicrosoftTestButton = () => {
+      if (!microsoftTestButton) return;
+      const tenant = (microsoftTenantInput?.value || '').trim();
+      const clientId = (microsoftClientIdInput?.value || '').trim();
+      const clientSecret = (microsoftClientSecretInput?.value || '').trim();
+      microsoftTestButton.classList.toggle('d-none', !(tenant && clientId && clientSecret));
+    };
+
+    const updateGithubTestButton = () => {
+      if (!githubTestButton) return;
+      const clientId = (githubClientIdInput?.value || '').trim();
+      const clientSecret = (githubClientSecretInput?.value || '').trim();
+      githubTestButton.classList.toggle('d-none', !(clientId && clientSecret));
+    };
+
+    const updateAsanaTestButton = () => {
+      if (!asanaTestButton) return;
+      const clientId = (asanaClientIdInput?.value || '').trim();
+      const clientSecret = (asanaClientSecretInput?.value || '').trim();
+      asanaTestButton.classList.toggle('d-none', !(clientId && clientSecret));
+    };
+
+    backButton?.addEventListener('click', showConnectorHome);
+    connectorButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const connectorKey = button.getAttribute('data-connector-open');
+        if (connectorKey) {
+          showConnectorPanel(connectorKey);
+        }
+      });
+    });
+
+    [microsoftTenantInput, microsoftClientIdInput, microsoftClientSecretInput].forEach((input) => {
+      input?.addEventListener('input', updateMicrosoftTestButton);
+    });
+    [githubClientIdInput, githubClientSecretInput].forEach((input) => {
+      input?.addEventListener('input', updateGithubTestButton);
+    });
+    [asanaClientIdInput, asanaClientSecretInput].forEach((input) => {
+      input?.addEventListener('input', updateAsanaTestButton);
+    });
+
+    if (initialConnector && connectorTitles[initialConnector]) {
+      showConnectorPanel(initialConnector);
+    } else {
+      showConnectorHome();
+    }
+    updateMicrosoftTestButton();
+    updateGithubTestButton();
+    updateAsanaTestButton();
+  })();
+
+  (function () {
+    const form = document.querySelector('form[action$="?tab=admin"]');
+    if (!form) return;
+
+    const actionField = form.querySelector('[data-admin-action-field]');
+    const openBtn = form.querySelector('[data-restart-open]');
+    const cancelBtn = form.querySelector('[data-restart-cancel]');
+    const warningBox = form.querySelector('[data-restart-warning]');
+    const countdownNode = form.querySelector('[data-restart-countdown]');
+    if (!actionField || !openBtn || !cancelBtn || !warningBox || !countdownNode) return;
+
+    let secondsLeft = 8;
+    let timerId = null;
+
+    const stopTimer = function () {
+      if (timerId !== null) {
+        window.clearInterval(timerId);
+        timerId = null;
+      }
+    };
+
+    const resetUi = function () {
+      stopTimer();
+      secondsLeft = 8;
+      countdownNode.textContent = String(secondsLeft);
+      warningBox.classList.add('d-none');
+      openBtn.disabled = false;
+      actionField.value = 'save';
+    };
+
+    openBtn.addEventListener('click', function () {
+      if (timerId !== null) return;
+      actionField.value = 'save';
+      secondsLeft = 8;
+      countdownNode.textContent = String(secondsLeft);
+      warningBox.classList.remove('d-none');
+      openBtn.disabled = true;
+
+      timerId = window.setInterval(function () {
+        secondsLeft -= 1;
+        countdownNode.textContent = String(Math.max(secondsLeft, 0));
+        if (secondsLeft <= 0) {
+          stopTimer();
+          actionField.value = 'restart_docker';
+          form.submit();
+        }
+      }, 1000);
+    });
+
+    cancelBtn.addEventListener('click', function () {
+      resetUi();
+    });
+  })();
+</script>
+{% endblock page_js %}

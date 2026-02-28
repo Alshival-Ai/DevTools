@@ -45,25 +45,59 @@
     <section class="grid">
       <article class="card">
         <h3>API endpoints</h3>
-        <p>6 healthy, 2 degraded, 1 down.</p>
-        <div class="tag-row">
-          <span class="tag">Latency</span>
-          <span class="tag">Errors</span>
-          <span class="tag">Throughput</span>
-        </div>
+        {% if resource_insights.api_total %}
+          <p>
+            {{ resource_insights.api_healthy }} healthy,
+            {{ resource_insights.api_degraded }} degraded,
+            {{ resource_insights.api_down }} down right now.
+          </p>
+          <div class="tag-row">
+            <span class="tag">{{ resource_insights.api_total }} tracked</span>
+            <span class="tag">{{ resource_insights.api_with_healthcheck }} with health URLs</span>
+            {% if resource_insights.api_latency_avg_ms is not None %}
+              <span class="tag">{{ resource_insights.api_latency_avg_ms|floatformat:1 }} ms avg latency</span>
+            {% else %}
+              <span class="tag">No latency samples in {{ resource_insights.window_days }}d</span>
+            {% endif %}
+            {% if resource_insights.api_top_unstable_name %}
+              <span class="tag">
+                {{ resource_insights.api_top_unstable_name }}: {{ resource_insights.api_top_unstable_failures }} failed checks
+              </span>
+            {% endif %}
+          </div>
+        {% else %}
+          <p>No API endpoints are registered yet.</p>
+          <div class="tag-row">
+            <span class="tag">Add API resources to start monitoring</span>
+          </div>
+        {% endif %}
       </article>
       <article class="card card-wide">
         <h3>Service uptime</h3>
         <div class="metric">
-          <span class="metric-value">99.2%</span>
-          <span class="metric-label">Past 7 days</span>
+          <span class="metric-value">
+            {% if resource_insights.uptime_pct is not None %}
+              {{ resource_insights.uptime_pct|floatformat:1 }}%
+            {% else %}
+              —
+            {% endif %}
+          </span>
+          <span class="metric-label">
+            {% if resource_insights.uptime_checks_total %}
+              {{ resource_insights.uptime_checks_healthy }} / {{ resource_insights.uptime_checks_total }}
+              checks healthy in the last {{ resource_insights.window_days }} days
+            {% else %}
+              No health checks recorded in the last {{ resource_insights.window_days }} days
+            {% endif %}
+          </span>
         </div>
         <div class="progress">
-          <span style="width: 72%"></span>
+          <span style="width: {{ resource_insights.uptime_progress_pct }}%"></span>
         </div>
         <div class="hero-meta">
-          <span>14 endpoints</span>
-          <span>6 regions</span>
+          <span>{{ resource_insights.uptime_resources_covered }} resources sampled</span>
+          <span>{{ resource_insights.uptime_checks_unhealthy }} unhealthy checks</span>
+          <span>Latest check: {{ resource_insights.uptime_latest_check_display }}</span>
         </div>
       </article>
     </section>

@@ -140,7 +140,8 @@ Certbot (auto TLS):
 - Override defaults with environment variables:
   - `CERTBOT_DOMAIN=your.domain`
   - `CERTBOT_EMAIL=you@example.com`
-If you change `CERTBOT_DOMAIN`, also update the `ssl_certificate` paths in `docker/nginx-https.conf`.
+- Optional: `CERTBOT_CERT_NAME=your.domain-0001` when certbot issued a suffixed cert name.
+  - If not set, `./tools/prod.sh` auto-detects the latest matching cert name.
 
 This adds:
 - `nginx-https`: reverse proxy on `:443` forwarding to `web:8000` with a `:80` HTTP->HTTPS redirect

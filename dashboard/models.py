@@ -14,6 +14,9 @@ class SystemSetup(models.Model):
     maintenance_mode = models.BooleanField(default=False)
     maintenance_message = models.CharField(max_length=255, blank=True, default="")
     default_model = models.CharField(max_length=120, blank=True, default="gpt-4.1-mini")
+    microsoft_mailbox_email = models.CharField(max_length=255, blank=True, default="")
+    support_inbox_last_synced_at = models.DateTimeField(null=True, blank=True, default=None)
+    support_inbox_monitoring_enabled = models.BooleanField(default=False)
     microsoft_login_enabled = models.BooleanField(default=False)
     github_login_enabled = models.BooleanField(default=False)
     ask_github_mcp_enabled = models.BooleanField(default=False)
@@ -136,6 +139,59 @@ class UserNotificationSettings(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user_id}:{self.phone_number or 'no-phone'}"
+
+
+class UserInvite(models.Model):
+    CHANNEL_EMAIL = "email"
+    CHANNEL_SMS = "sms"
+    CHANNEL_CHOICES = [
+        (CHANNEL_EMAIL, "Email"),
+        (CHANNEL_SMS, "SMS"),
+    ]
+
+    token = models.CharField(max_length=96, unique=True)
+    invited_username = models.CharField(max_length=150, blank=True, default="")
+    invited_email = models.CharField(max_length=255, blank=True, default="")
+    invited_phone = models.CharField(max_length=32, blank=True, default="")
+    delivery_channel = models.CharField(max_length=16, choices=CHANNEL_CHOICES, default=CHANNEL_EMAIL)
+    sent_to = models.CharField(max_length=255, blank=True, default="")
+    allowed_signup_methods = models.JSONField(default=list, blank=True)
+    team_names = models.JSONField(default=list, blank=True)
+    feature_keys = models.JSONField(default=list, blank=True)
+    is_staff = models.BooleanField(default=False)
+    is_superuser = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="dashboard_user_invites_created",
+    )
+    accepted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="dashboard_user_invites_accepted",
+    )
+    expires_at = models.DateTimeField()
+    accepted_at = models.DateTimeField(null=True, blank=True, default=None)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["token"], name="dash_user_invite_token_idx"),
+            models.Index(fields=["invited_email", "expires_at"], name="dash_user_invite_email_exp_idx"),
+            models.Index(fields=["invited_phone", "expires_at"], name="dash_user_invite_phone_exp_idx"),
+            models.Index(fields=["accepted_at", "expires_at"], name="dash_user_invite_acc_exp_idx"),
+        ]
+
+    def __str__(self) -> str:
+        target = self.invited_email or self.invited_phone or self.invited_username or "invite"
+        return f"{target}:{self.token[:10]}"
 
 
 class ResourceTeamShare(models.Model):
@@ -289,8 +345,53 @@ class ResourceRouteAlias(models.Model):
         return f"{self.resource_uuid}:{self.route_kind}:{self.route_value}:{'current' if self.is_current else 'old'}"
 
 
+class SupportInboxMessage(models.Model):
+    mailbox = models.CharField(max_length=255, db_index=True)
+    message_id = models.CharField(max_length=255)
+    internet_message_id = models.CharField(max_length=512, blank=True, default="")
+    conversation_id = models.CharField(max_length=255, blank=True, default="")
+    sender_email = models.CharField(max_length=255, blank=True, default="")
+    sender_name = models.CharField(max_length=255, blank=True, default="")
+    subject = models.CharField(max_length=500, blank=True, default="")
+    received_at = models.DateTimeField(db_index=True)
+    body_preview = models.TextField(blank=True, default="")
+    body_text = models.TextField(blank=True, default="")
+    has_attachments = models.BooleanField(default=False)
+    web_link = models.TextField(blank=True, default="")
+    raw_payload = models.JSONField(blank=True, default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-received_at", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["mailbox", "message_id"],
+                name="dash_sup_inbox_mail_msg_ux",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["mailbox", "received_at"], name="dash_sup_inbox_mail_recv_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.mailbox}:{self.message_id}"
+
+
 class WikiPage(models.Model):
-    path = models.CharField(max_length=220, unique=True)
+    SCOPE_WORKSPACE = "workspace"
+    SCOPE_TEAM = "team"
+    SCOPE_RESOURCE = "resource"
+    SCOPE_CHOICES = [
+        (SCOPE_WORKSPACE, "Workspace"),
+        (SCOPE_TEAM, "Team"),
+        (SCOPE_RESOURCE, "Resource"),
+    ]
+
+    scope = models.CharField(max_length=16, choices=SCOPE_CHOICES, default=SCOPE_WORKSPACE)
+    resource_uuid = models.CharField(max_length=64, blank=True, default="")
+    resource_name = models.CharField(max_length=255, blank=True, default="")
+    path = models.CharField(max_length=220)
     title = models.CharField(max_length=220)
     is_draft = models.BooleanField(default=False)
     body_markdown = models.TextField(blank=True, default="")
@@ -318,12 +419,24 @@ class WikiPage(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["path", "-updated_at"]
+        ordering = ["scope", "resource_uuid", "path", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["scope", "resource_uuid", "path"],
+                name="dash_wiki_scope_res_path_ux",
+            ),
+        ]
         indexes = [
             models.Index(fields=["path"], name="dash_wiki_path_idx"),
+            models.Index(fields=["scope", "resource_uuid", "path"], name="dash_wiki_scope_res_path_idx"),
             models.Index(fields=["is_draft", "updated_at"], name="dash_wiki_draft_upd_idx"),
+            models.Index(fields=["scope", "updated_at"], name="dash_wiki_scope_upd_idx"),
             models.Index(fields=["updated_at"], name="dash_wiki_updated_idx"),
         ]
 
     def __str__(self) -> str:
+        if self.scope == self.SCOPE_RESOURCE and self.resource_uuid:
+            return f"{self.resource_uuid}:{self.path}"
+        if self.scope == self.SCOPE_TEAM and self.resource_uuid:
+            return f"team:{self.resource_uuid}:{self.path}"
         return self.path

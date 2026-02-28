@@ -1,5 +1,17 @@
 # Alshival App Technical Details
 
+## Rule #1: Agent-Processed Outbound Alerts
+- Every outbound alert delivery decision must be processed by an agent before sending.
+- Applies to all alert channels: app notifications, SMS, and email.
+- Channel toggles remain a hard gate; the agent only decides within enabled channels.
+- New alert paths must call the alert-filter agent gate before dispatch.
+
+## Rule #2: Outbound Alert/Reminder Context Logging
+- Every outbound alert/reminder attempt (send or failure) must be logged into the user's `member.db` context stream.
+- Context events are stored in `ask_chat_messages` as `message_kind='context_event'`.
+- Include channel, target, reminder/alert id, and outcome (sent/failed + error details when available).
+- This applies to app/SMS/email delivery paths and reminder lifecycle events (created/updated/deleted/dispatched).
+
 ## Stack Overview
 - Backend: Django (project `alshival`, app `dashboard`)
 - Auth: django-allauth (login at `/accounts/login/`)
@@ -43,6 +55,32 @@
 - Django: `python manage.py runserver`
 - React (dev): `cd frontend && npm install && npm run dev`
 - React (build): `cd frontend && npm run build`
+- Reminder worker: `python manage.py run_reminder_worker --interval-seconds 60`
+- Support inbox worker: `python manage.py run_support_inbox_worker --interval-seconds 60`
+
+## Routine Docker Build Cleanup (Safe)
+- Goal: reclaim Docker build/cache/image garbage without deleting app user data in `var/`.
+- Run from project root (`/home/data-team/Fefe`) and keep the stack running.
+- Recommended cadence: weekly, or any time `docker system df` shows large build cache.
+
+1. Check current usage:
+   - `docker system df`
+   - `du -sh var`
+2. Prune build cache (primary cleanup):
+   - `docker builder prune -af`
+3. Prune unused Docker objects that do not affect mounted app data:
+   - `docker container prune -f`
+   - `docker image prune -af`
+   - `docker network prune -f`
+4. Verify results:
+   - `docker system df`
+   - `du -sh var`
+   - `docker ps`
+
+### Data Safety Rules
+- Do not run `docker volume prune` on this host.
+- Do not run `docker system prune --volumes`.
+- App data is stored under bind-mounted `./var` and must be preserved.
 
 ## Key Routes
 - `/` Overview
@@ -122,6 +160,78 @@
 - `STATIC_ROOT` defaults to `var/staticfiles/` for `collectstatic`.
 
 ## Recent Implementation Details (2026-02)
+
+### Reminder System + Intra-Team Communication
+- Reminder storage is persisted per user in `member.db` (`reminders` table) through `dashboard/resources_store.py`.
+- Ask tools now include:
+  - `set_reminder`
+  - `edit_reminder`
+  - `delete_reminder`
+  - `list_reminders`
+- Recipient guardrails:
+  - Reminder recipients must be the actor or users in actor contact scope (shared team membership unless superuser).
+  - Invalid/out-of-scope recipients are rejected at tool level.
+- Worker:
+  - `dashboard/management/commands/run_reminder_worker.py`
+  - Service logic in `dashboard/reminder_service.py`
+  - Processes due reminders every minute (default), dispatching APP/SMS/EMAIL by channel flags.
+- Final reminder content generation:
+  - Uses an agent-generated final message per channel.
+  - SMS is short-form.
+  - Email can include richer dossier context (resource links + workspace wiki links) when available.
+- Email delivery for reminders:
+  - Uses support inbox app-send flow (`send_support_inbox_email`) when support inbox monitoring is enabled/configured.
+- Context logging:
+  - Reminder lifecycle and delivery events are written via `add_ask_chat_context_event(...)` to `member.db` chat context.
+
+### Alert Context Event Logging
+- Health/cloud-log/calendar alert dispatch paths now log context events in the recipient user's `member.db`.
+- Success and failure events are both logged with structured payloads so downstream chat agents can reference alert history.
+
+### Calendar Cache Service (Asana First, Provider-Extensible)
+- User calendar cache is persisted in each user's `member.db` (per-user SQLite):
+  - `calendar_event_cache`: normalized event/task rows by provider.
+  - `calendar_sync_state`: provider sync status, count, and last refresh epoch.
+  - Existing `asana_task_cache` remains as provider raw payload cache.
+- Dedicated orchestration module:
+  - `dashboard/calendar_sync_service.py::refresh_calendar_cache_for_user`
+  - `DEFAULT_CALENDAR_REFRESH_MIN_INTERVAL_SECONDS=60` throttle guard via `calendar_sync_state`.
+- Current Asana refresh/write path:
+  - `dashboard/views.py::_asana_overview_context_for_user(..., force_refresh=...)`
+  - `dashboard/views.py::_write_asana_calendar_cache`
+  - `dashboard/resources_store.py::replace_user_calendar_event_cache`
+- Current read/update helpers:
+  - `dashboard/resources_store.py::list_user_calendar_event_cache`
+  - `dashboard/resources_store.py::update_user_calendar_event_completion`
+- Service endpoints:
+  - `POST /calendar/cache/refresh/` (`provider=asana|all`)
+  - `POST /calendar/asana/tasks/<task_gid>/complete/`
+- Background refresh command:
+  - `python manage.py refresh_calendar_cache --provider asana`
+  - Optional: `--username <username>`
+- Overview calendar integration:
+  - Asana tasks with due dates are mapped into planner items and rendered in agenda/calendar.
+  - Checkbox completion in planner updates Asana and local calendar cache state.
+- MCP agent context tool:
+  - Tool name: `calendar_context`
+  - File: `mcp/app.py`
+  - Purpose: query unified per-user `calendar_event_cache` across providers (`asana`, future `outlook`, `gmail`, etc.).
+  - Behavior: performs a live cache refresh on call by default (`refresh=true`) for supported providers, throttled by service min interval, then reads unified cache.
+  - Supports filtering by provider/date/query/status and returns:
+    - provider/date summary counts
+    - concise `context_lines` for direct agent grounding
+    - full filtered rows for deeper reasoning
+
+### Outlook Integration Notes (Next)
+- Reuse `calendar_event_cache` with `provider='outlook'` (or `microsoft_outlook` if we want explicit namespace).
+- Add refresh adapter in `dashboard/calendar_sync_service.py` similar to Asana branch:
+  - evaluate throttle using `get_user_calendar_sync_state(user, provider='outlook')`
+  - fetch provider events
+  - normalize rows to shared schema:
+    - `event_id`, `title`, `due_date`, `due_time`, `is_completed`, `status`, `source_url`, `payload_json`
+  - write via `replace_user_calendar_event_cache(user, provider='outlook', ...)`
+- Extend MCP `calendar_context` `refreshable_providers` set to include `outlook`.
+- Keep provider payload details in `payload` for agent context (organizer, attendees, location, recurrence, etc.).
 
 ### Resource Details Page
 - The `Resource Details` view now provides:
@@ -210,3 +320,221 @@
   - Uses `bash --noprofile --norc -i` when bash is available.
 - Static local identity env overrides (`WEB_TERMINAL_LOCAL_USERNAME` + `WEB_TERMINAL_LOCAL_HOME`) are only used when:
   - `WEB_TERMINAL_FORCE_STATIC_IDENTITY=1` (or `true/yes/on`).
+
+### Wiki -> ChromaDB Synchronization
+- Workspace wiki and resource wiki are indexed differently in ChromaDB.
+
+#### Global Workspace Wiki (Per-Page Records)
+- A workspace page is indexed into global KB only when all are true:
+  - `scope=workspace`
+  - `resource_uuid=""` (not resource-scoped)
+  - `is_draft=false`
+  - no team access entries (public workspace page)
+- Global KB target path:
+  - `var/global_data/knowledge.db` collection `resources`
+- Record shape:
+  - `id = workspace_wiki:<wiki_page_id>`
+  - `document = "<title> | <path> | <body_markdown>"`
+  - metadata includes `source=workspace_wiki`, `wiki_page_id`, `title`, `path`, `owner_scope=global`, and timestamps.
+- Sync hooks (create/edit/delete):
+  - `dashboard/views.py::_sync_global_workspace_wiki_kb_page`
+  - Called from `wiki_create_page`, `wiki_update_page`, and `wiki_delete_page`.
+- Delete behavior:
+  - On workspace wiki delete, `workspace_wiki:<id>` is explicitly deleted from global Chroma before DB row removal.
+  - On edit, if a page is no longer globally indexable (draft/team-scoped/resource-scoped), its global Chroma record is removed.
+
+#### Resource Wiki (Per-Resource Records)
+- Resource wiki is not stored as one Chroma record per wiki page.
+- It is embedded inside the resource knowledge document (`resource_document_json.resource_wiki_pages`) and flattened into the resource `document` text.
+- Resource record id remains:
+  - `id = <resource_uuid>`
+- Sync hooks (create/edit/delete):
+  - `dashboard/views.py::_upsert_resource_kb_after_wiki_mutation`
+  - Called from resource wiki and resource-scoped wiki create/update/delete flows.
+- Delete behavior:
+  - Deleting a resource wiki page triggers a re-upsert of the resource record so removed page content is no longer in `document`/`resource_document_json`.
+  - The resource record itself is only removed when the resource is removed and cleanup prunes stale IDs.
+
+#### Search Deduping Behavior
+- Public published workspace wiki pages indexed into global Chroma are excluded from DB fallback wiki search to avoid duplicate results.
+- This exclusion exists in both:
+  - `dashboard/views.py::_tool_search_kb_for_actor`
+  - `mcp/app.py::_workspace_wiki_results_for_actor`
+
+### User Records in Global Chroma
+- Dedicated collection:
+  - Global path: `var/global_data/knowledge.db`
+  - Collection name: `user_records`
+- Record identity:
+  - `id = user:<user_id>`
+- Document content includes searchable user profile tokens:
+  - username, email, full name, normalized phone, status/role flags, team names, feature keys
+- Metadata includes:
+  - `user_id`, `username`, `email`, `phone_number`, `phone_digits`
+  - `is_active`, `is_staff`, `is_superuser`
+  - `team_names`, `feature_keys`, `updated_at`
+- Sync lifecycle (signal-based):
+  - User save/delete (`AUTH_USER_MODEL`)
+  - `UserNotificationSettings` save/delete (phone changes)
+  - `UserFeatureAccess` save/delete
+  - user/group membership changes (`m2m_changed` on user groups)
+- Backfill command:
+  - `python manage.py sync_user_records_kb`
+  - Reindexes all users into `user_records`
+- Agent tools:
+  - MCP server tool: `search_users(query?, phone?, limit?)` (superuser-only)
+  - Ask Alshival tool: `search_users(query?, phone?, limit?)` (superuser-only)
+
+### Topbar KB Search Suggestions (Type-Aware Routing)
+- A topbar suggestion API is exposed at:
+  - `GET /search/kb/` (`dashboard/urls.py`, `dashboard/views.py::search_kb_suggestions`)
+- Response shape:
+  - `{ ok, query, result_count, results[] }`
+  - each `results[]` item includes `kind`, `title`, `subtitle`, `snippet`, `url`.
+- Data source:
+  - suggestions are built from `_tool_search_kb_for_actor` results and normalized by `_build_topbar_kb_suggestions`.
+- Type routing behavior:
+  - Workspace wiki results (`source=workspace_wiki`) resolve to `/wiki/?page=<path>`.
+  - Resource wiki-shaped results resolve to canonical resource wiki routes via `dashboard/views.py::_resource_wiki_url_for_uuid`.
+  - Resource results resolve to canonical resource detail routes via `dashboard/views.py::_resource_detail_url_for_uuid`.
+  - Unknown/unroutable results are skipped from topbar suggestions.
+- Resource-context enrichment:
+  - When topbar receives `context_resource_uuid` (set on resource routes), search prepends resource-scoped KB + resource wiki matches from `_resource_context_kb_rows_for_actor`.
+  - This is wired by `data-resource-uuid` in `dashboard/templates/partials/topbar.html` and sent by `dashboard/static/js/topbar-search.js`.
+- Frontend wiring:
+  - Template hook: `dashboard/templates/partials/topbar.html` (`data-topbar-search*` attributes).
+  - Script: `dashboard/static/js/topbar-search.js` (debounced fetch, keyboard navigation, outside-click close, enter-to-open).
+  - Styles: `dashboard/static/css/app.css` (`.topbar-search-*` classes).
+  - Script inclusion: `dashboard/templates/base.html`.
+
+### Resource Detail Health Chart Mode Selection
+- Resource detail sends chart records (`status`, `checked_at`, `check_method`, `latency_ms`) from:
+  - `dashboard/views.py::resource_detail` (`health_history_chart` payload).
+- Client chart logic in `dashboard/templates/pages/resource_detail.html` dynamically chooses chart mode:
+  - Latency mode when latency values are available.
+  - Status timeline mode when latency is unavailable (for fallback-only check methods).
+- Legend/method behavior:
+  - Method summary is derived from `check_method` and labels `ping+<fallback>` checks explicitly.
+  - Fallback-assisted ping points are colorized separately to make fallback usage visible in the graph.
+
+### Resource Wiki Nav Highlighting Behavior
+- Sidebar active-state logic is intentionally split:
+  - `Resources` stays active for any route containing `/resources/`.
+  - `Wiki` is active only for `/wiki/` routes that are not resource-scoped.
+- Implementation location:
+  - `dashboard/templates/partials/sidenav.html`
+- This prevents the resource wiki pages from highlighting both nav items at the same time.
+
+### Sidebar Workspace Pulse Widget (Replaces Placeholder Focus Card)
+- The placeholder "Today's focus" card is replaced with a live "Workspace Pulse" widget in sidebar.
+- Data provider:
+  - `dashboard/context_processors.py::sidebar_workspace_widget`
+  - registered in template context processors via `alshival/settings.py`.
+- Exposed metrics:
+  - `resources_total`, `resources_healthy`, `resources_unhealthy`, `resources_unknown`, `resources_attention`, `unread_notifications`, `team_count`.
+- UI locations:
+  - Markup/actions: `dashboard/templates/partials/sidenav.html`
+  - Styling: `dashboard/static/css/app.css` (`.sidenav-widget-*` classes)
+
+### Asana Calendar/Agenda Upgrades (2026-02)
+- Goal:
+  - unify Asana planning signals in Calendar UI, support safer task recovery (uncheck recently completed), and map Asana work to resources for resource-scoped planning.
+
+#### Agenda Completed Task Window
+- Overview/Resource planner agenda sections now include:
+  - all open Asana tasks
+  - completed Asana tasks where `completed_at` is within a rolling 14-day window.
+- Window source of truth:
+  - backend constant: `dashboard/views.py::_ASANA_AGENDA_COMPLETED_WINDOW_DAYS = 14`
+  - exposed to templates as `asana_completed_window_days`
+  - consumed by front-end via `data-asana-completed-window-days`.
+- Completion state persistence:
+  - Asana API fetch now requests `completed_at` in task `opt_fields`.
+  - Toggle completion endpoint writes `completed_at` on complete and clears it on uncomplete.
+  - Cache freshness check now requires `completed_at` field presence in cached task rows.
+
+#### Asana Comments (Read + Reply from Calendar)
+- New endpoints:
+  - `GET /calendar/asana/tasks/<task_gid>/comments/`
+  - `POST /calendar/asana/tasks/<task_gid>/comments/add/`
+- View functions:
+  - `dashboard/views.py::list_asana_task_comments`
+  - `dashboard/views.py::add_asana_task_comment`
+- Behavior:
+  - comments are read from Asana task stories (`/tasks/<gid>/stories`) filtered to comment-type stories.
+  - replies post back to Asana stories API (`text` payload).
+  - token refresh retry path is reused for auth-expired errors.
+- UI:
+  - planner section rows expose `Comments` action.
+  - modal displays timeline and supports inline reply.
+
+#### Asana Resource Mapping Model
+- Per-user mapping tables in `member.db`:
+  - `asana_board_resource_map(board_gid, resource_uuid, created_at, updated_at)`
+  - `asana_task_resource_map(task_gid, resource_uuid, created_at, updated_at)`
+- Store helpers (`dashboard/resources_store.py`):
+  - `list_user_asana_board_resource_mappings`
+  - `list_user_asana_task_resource_mappings`
+  - `set_user_asana_board_resource_mapping`
+  - `set_user_asana_task_resource_mapping`
+- Mapping semantics:
+  - board-level mappings apply to all tasks in that board.
+  - task-level mappings are additive (additional resources per task).
+  - final task resource set = task-level mappings UNION board-level mappings across task memberships.
+
+#### Asana Mapping Endpoints
+- New endpoints:
+  - `POST /calendar/asana/boards/<board_gid>/resources/update/`
+  - `POST /calendar/asana/tasks/<task_gid>/resources/update/`
+- View functions:
+  - `dashboard/views.py::update_asana_board_resource_mapping`
+  - `dashboard/views.py::update_asana_task_resource_mapping`
+- Authorization/scope:
+  - requested `resource_uuids` are filtered against resources accessible to current user via `_asana_resource_options_for_user` (built from `_wiki_resource_options_for_user`).
+
+#### Planner UI Action Framework
+- Core planner now supports section-row actions:
+  - action data shape on section items: `actions: [{id, label}]`.
+  - callbacks:
+    - `onAgendaSectionAction(item, actionId, section)`
+    - `onActionError(item, actionId, error)`
+- Implementation:
+  - `dashboard/static/js/planner-ui.js`
+  - action buttons rendered per section row and dispatched through delegated click handling.
+
+#### Overview Calendar Wiring
+- Template wiring:
+  - `dashboard/templates/pages/home.html`
+  - adds Asana URL templates and mapping/task JSON blobs.
+- Script:
+  - `dashboard/static/js/home-overview.js`
+- Behavior:
+  - agenda section buckets by Asana board (`Asana - <Board Name>`).
+  - section rows include actions: `Comments`, `Resources`.
+  - Asana completion toggle remains two-way and updates local planner state.
+  - connector failure path retains popup guidance to update directly in Asana board/task.
+
+#### Resource Detail Planner Wiring
+- Template wiring:
+  - `dashboard/templates/pages/resource_detail.html`
+  - planner root now includes Asana URL templates + resource uuid + completed window data attrs.
+  - ships resource-specific JSON payloads for tasks/mappings/options.
+- Script:
+  - `dashboard/static/js/resource-planner.js` (new)
+- Behavior:
+  - resource planner shows only Asana tasks mapped to current resource uuid.
+  - board/task mapping edits refresh visible resource planner tasks immediately (no page reload required).
+  - comments/reply and completion toggles are supported in resource planner agenda.
+
+#### Files Touched for This Upgrade
+- Backend:
+  - `dashboard/views.py`
+  - `dashboard/resources_store.py`
+  - `dashboard/urls.py`
+- Frontend:
+  - `dashboard/static/js/planner-ui.js`
+  - `dashboard/static/js/home-overview.js`
+  - `dashboard/static/js/resource-planner.js`
+  - `dashboard/static/css/app.css`
+  - `dashboard/templates/pages/home.html`
+  - `dashboard/templates/pages/resource_detail.html`

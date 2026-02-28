@@ -114,6 +114,29 @@ def _owner_for_resource(resource_uuid: str):
     return None
 
 
+def _resolve_user_by_member_api_key(*, api_key: str, resource_uuid: str = "") -> tuple[object | None, str]:
+    resolved_key = _clean(api_key)
+    resolved_uuid = _clean(resource_uuid)
+    if not resolved_key:
+        return None, ""
+
+    User = get_user_model()
+    matched_user = None
+    matched_scope = ""
+    for candidate in User.objects.filter(is_active=True).order_by("id"):
+        scope = resolve_api_key_scope(candidate, resolved_key, resolved_uuid)
+        if scope not in {"account", "resource"}:
+            continue
+        if matched_user is not None and int(getattr(matched_user, "id", 0) or 0) != int(getattr(candidate, "id", 0) or 0):
+            # Ambiguous key match should not happen; fail closed.
+            return None, ""
+        matched_user = candidate
+        matched_scope = scope
+        if scope == "account":
+            break
+    return matched_user, matched_scope
+
+
 def user_can_access_resource(*, user, resource_uuid: str) -> bool:
     resolved_uuid = _clean(resource_uuid)
     if user is None or not resolved_uuid:
@@ -128,22 +151,40 @@ def user_can_access_resource(*, user, resource_uuid: str) -> bool:
         .filter(resource_uuid=resolved_uuid)
         .first()
     )
+    actor_team_ids = list(user.groups.values_list("id", flat=True))
+
     if package is None:
-        return False
+        if not actor_team_ids:
+            return False
+        return ResourceTeamShare.objects.filter(
+            resource_uuid=resolved_uuid,
+            team_id__in=actor_team_ids,
+        ).exists()
 
     scope = _clean(getattr(package, "owner_scope", "")).lower()
     if scope == ResourcePackageOwner.OWNER_SCOPE_GLOBAL:
         return False
 
     if scope == ResourcePackageOwner.OWNER_SCOPE_TEAM and package.owner_team_id:
-        return user.groups.filter(id=package.owner_team_id).exists()
+        if user.groups.filter(id=package.owner_team_id).exists():
+            return True
+        if not actor_team_ids:
+            return False
+        return ResourceTeamShare.objects.filter(
+            resource_uuid=resolved_uuid,
+            team_id__in=actor_team_ids,
+        ).exists()
 
     owner = getattr(package, "owner_user", None)
     if owner is None:
-        return False
+        if not actor_team_ids:
+            return False
+        return ResourceTeamShare.objects.filter(
+            resource_uuid=resolved_uuid,
+            team_id__in=actor_team_ids,
+        ).exists()
     if int(getattr(owner, "id", 0) or 0) == int(getattr(user, "id", 0) or 0):
         return True
-    actor_team_ids = list(user.groups.values_list("id", flat=True))
     if not actor_team_ids:
         return False
     return ResourceTeamShare.objects.filter(
@@ -181,6 +222,17 @@ def authenticate_api_key(
             if not user_can_access_resource(user=identity_user, resource_uuid=resolved_uuid):
                 return APIKeyAuthResult(False, "resource_access_denied", "", identity_user, identity_type, identity_value)
         return APIKeyAuthResult(True, "", "global", identity_user, identity_type, identity_value)
+
+    if identity_user is None:
+        inferred_user, inferred_scope = _resolve_user_by_member_api_key(
+            api_key=resolved_key,
+            resource_uuid=resolved_uuid,
+        )
+        if inferred_user is not None and inferred_scope in {"account", "resource"}:
+            if require_resource_access and resolved_uuid:
+                if not user_can_access_resource(user=inferred_user, resource_uuid=resolved_uuid):
+                    return APIKeyAuthResult(False, "resource_access_denied", "", inferred_user, "api_key", "")
+            return APIKeyAuthResult(True, "", inferred_scope, inferred_user, "api_key", "")
 
     if identity_user is not None:
         user_scope = resolve_api_key_scope(identity_user, resolved_key, resolved_uuid)

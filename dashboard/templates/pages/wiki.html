@@ -4,107 +4,137 @@
 {% block title %}Wiki{% endblock title %}
 
 {% block page_content %}
-<section class="resources-layout wiki-layout">
-  <aside class="team-folder-panel card">
-    <div class="team-folder-title">Wiki Folders</div>
-    <div class="team-folder-subtitle">Browse by visibility</div>
-    <div class="team-folder-tree">
-      <button class="team-folder-btn is-active" type="button" data-wiki-folder="all" data-wiki-folder-label="All Pages">
-        <span class="folder-icon" aria-hidden="true">📁</span>
-        <span>All Pages</span>
-      </button>
-      <button class="team-folder-btn" type="button" data-wiki-folder="public" data-wiki-folder-label="Published Public">
-        <span class="folder-icon" aria-hidden="true">📄</span>
-        <span>Published Public</span>
-      </button>
-      <button class="team-folder-btn" type="button" data-wiki-folder="drafts" data-wiki-folder-label="My Drafts">
-        <span class="folder-icon" aria-hidden="true">📝</span>
-        <span>My Drafts</span>
-      </button>
-      <div class="team-folder-group">
-        <div class="team-folder-group-label">Teams</div>
-        {% if member_teams %}
-          {% for team_name in member_teams %}
-          <button
-            class="team-folder-btn"
-            type="button"
-            data-wiki-folder="{{ team_name|lower|slugify }}"
-            data-wiki-folder-label="{{ team_name }}">
-            <span class="folder-icon" aria-hidden="true">🗂</span>
-            <span>{{ team_name }}</span>
-          </button>
-          {% endfor %}
-        {% else %}
-        <div class="text-muted small">No team memberships yet.</div>
-        {% endif %}
+<section class="resources-layout wiki-layout" data-wiki-layout>
+  <aside class="team-folder-panel card wiki-sidebar">
+    <div class="wiki-sidebar-head">
+      <div class="wiki-sidebar-head-copy">
+        <div class="team-folder-title">Wiki Scope</div>
+        <div class="team-folder-subtitle">
+          {% if wiki_scope_locked %}
+          This view is pinned to the current resource wiki
+          {% else %}
+          Switch between workspace, team, and resource documentation
+          {% endif %}
+        </div>
       </div>
+      <button
+        class="icon-btn icon-btn-small wiki-sidebar-toggle"
+        type="button"
+        aria-label="Collapse wiki scope panel"
+        aria-expanded="true"
+        title="Collapse panel"
+        data-wiki-sidebar-toggle>
+        <span aria-hidden="true">&#8249;</span>
+      </button>
     </div>
+
+    <form method="get" class="wiki-scope-form" data-wiki-scope-form>
+      {% if wiki_scope_locked %}
+      <input type="hidden" name="scope" value="resource" />
+      <input type="hidden" name="resource_uuid" value="{{ wiki_resource_uuid }}" />
+      <div class="wiki-scope-lock">
+        <span class="status info">Resource Wiki</span>
+        <strong>{{ wiki_resource_name|default:wiki_resource_uuid }}</strong>
+      </div>
+      {% else %}
+      <label class="settings-field">
+        <span>Scope</span>
+        <select name="scope" data-wiki-scope-select>
+          <option value="workspace"{% if wiki_scope == 'workspace' %} selected{% endif %}>Workspace Wiki</option>
+          <option value="team"{% if wiki_scope == 'team' %} selected{% endif %}>Team Wiki</option>
+          <option value="resource"{% if wiki_scope == 'resource' %} selected{% endif %}>Resource Wiki</option>
+        </select>
+      </label>
+
+      <label class="settings-field wiki-scope-team-field{% if not wiki_is_team_scope %} d-none{% endif %}" data-wiki-scope-team-field>
+        <span>Team</span>
+        <select name="team_id" data-wiki-scope-team>
+          <option value="">Select a team</option>
+          {% for item in wiki_team_options %}
+          <option value="{{ item.team_id }}"{% if wiki_team_id == item.team_id %} selected{% endif %}>{{ item.team_name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="settings-field wiki-scope-resource-field{% if not wiki_is_resource_scope %} d-none{% endif %}" data-wiki-scope-resource-field>
+        <span>Resource</span>
+        <select name="resource_uuid" data-wiki-scope-resource>
+          <option value="">Select a resource</option>
+          {% for item in wiki_resource_options %}
+          <option value="{{ item.resource_uuid }}"{% if wiki_resource_uuid == item.resource_uuid %} selected{% endif %}>{{ item.resource_name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button class="secondary-btn" type="submit">Switch Wiki</button>
+      {% endif %}
+    </form>
+
+    <section class="wiki-sidebar-pages">
+      <div class="directory-users-toolbar wiki-sidebar-pages-head">
+        <h3>Wiki Navigation</h3>
+        <span class="text-muted small"><span data-wiki-visible-count>{{ wiki_pages|length }}</span> pages</span>
+      </div>
+      <label class="settings-field wiki-sidebar-search">
+        <span>Search</span>
+        <input type="search" placeholder="Team, folder, title, or path" data-wiki-search />
+      </label>
+      <div class="wiki-sidebar-tree" data-wiki-tree></div>
+      <div class="d-none" data-wiki-source-list>
+        {% for page_item in wiki_pages %}
+        <a
+          class="wiki-sidebar-page-link{% if selected_page and selected_page.id == page_item.id %} is-active{% endif %}"
+          href="{{ wiki_page_base_url }}?{{ wiki_context_with_page_prefix }}page={{ page_item.path|urlencode }}"
+          data-wiki-row
+          data-page-title="{{ page_item.title|escape }}"
+          data-page-path="{{ page_item.path|escape }}"
+          data-page-is-draft="{% if page_item.is_draft %}1{% else %}0{% endif %}"
+          data-page-teams="{{ page_item.team_keys|join:'|' }}"
+          data-page-team-names="{{ page_item.team_names|join:'|'|escape }}"
+          data-page-resource-name="{{ page_item.resource_name|default:''|escape }}"
+          data-page-resource-uuid="{{ page_item.resource_uuid|default:''|escape }}"></a>
+        {% endfor %}
+      </div>
+      <div class="directory-empty{% if wiki_pages %} d-none{% endif %}" data-wiki-no-results>No pages match this view.</div>
+    </section>
   </aside>
 
   <div class="resources-main wiki-main">
-    <div class="team-filter-banner">
-      <span class="text-muted small">Viewing</span>
-      <strong data-wiki-view-label>All Pages</strong>
+    <div class="team-filter-banner wiki-banner">
+      <div class="wiki-banner-main">
+        <button
+          class="icon-btn icon-btn-small wiki-sidebar-reopen"
+          type="button"
+          aria-label="Expand wiki scope panel"
+          title="Expand panel"
+          data-wiki-sidebar-open>
+          <span aria-hidden="true">&#8250;</span>
+        </button>
+        <span class="text-muted small">Viewing</span>
+        <strong data-wiki-view-label>All Pages</strong>
+        <span class="status info">{{ wiki_scope_label }}</span>
+        {% if wiki_is_team_scope %}
+        <span class="status info">{{ wiki_team_name|default:wiki_team_id }}</span>
+        {% endif %}
+        {% if wiki_is_resource_scope %}
+        <span class="status warning">{{ wiki_resource_name|default:wiki_resource_uuid }}</span>
+        {% endif %}
+      </div>
+      <div class="wiki-banner-actions">
+        {% if wiki_resource_shell_url %}
+        <a class="ghost-btn" href="{{ wiki_resource_shell_url }}">Back to {{ wiki_resource_shell_label|default:'Resource' }}</a>
+        {% endif %}
+        <a class="primary-btn" href="{{ wiki_editor_new_url }}">New page</a>
+      </div>
     </div>
 
     {% if status_message %}
-    <section class="table-wrap">
+    <section class="table-wrap wiki-status-panel">
       <div class="team-status team-status-{{ status_tone }}">{{ status_message }}</div>
     </section>
     {% endif %}
 
-    <section class="directory-shell wiki-shell">
-      <aside class="card wiki-pages-panel">
-        <div class="directory-users-toolbar">
-          <h3>Pages</h3>
-          <a class="icon-btn" href="{% url 'wiki_editor_new' %}">New page</a>
-        </div>
-        <label class="settings-field">
-          <span>Search</span>
-          <input type="search" placeholder="Title, path, or team" data-wiki-search />
-        </label>
-        <div class="directory-users-list">
-          {% for page_item in wiki_pages %}
-          <a
-            class="directory-user-row wiki-page-row{% if selected_page and selected_page.id == page_item.id %} is-active{% endif %}"
-            href="{% url 'wiki' %}?page={{ page_item.path|urlencode }}"
-            data-wiki-row
-            data-page-title="{{ page_item.title|escape }}"
-            data-page-path="{{ page_item.path|escape }}"
-            data-page-is-draft="{% if page_item.is_draft %}1{% else %}0{% endif %}"
-            data-page-teams="{{ page_item.team_keys|join:'|' }}"
-            data-page-team-names="{{ page_item.team_names|join:'|'|escape }}"
-          >
-            <div class="directory-user-row-top">
-              <strong>{{ page_item.title }}</strong>
-              {% if page_item.is_draft %}
-              <span class="status warning">Draft</span>
-              {% elif page_item.is_public %}
-              <span class="status success">Public</span>
-              {% else %}
-              <span class="status info">Restricted</span>
-              {% endif %}
-            </div>
-            <div class="text-muted small">/{{ page_item.path }}</div>
-            <div class="directory-mini-tags">
-              {% if page_item.is_draft %}
-              <span class="status warning">Not published</span>
-              {% endif %}
-              {% if page_item.team_names %}
-              <span class="status info">{{ page_item.team_names|join:', ' }}</span>
-              {% elif not page_item.is_draft %}
-              <span class="status success">All users</span>
-              {% endif %}
-            </div>
-          </a>
-          {% empty %}
-          <div class="directory-empty">No wiki pages yet.</div>
-          {% endfor %}
-          <div class="directory-empty d-none" data-wiki-no-results>No pages match this filter.</div>
-        </div>
-      </aside>
-
-      <section class="card wiki-detail-panel">
+    <section class="wiki-shell wiki-shell--single">
+      <section class="card wiki-detail-panel wiki-detail-panel--wide">
         {% if selected_page %}
         <div class="directory-detail-head wiki-detail-head">
           <div>
@@ -113,10 +143,10 @@
           </div>
           <div class="table-actions">
             {% if selected_page_payload.can_edit %}
-            <a class="secondary-btn" href="{% url 'wiki_editor' selected_page.id %}">Edit page</a>
+            <a class="secondary-btn" href="{{ selected_page_payload.edit_url }}">Edit page</a>
             {% endif %}
             {% if request.user.is_superuser %}
-            <form method="post" action="{% url 'wiki_delete_page' selected_page.id %}" class="inline-form" onsubmit="return confirm('Delete this page?');">
+            <form method="post" action="{{ selected_page_payload.delete_url }}" class="inline-form" onsubmit="return confirm('Delete this page?');">
               {% csrf_token %}
               <button class="icon-btn danger" type="submit">Delete</button>
             </form>
@@ -125,6 +155,14 @@
         </div>
 
         <div class="directory-badge-row">
+          {% if selected_page_payload.scope == 'team' %}
+          <span class="status info">Team wiki</span>
+          <span class="status info">{{ selected_page_payload.team_name|default:selected_page_payload.team_id }}</span>
+          {% endif %}
+          {% if selected_page_payload.scope == 'resource' %}
+          <span class="status info">Resource wiki</span>
+          <span class="status info">{{ selected_page_payload.resource_name|default:selected_page_payload.resource_uuid }}</span>
+          {% endif %}
           {% if selected_page_payload.is_draft %}
           <span class="status warning">Draft · Only visible to you and admins</span>
           {% else %}
@@ -150,16 +188,19 @@
         <div class="directory-empty-state">
           <h3>No pages available</h3>
           <p>Create your first wiki page to start documenting your platform.</p>
-          <a class="primary-btn" href="{% url 'wiki_editor_new' %}">Create page</a>
+          <a class="primary-btn" href="{{ wiki_editor_new_url }}">Create page</a>
         </div>
         {% endif %}
       </section>
     </section>
   </div>
 </section>
+{{ member_teams|json_script:"wiki-member-teams" }}
 
 <script src="{% static 'js/marked.min.js' %}"></script>
 <script src="{% static 'js/purify.min.js' %}"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="{% static 'js/wiki-markdown.js' %}"></script>
 <script>
   (function () {
     const parseList = (value) => {
@@ -169,95 +210,376 @@
         .filter(Boolean);
     };
 
-    const renderMarkdown = (value) => {
-      const source = String(value || '');
-      if (!source.trim()) {
-        return '<p class="text-muted">No content yet.</p>';
-      }
-
-      if (window.marked && typeof window.marked.parse === 'function') {
-        if (typeof window.marked.setOptions === 'function') {
-          window.marked.setOptions({
-            gfm: true,
-            breaks: true,
-            headerIds: false,
-            mangle: false,
-          });
-        }
-        const rendered = window.marked.parse(source);
-        if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
-          return window.DOMPurify.sanitize(rendered, {
-            ADD_TAGS: ['details', 'summary', 'kbd'],
-            ADD_ATTR: ['target', 'rel'],
-          });
-        }
-        return rendered;
-      }
-      return source
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\"/g, '&quot;')
-        .replace(/'/g, '&#39;')
-        .replace(/\n/g, '<br>');
-    };
-
+    const markdown = window.AlshivalWikiMarkdown;
     const viewSource = document.querySelector('[data-wiki-view-source]');
     const viewTarget = document.querySelector('[data-wiki-render-target]');
-    if (viewSource && viewTarget) {
-      viewTarget.innerHTML = renderMarkdown(viewSource.value || viewSource.textContent || '');
+    if (viewSource && viewTarget && markdown && typeof markdown.renderInto === 'function') {
+      markdown.renderInto(viewTarget, viewSource.value || viewSource.textContent || '', markdown.GH_EMPTY);
     }
 
+    const treeRoot = document.querySelector('[data-wiki-tree]');
     const pageRows = Array.from(document.querySelectorAll('[data-wiki-row]'));
-    const folderButtons = Array.from(document.querySelectorAll('[data-wiki-folder]'));
     const folderViewLabel = document.querySelector('[data-wiki-view-label]');
     const searchInput = document.querySelector('[data-wiki-search]');
     const noResults = document.querySelector('[data-wiki-no-results]');
-    let activeFolder = 'all';
-
-    const applyListFilters = () => {
-      const term = ((searchInput && searchInput.value) || '').trim().toLowerCase();
-      let visible = 0;
-
-      pageRows.forEach((row) => {
-        const teams = parseList(row.getAttribute('data-page-teams'));
-        const teamNames = parseList(row.getAttribute('data-page-team-names'));
-        const title = row.getAttribute('data-page-title') || '';
-        const path = row.getAttribute('data-page-path') || '';
-        const isDraft = row.getAttribute('data-page-is-draft') === '1';
-
-        const folderMatch =
-          activeFolder === 'all' ||
-          (activeFolder === 'public' && !isDraft && teams.length === 0) ||
-          (activeFolder === 'drafts' && isDraft) ||
-          (!isDraft && teams.includes(activeFolder));
-        const haystack = [title, path, teamNames.join(' ')].join(' ').toLowerCase();
-        const searchMatch = !term || haystack.includes(term);
-        const show = folderMatch && searchMatch;
-        row.classList.toggle('d-none', !show);
-        if (show) visible += 1;
-      });
-
-      if (noResults) noResults.classList.toggle('d-none', visible > 0);
+    const visibleCount = document.querySelector('[data-wiki-visible-count]');
+    const wikiLayout = document.querySelector('[data-wiki-layout]');
+    const sidebarToggle = document.querySelector('[data-wiki-sidebar-toggle]');
+    const sidebarOpen = document.querySelector('[data-wiki-sidebar-open]');
+    const sidebarStorageKey = 'alshival.wiki.sidebar-collapsed';
+    const sidebarQuery = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 980px)') : null;
+    const normalizeText = (value) => String(value || '').trim();
+    const slugify = (value) => {
+      return String(value || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
     };
 
-    folderButtons.forEach((button) => {
-      button.addEventListener('click', () => {
-        activeFolder = button.getAttribute('data-wiki-folder') || 'all';
-        const label = button.getAttribute('data-wiki-folder-label') || 'All Pages';
+    let memberTeams = [];
+    try {
+      const node = document.getElementById('wiki-member-teams');
+      const parsed = JSON.parse(node ? node.textContent : '[]');
+      memberTeams = Array.isArray(parsed) ? parsed.map((item) => normalizeText(item)).filter(Boolean) : [];
+    } catch (error) {
+      memberTeams = [];
+    }
 
-        folderButtons.forEach((item) => {
-          item.classList.toggle('is-active', item === button);
-        });
-        if (folderViewLabel) folderViewLabel.textContent = label;
-        applyListFilters();
+    const sourcePages = pageRows
+      .map((row) => {
+        const title = normalizeText(row.getAttribute('data-page-title'));
+        const path = normalizeText(row.getAttribute('data-page-path'));
+        const teamNames = parseList(row.getAttribute('data-page-team-names'));
+        const teamSlugs = parseList(row.getAttribute('data-page-teams'));
+        return {
+          href: normalizeText(row.getAttribute('href')) || '#',
+          title: title || path || 'Untitled page',
+          path,
+          segments: path.split('/').filter(Boolean),
+          isDraft: row.getAttribute('data-page-is-draft') === '1',
+          teamNames,
+          teamSlugs,
+          isActive: row.classList.contains('is-active'),
+        };
+      })
+      .sort((a, b) => {
+        const pathSort = a.path.localeCompare(b.path);
+        if (pathSort !== 0) return pathSort;
+        return a.title.localeCompare(b.title);
       });
-    });
+
+    const readStoredCollapseState = () => {
+      try {
+        return window.localStorage.getItem(sidebarStorageKey) === '1';
+      } catch (error) {
+        return false;
+      }
+    };
+
+    const writeStoredCollapseState = (collapsed) => {
+      try {
+        window.localStorage.setItem(sidebarStorageKey, collapsed ? '1' : '0');
+      } catch (error) {
+        // Ignore localStorage errors (private browsing / policy restrictions).
+      }
+    };
+
+    const setSidebarCollapsed = (collapsed, persist = true) => {
+      if (!wikiLayout) return;
+      const isMobile = sidebarQuery && sidebarQuery.matches;
+      const shouldCollapse = Boolean(collapsed) && !isMobile;
+      wikiLayout.classList.toggle('is-sidebar-collapsed', shouldCollapse);
+
+      if (sidebarToggle) {
+        sidebarToggle.setAttribute('aria-expanded', shouldCollapse ? 'false' : 'true');
+        sidebarToggle.setAttribute('aria-label', shouldCollapse ? 'Expand wiki scope panel' : 'Collapse wiki scope panel');
+        sidebarToggle.setAttribute('title', shouldCollapse ? 'Expand panel' : 'Collapse panel');
+        sidebarToggle.innerHTML = `<span aria-hidden="true">${shouldCollapse ? '&#8250;' : '&#8249;'}</span>`;
+      }
+      if (sidebarOpen) {
+        sidebarOpen.classList.toggle('is-visible', shouldCollapse);
+      }
+      if (persist && !isMobile) {
+        writeStoredCollapseState(shouldCollapse);
+      }
+    };
+
+    const initializeSidebarState = () => {
+      const shouldCollapse = readStoredCollapseState();
+      setSidebarCollapsed(shouldCollapse, false);
+    };
+
+    if (sidebarToggle) {
+      sidebarToggle.addEventListener('click', () => {
+        const currentlyCollapsed = wikiLayout ? wikiLayout.classList.contains('is-sidebar-collapsed') : false;
+        setSidebarCollapsed(!currentlyCollapsed);
+      });
+    }
+
+    if (sidebarOpen) {
+      sidebarOpen.addEventListener('click', () => {
+        setSidebarCollapsed(false);
+      });
+    }
+
+    if (sidebarQuery) {
+      const handleSidebarMediaChange = () => {
+        if (sidebarQuery.matches) {
+          setSidebarCollapsed(false, false);
+          return;
+        }
+        setSidebarCollapsed(readStoredCollapseState(), false);
+      };
+      if (typeof sidebarQuery.addEventListener === 'function') {
+        sidebarQuery.addEventListener('change', handleSidebarMediaChange);
+      } else if (typeof sidebarQuery.addListener === 'function') {
+        sidebarQuery.addListener(handleSidebarMediaChange);
+      }
+    }
+
+    initializeSidebarState();
+
+    const createTreeLevel = (items, depth = 0) => {
+      const fragment = document.createDocumentFragment();
+      const folderBuckets = new Map();
+      const pageItems = [];
+      let hasActive = false;
+
+      items.forEach((item) => {
+        const segment = item.segments[depth] || '';
+        const isLeafAtDepth = !segment || depth >= item.segments.length - 1;
+        if (isLeafAtDepth) {
+          pageItems.push(item);
+          if (item.isActive) hasActive = true;
+          return;
+        }
+        if (!folderBuckets.has(segment)) folderBuckets.set(segment, []);
+        folderBuckets.get(segment).push(item);
+      });
+
+      Array.from(folderBuckets.keys())
+        .sort((a, b) => a.localeCompare(b))
+        .forEach((folderName) => {
+          const folderItems = folderBuckets.get(folderName) || [];
+          const details = document.createElement('details');
+          details.className = 'wiki-tree-node wiki-tree-node--folder';
+
+          const summary = document.createElement('summary');
+          summary.className = 'wiki-tree-node__summary';
+          summary.innerHTML = `
+            <span class="folder-icon" aria-hidden="true">DIR</span>
+            <span class="wiki-tree-node__label"></span>
+            <span class="wiki-tree-node__count"></span>
+          `;
+          const label = summary.querySelector('.wiki-tree-node__label');
+          if (label) label.textContent = folderName;
+          const count = summary.querySelector('.wiki-tree-node__count');
+          if (count) count.textContent = String(folderItems.length);
+          details.appendChild(summary);
+
+          const childWrap = document.createElement('div');
+          childWrap.className = 'wiki-tree-node__children';
+          const childTree = createTreeLevel(folderItems, depth + 1);
+          childWrap.appendChild(childTree.fragment);
+          details.appendChild(childWrap);
+          if (childTree.hasActive) {
+            details.open = true;
+            hasActive = true;
+          }
+          fragment.appendChild(details);
+        });
+
+      pageItems
+        .sort((a, b) => a.title.localeCompare(b.title))
+        .forEach((item) => {
+          const link = document.createElement('a');
+          link.className = `wiki-tree-page${item.isActive ? ' is-active' : ''}`;
+          link.href = item.href;
+          link.innerHTML = `
+            <span class="folder-icon" aria-hidden="true">PG</span>
+            <span class="wiki-sidebar-page-copy">
+              <strong></strong>
+              <small class="text-muted"></small>
+            </span>
+          `;
+          const titleNode = link.querySelector('strong');
+          if (titleNode) titleNode.textContent = item.title;
+          const pathNode = link.querySelector('small');
+          if (pathNode) pathNode.textContent = `/${item.path}`;
+          if (item.isActive) hasActive = true;
+          fragment.appendChild(link);
+        });
+
+      return { fragment, hasActive };
+    };
+
+    const topLevelSections = () => {
+      const sections = [
+        {
+          key: 'all',
+          label: 'All Pages',
+          filter: (item) => Boolean(item),
+        },
+        {
+          key: 'drafts',
+          label: 'Drafts',
+          filter: (item) => item.isDraft,
+        },
+      ];
+      memberTeams.forEach((teamName) => {
+        const slug = slugify(teamName);
+        if (!slug) return;
+        sections.push({
+          key: `team:${slug}`,
+          label: teamName,
+          filter: (item) => !item.isDraft && item.teamSlugs.includes(slug),
+        });
+      });
+      return sections;
+    };
+
+    const renderWikiTree = () => {
+      if (!treeRoot) return;
+      while (treeRoot.firstChild) treeRoot.removeChild(treeRoot.firstChild);
+
+      const term = normalizeText(searchInput && searchInput.value).toLowerCase();
+      const filteredPages = sourcePages.filter((item) => {
+        if (!term) return true;
+        const haystack = [item.title, item.path, item.teamNames.join(' ')].join(' ').toLowerCase();
+        return haystack.includes(term);
+      });
+      if (visibleCount) visibleCount.textContent = String(filteredPages.length);
+      if (noResults) {
+        noResults.classList.toggle('d-none', filteredPages.length > 0);
+      }
+      if (!filteredPages.length) {
+        if (folderViewLabel) folderViewLabel.textContent = 'No pages';
+        return;
+      }
+
+      const sections = topLevelSections();
+      const sectionBuckets = [];
+      const seenSectionSignatures = new Set();
+      sections.forEach((section) => {
+        const items = filteredPages.filter(section.filter);
+        if (!items.length) return;
+        const signature = items
+          .map((item) => item.path || item.href)
+          .sort((a, b) => a.localeCompare(b))
+          .join('|');
+        if (sectionBuckets.length > 0 && signature && seenSectionSignatures.has(signature)) {
+          return;
+        }
+        seenSectionSignatures.add(signature);
+        sectionBuckets.push({ section, items });
+      });
+      let firstVisibleLabel = '';
+      let activeVisibleLabel = '';
+
+      sectionBuckets.forEach(({ section, items }, index) => {
+        if (!firstVisibleLabel) firstVisibleLabel = section.label;
+
+        const details = document.createElement('details');
+        details.className = 'wiki-tree-node wiki-tree-node--top';
+        if (index === 0) details.open = true;
+
+        const summary = document.createElement('summary');
+        summary.className = 'wiki-tree-node__summary';
+        summary.innerHTML = `
+          <span class="folder-icon" aria-hidden="true">DIR</span>
+          <span class="wiki-tree-node__label"></span>
+          <span class="wiki-tree-node__count"></span>
+        `;
+        const label = summary.querySelector('.wiki-tree-node__label');
+        if (label) label.textContent = section.label;
+        const count = summary.querySelector('.wiki-tree-node__count');
+        if (count) count.textContent = String(items.length);
+        details.appendChild(summary);
+
+        const children = document.createElement('div');
+        children.className = 'wiki-tree-node__children';
+        const childTree = createTreeLevel(items, 0);
+        children.appendChild(childTree.fragment);
+        details.appendChild(children);
+
+        if (childTree.hasActive) {
+          details.open = true;
+          activeVisibleLabel = section.label;
+        }
+
+        details.addEventListener('toggle', () => {
+          if (!details.open) return;
+          if (folderViewLabel) folderViewLabel.textContent = section.label;
+        });
+
+        treeRoot.appendChild(details);
+      });
+
+      if (folderViewLabel) {
+        folderViewLabel.textContent = activeVisibleLabel || firstVisibleLabel || 'Wiki Navigation';
+      }
+    };
 
     if (searchInput) {
-      searchInput.addEventListener('input', applyListFilters);
+      searchInput.addEventListener('input', renderWikiTree);
     }
-    applyListFilters();
+    renderWikiTree();
+
+    const scopeForm = document.querySelector('[data-wiki-scope-form]');
+    const scopeSelect = document.querySelector('[data-wiki-scope-select]');
+    const scopeTeamField = document.querySelector('[data-wiki-scope-team-field]');
+    const scopeTeamSelect = document.querySelector('[data-wiki-scope-team]');
+    const scopeResourceField = document.querySelector('[data-wiki-scope-resource-field]');
+    const scopeResourceSelect = document.querySelector('[data-wiki-scope-resource]');
+
+    const submitScopeForm = () => {
+      if (!scopeForm) return;
+      if (typeof scopeForm.requestSubmit === 'function') {
+        scopeForm.requestSubmit();
+        return;
+      }
+      scopeForm.submit();
+    };
+
+    const applyScopeFieldState = () => {
+      if (!scopeSelect) return;
+      const isTeam = (scopeSelect.value || '') === 'team';
+      const isResource = (scopeSelect.value || '') === 'resource';
+      if (scopeTeamField && scopeTeamSelect) {
+        scopeTeamField.classList.toggle('d-none', !isTeam);
+        scopeTeamSelect.disabled = !isTeam;
+        scopeTeamSelect.required = isTeam;
+      }
+      if (scopeResourceField && scopeResourceSelect) {
+        scopeResourceField.classList.toggle('d-none', !isResource);
+        scopeResourceSelect.disabled = !isResource;
+        scopeResourceSelect.required = isResource;
+      }
+    };
+
+    if (scopeSelect) {
+      scopeSelect.addEventListener('change', () => {
+        applyScopeFieldState();
+        submitScopeForm();
+      });
+    }
+
+    if (scopeResourceSelect) {
+      scopeResourceSelect.addEventListener('change', () => {
+        if ((scopeSelect && scopeSelect.value) === 'resource') {
+          submitScopeForm();
+        }
+      });
+    }
+    if (scopeTeamSelect) {
+      scopeTeamSelect.addEventListener('change', () => {
+        if ((scopeSelect && scopeSelect.value) === 'team') {
+          submitScopeForm();
+        }
+      });
+    }
+
+    applyScopeFieldState();
   })();
 </script>
 {% endblock page_content %}

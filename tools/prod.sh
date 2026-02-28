@@ -39,16 +39,63 @@ export LOCAL_UID="$(id -u)"
 export LOCAL_GID="$(id -g)"
 export CERTBOT_DOMAIN="${CERTBOT_DOMAIN:-dev.alshival.dev}"
 export CERTBOT_EMAIL="${CERTBOT_EMAIL:-support@alshival.ai}"
+export CERTBOT_CERT_NAME="${CERTBOT_CERT_NAME:-$CERTBOT_DOMAIN}"
 
 PRUNE=false
+BUILD=true
+DETACH=true
+WAIT=true
+DOWN=false
+RESTART=false
 ARGS=()
 for arg in "$@"; do
-  if [ "$arg" = "--prune" ]; then
-    PRUNE=true
-    continue
-  fi
-  ARGS+=("$arg")
+  case "$arg" in
+    --down)
+      DOWN=true
+      ;;
+    --restart)
+      RESTART=true
+      ;;
+    --prune)
+      PRUNE=true
+      ;;
+    --build)
+      BUILD=true
+      ;;
+    --no-build)
+      BUILD=false
+      ;;
+    --attach)
+      DETACH=false
+      WAIT=false
+      ;;
+    -d|--detach|--detached)
+      DETACH=true
+      ;;
+    --no-wait)
+      WAIT=false
+      ;;
+    *)
+      ARGS+=("$arg")
+      ;;
+  esac
 done
+
+compose_https_files=(
+  -f docker-compose.yml
+  -f docker-compose-https.yml
+)
+
+run_compose_https() {
+  "$DOCKER" compose "${compose_https_files[@]}" "$@"
+}
+
+if [ "$DOWN" = "true" ] || [ "$RESTART" = "true" ]; then
+  run_compose_https down --remove-orphans || true
+  if [ "$DOWN" = "true" ] && [ "$PRUNE" != "true" ]; then
+    exit 0
+  fi
+fi
 
 remove_path() {
   local target="$1"
@@ -60,10 +107,7 @@ remove_path() {
 }
 
 if [ "$PRUNE" = "true" ]; then
-  "$DOCKER" compose \
-    -f docker-compose.yml \
-    -f docker-compose-https.yml \
-    down --volumes --remove-orphans || true
+  run_compose_https down --volumes --remove-orphans || true
   "$DOCKER" system prune -a --volumes -f
   remove_path "$ROOT_DIR/var"
   remove_path "$ROOT_DIR/db.sqlite3"
@@ -75,7 +119,34 @@ if [ ! -w "$ROOT_DIR/var" ]; then
 fi
 
 CERTBOT_DIR="$ROOT_DIR/docker/certbot"
-CERT_PATH="$CERTBOT_DIR/conf/live/$CERTBOT_DOMAIN/fullchain.pem"
+
+cert_path_exists() {
+  local p="$1"
+  [ -f "$p" ] || [ -L "$p" ]
+}
+
+detect_existing_cert_name() {
+  local live_dir candidate picked
+  live_dir="$CERTBOT_DIR/conf/live"
+  [ -d "$live_dir" ] || return 1
+
+  # Certbot may create suffixes like domain-0001 when reissuing.
+  shopt -s nullglob
+  for candidate in "$live_dir/${CERTBOT_DOMAIN}"*; do
+    [ -d "$candidate" ] || continue
+    cert_path_exists "$candidate/fullchain.pem" || continue
+    picked="$candidate"
+  done
+  shopt -u nullglob
+
+  [ -n "${picked:-}" ] || return 1
+  basename "$picked"
+}
+
+if detected_cert_name="$(detect_existing_cert_name)"; then
+  export CERTBOT_CERT_NAME="$detected_cert_name"
+fi
+CERT_PATH="$CERTBOT_DIR/conf/live/$CERTBOT_CERT_NAME/fullchain.pem"
 
 if [ -d "$CERTBOT_DIR" ]; then
   if [ ! -w "$CERTBOT_DIR" ]; then
@@ -83,7 +154,7 @@ if [ -d "$CERTBOT_DIR" ]; then
   fi
 fi
 
-if [ ! -f "$CERT_PATH" ]; then
+if ! cert_path_exists "$CERT_PATH"; then
   mkdir -p "$CERTBOT_DIR/www" "$CERTBOT_DIR/conf"
   if [ ! -w "$CERTBOT_DIR/conf" ]; then
     sudo -n chown -R "$LOCAL_UID:$LOCAL_GID" "$CERTBOT_DIR" || true
@@ -111,9 +182,36 @@ if [ ! -f "$CERT_PATH" ]; then
     -f docker-compose.yml \
     -f docker-compose-http.yml \
     down
+
+  if detected_cert_name="$(detect_existing_cert_name)"; then
+    export CERTBOT_CERT_NAME="$detected_cert_name"
+    CERT_PATH="$CERTBOT_DIR/conf/live/$CERTBOT_CERT_NAME/fullchain.pem"
+  fi
 fi
 
-exec "$DOCKER" compose \
-  -f docker-compose.yml \
-  -f docker-compose-https.yml \
-  up --build "${ARGS[@]}"
+if ! cert_path_exists "$CERT_PATH"; then
+  echo "Error: TLS cert not found at $CERT_PATH (CERTBOT_CERT_NAME=$CERTBOT_CERT_NAME)." >&2
+  exit 1
+fi
+
+compose_up_cmd=(
+  "$DOCKER" compose "${compose_https_files[@]}"
+  up
+  --remove-orphans
+)
+
+if [ "$BUILD" = "true" ]; then
+  compose_up_cmd+=(--build)
+fi
+if [ "$DETACH" = "true" ]; then
+  compose_up_cmd+=(-d)
+fi
+
+if [ "$WAIT" = "true" ] && [ "$DETACH" = "true" ]; then
+  if "$DOCKER" compose up --help 2>/dev/null | grep -q -- "--wait"; then
+    compose_up_cmd+=(--wait)
+  fi
+fi
+
+compose_up_cmd+=("${ARGS[@]}")
+exec "${compose_up_cmd[@]}"

@@ -4,6 +4,7 @@ import json
 import shutil
 import sqlite3
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
@@ -93,6 +94,121 @@ class ResourceCheckItem:
 
 
 _SSH_KEY_PREFIX = "enc:"
+
+REMINDER_STATUS_SCHEDULED = "scheduled"
+REMINDER_STATUS_SENT = "sent"
+REMINDER_STATUS_CANCELED = "canceled"
+REMINDER_STATUS_ERROR = "error"
+REMINDER_VALID_STATUSES = {
+    REMINDER_STATUS_SCHEDULED,
+    REMINDER_STATUS_SENT,
+    REMINDER_STATUS_CANCELED,
+    REMINDER_STATUS_ERROR,
+}
+REMINDER_DEFAULT_ACTION = "notify_user"
+REMINDER_DEFAULT_CHANNELS = {
+    "APP": True,
+    "SMS": True,
+    "EMAIL": False,
+}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_datetime(value: Any, *, field_name: str) -> datetime:
+    candidate = str(value or "").strip()
+    if not candidate:
+        raise ValueError(f"{field_name} is required")
+    candidate = candidate.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise ValueError(f"Invalid ISO datetime for {field_name}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _normalize_reminder_recipients(recipients: list[str] | tuple[str, ...] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in recipients or []:
+        username = str(raw or "").strip().lstrip("@").lower()
+        if not username or username in seen:
+            continue
+        normalized.append(username)
+        seen.add(username)
+    return normalized
+
+
+def _normalize_reminder_channels(channels: dict[str, Any] | None) -> dict[str, bool]:
+    normalized = {name: bool(enabled) for name, enabled in REMINDER_DEFAULT_CHANNELS.items()}
+    if not isinstance(channels, dict):
+        return normalized
+    alias_map = {
+        "app": "APP",
+        "sms": "SMS",
+        "email": "EMAIL",
+    }
+    for raw_key, raw_value in channels.items():
+        key = alias_map.get(str(raw_key or "").strip().lower())
+        if not key:
+            continue
+        normalized[key] = bool(raw_value)
+    return normalized
+
+
+def _normalize_reminder_status(status: str | None) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized not in REMINDER_VALID_STATUSES:
+        raise ValueError("status must be one of: scheduled, sent, canceled, error")
+    return normalized
+
+
+def _json_dumps_compact(value: Any) -> str:
+    try:
+        return json.dumps(value, separators=(",", ":"))
+    except TypeError:
+        return json.dumps(str(value), separators=(",", ":"))
+
+
+def _json_loads_or(value: Any, *, default: Any) -> Any:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+def _row_to_reminder(row: sqlite3.Row) -> dict[str, Any]:
+    recipients = _json_loads_or(row["recipients_json"], default=[])
+    if not isinstance(recipients, list):
+        recipients = []
+    channels = _normalize_reminder_channels(_json_loads_or(row["channels_json"], default={}))
+    metadata = _json_loads_or(row["metadata_json"], default={})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return {
+        "id": int(row["id"] or 0),
+        "title": str(row["title"] or "").strip(),
+        "message": str(row["message"] or "").strip(),
+        "recipients": _normalize_reminder_recipients([str(item) for item in recipients]),
+        "remind_at": str(row["remind_at"] or "").strip(),
+        "status": str(row["status"] or REMINDER_STATUS_SCHEDULED).strip().lower() or REMINDER_STATUS_SCHEDULED,
+        "action": str(row["action"] or REMINDER_DEFAULT_ACTION).strip().lower() or REMINDER_DEFAULT_ACTION,
+        "channels": channels,
+        "metadata": metadata,
+        "last_error": str(row["last_error"] or "").strip(),
+        "created_by_user_id": int(row["created_by_user_id"]) if row["created_by_user_id"] is not None else None,
+        "created_by_username": str(row["created_by_username"] or "").strip(),
+        "created_at": str(row["created_at"] or "").strip(),
+        "updated_at": str(row["updated_at"] or "").strip(),
+        "sent_at": str(row["sent_at"] or "").strip(),
+    }
 
 
 def _fernet_instances() -> list[Fernet]:
@@ -599,6 +715,29 @@ def _ensure_resource_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resource_agenda_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            source_item_id TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            due_date TEXT NOT NULL DEFAULT '',
+            due_time TEXT NOT NULL DEFAULT '',
+            due_at TEXT NOT NULL DEFAULT '',
+            item_url TEXT NOT NULL DEFAULT '',
+            item_meta TEXT NOT NULL DEFAULT '',
+            is_completed INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            assigned_by_user_id INTEGER NOT NULL DEFAULT 0,
+            assigned_by_username TEXT NOT NULL DEFAULT '',
+            assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(item_id)
+        )
+        """
+    )
     alert_setting_columns = {
         row[1]
         for row in conn.execute("PRAGMA table_info(resource_alert_settings)").fetchall()
@@ -621,6 +760,18 @@ def _ensure_resource_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_resource_alert_settings_user_id
         ON resource_alert_settings(user_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_resource_agenda_tasks_due
+        ON resource_agenda_tasks(due_date, due_time, is_completed)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_resource_agenda_tasks_source
+        ON resource_agenda_tasks(source, source_item_id, updated_at)
         """
     )
     conn.commit()
@@ -864,6 +1015,201 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS alert_filter_prompt (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            prompt TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO alert_filter_prompt (id, prompt, updated_at)
+        VALUES (1, '', datetime('now'))
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asana_task_cache (
+            cache_key TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            fetched_at_epoch INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asana_board_resource_map (
+            board_gid TEXT NOT NULL,
+            resource_uuid TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (board_gid, resource_uuid)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asana_task_resource_map (
+            task_gid TEXT NOT NULL,
+            resource_uuid TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (task_gid, resource_uuid)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agenda_item_resource_map (
+            item_id TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            source_item_id TEXT NOT NULL DEFAULT '',
+            resource_uuid TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            due_date TEXT NOT NULL DEFAULT '',
+            due_time TEXT NOT NULL DEFAULT '',
+            due_at TEXT NOT NULL DEFAULT '',
+            item_url TEXT NOT NULL DEFAULT '',
+            item_meta TEXT NOT NULL DEFAULT '',
+            is_completed INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (item_id, resource_uuid)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calendar_event_cache (
+            provider TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            due_date TEXT NOT NULL DEFAULT '',
+            due_time TEXT NOT NULL DEFAULT '',
+            is_completed INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'open',
+            source_url TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (provider, event_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calendar_sync_state (
+            provider TEXT PRIMARY KEY,
+            fetched_at_epoch INTEGER NOT NULL DEFAULT 0,
+            item_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'idle',
+            message TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outlook_mail_cache (
+            message_id TEXT PRIMARY KEY,
+            folder TEXT NOT NULL DEFAULT 'inbox',
+            internet_message_id TEXT NOT NULL DEFAULT '',
+            conversation_id TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            sender_email TEXT NOT NULL DEFAULT '',
+            sender_name TEXT NOT NULL DEFAULT '',
+            to_recipients_json TEXT NOT NULL DEFAULT '[]',
+            cc_recipients_json TEXT NOT NULL DEFAULT '[]',
+            received_at TEXT NOT NULL DEFAULT '',
+            sent_at TEXT NOT NULL DEFAULT '',
+            body_preview TEXT NOT NULL DEFAULT '',
+            body_text TEXT NOT NULL DEFAULT '',
+            web_link TEXT NOT NULL DEFAULT '',
+            is_read INTEGER NOT NULL DEFAULT 0,
+            has_attachments INTEGER NOT NULL DEFAULT 0,
+            raw_payload_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            message TEXT,
+            recipients_json TEXT NOT NULL DEFAULT '[]',
+            remind_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'scheduled',
+            action TEXT NOT NULL DEFAULT 'notify_user',
+            channels_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            last_error TEXT NOT NULL DEFAULT '',
+            created_by_user_id INTEGER,
+            created_by_username TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            sent_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    reminder_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(reminders)").fetchall()
+    }
+    if "recipients_json" not in reminder_columns:
+        conn.execute("ALTER TABLE reminders ADD COLUMN recipients_json TEXT NOT NULL DEFAULT '[]'")
+        if "recipients" in reminder_columns:
+            conn.execute(
+                """
+                UPDATE reminders
+                SET recipients_json = COALESCE(NULLIF(trim(recipients_json), ''), COALESCE(recipients, '[]'))
+                """
+            )
+    if "channels_json" not in reminder_columns:
+        conn.execute("ALTER TABLE reminders ADD COLUMN channels_json TEXT NOT NULL DEFAULT '{}'")
+        if "channels" in reminder_columns:
+            conn.execute(
+                """
+                UPDATE reminders
+                SET channels_json = COALESCE(NULLIF(trim(channels_json), ''), COALESCE(channels, '{}'))
+                """
+            )
+    if "metadata_json" not in reminder_columns:
+        conn.execute("ALTER TABLE reminders ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+        if "metadata" in reminder_columns:
+            conn.execute(
+                """
+                UPDATE reminders
+                SET metadata_json = COALESCE(NULLIF(trim(metadata_json), ''), COALESCE(metadata, '{}'))
+                """
+            )
+    if "last_error" not in reminder_columns:
+        conn.execute("ALTER TABLE reminders ADD COLUMN last_error TEXT NOT NULL DEFAULT ''")
+    if "created_by_user_id" not in reminder_columns:
+        conn.execute("ALTER TABLE reminders ADD COLUMN created_by_user_id INTEGER")
+    if "created_by_username" not in reminder_columns:
+        conn.execute("ALTER TABLE reminders ADD COLUMN created_by_username TEXT NOT NULL DEFAULT ''")
+    if "sent_at" not in reminder_columns:
+        conn.execute("ALTER TABLE reminders ADD COLUMN sent_at TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calendar_notification_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            calendar_events_app_enabled INTEGER NOT NULL DEFAULT 1,
+            calendar_events_sms_enabled INTEGER NOT NULL DEFAULT 0,
+            calendar_events_email_enabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(user_id)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_notifications_read_created
         ON notifications(is_read, created_at DESC)
         """
@@ -878,6 +1224,78 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_ask_chat_conv_created
         ON ask_chat_messages(conversation_id, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_event_cache_due
+        ON calendar_event_cache(provider, due_date, due_time)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_event_cache_done
+        ON calendar_event_cache(provider, is_completed, due_date)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_outlook_mail_cache_received
+        ON outlook_mail_cache(received_at DESC, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_outlook_mail_cache_sender_subject
+        ON outlook_mail_cache(sender_email, subject)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_reminders_status_time
+        ON reminders(status, remind_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_reminders_remind_at
+        ON reminders(remind_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_reminders_created_by
+        ON reminders(created_by_user_id, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_asana_board_resource_map_board
+        ON asana_board_resource_map(board_gid, resource_uuid)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_asana_task_resource_map_task
+        ON asana_task_resource_map(task_gid, resource_uuid)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agenda_item_resource_map_item
+        ON agenda_item_resource_map(item_id, source, resource_uuid)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agenda_item_resource_map_resource
+        ON agenda_item_resource_map(resource_uuid, due_date, due_time)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_notification_settings_user
+        ON calendar_notification_settings(user_id)
         """
     )
     _ensure_ask_chat_schema(conn)
@@ -1823,6 +2241,617 @@ def add_ask_chat_tool_event(
         conn.close()
 
 
+def add_ask_chat_context_event(
+    user,
+    *,
+    event_type: str,
+    summary: str,
+    payload: dict[str, Any] | None = None,
+    conversation_id: str = "default",
+) -> int:
+    resolved_event_type = str(event_type or "").strip().lower()
+    if not resolved_event_type:
+        raise ValueError("event_type is required")
+    resolved_summary = str(summary or "").strip()
+    if not resolved_summary:
+        raise ValueError("summary is required")
+    resolved_conversation_id = str(conversation_id or "").strip() or "default"
+    payload_json = _json_dumps_compact(payload if isinstance(payload, dict) else {})
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        _ensure_ask_chat_schema(conn)
+        cursor = conn.execute(
+            """
+            INSERT INTO ask_chat_messages (
+                conversation_id,
+                role,
+                content,
+                message_kind,
+                tool_name,
+                tool_call_id,
+                tool_args_json,
+                tool_result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_conversation_id,
+                "tool",
+                resolved_summary[:5000],
+                "context_event",
+                resolved_event_type[:120],
+                "",
+                "",
+                payload_json,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid or 0)
+    finally:
+        conn.close()
+
+
+def _team_chat_db_path(team: Group) -> Path:
+    return _team_owner_dir(team) / "team_chat.db"
+
+
+def _ensure_team_chat_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS team_chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL DEFAULT 'default',
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            author_user_id INTEGER NOT NULL DEFAULT 0,
+            author_username TEXT NOT NULL DEFAULT '',
+            message_kind TEXT NOT NULL DEFAULT 'chat',
+            tool_name TEXT,
+            tool_call_id TEXT,
+            tool_args_json TEXT,
+            tool_result_json TEXT,
+            attachment_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    message_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(team_chat_messages)").fetchall()
+    }
+    if "attachment_id" not in message_columns:
+        conn.execute("ALTER TABLE team_chat_messages ADD COLUMN attachment_id INTEGER")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_team_chat_conv_created
+        ON team_chat_messages(conversation_id, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS team_chat_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            file_blob BLOB NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS team_chat_notification_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            team_chat_app_enabled INTEGER NOT NULL DEFAULT 1,
+            team_chat_sms_enabled INTEGER NOT NULL DEFAULT 0,
+            team_chat_email_enabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(team_id, user_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_team_chat_notify_team_user
+        ON team_chat_notification_settings(team_id, user_id)
+        """
+    )
+    conn.commit()
+
+
+def add_team_chat_message(
+    team: Group,
+    *,
+    actor_user=None,
+    conversation_id: str = "default",
+    role: str,
+    content: str,
+    attachment_name: str = "",
+    attachment_content_type: str = "",
+    attachment_blob: bytes | None = None,
+) -> int:
+    resolved_role = str(role or "").strip().lower()
+    if resolved_role not in {"user", "assistant", "system", "tool"}:
+        raise ValueError("role must be one of: user, assistant, system, tool")
+    resolved_content = str(content or "").strip()
+    if not resolved_content and not attachment_blob:
+        raise ValueError("content or attachment is required")
+    resolved_conversation_id = str(conversation_id or "").strip() or "default"
+
+    author_user_id = int(getattr(actor_user, "id", 0) or 0)
+    author_username = str(getattr(actor_user, "username", "") or "").strip()
+
+    conn = _connect_sqlite(_team_chat_db_path(team))
+    try:
+        _ensure_team_chat_schema(conn)
+        attachment_id: int | None = None
+        if attachment_blob:
+            attachment_cursor = conn.execute(
+                """
+                INSERT INTO team_chat_attachments (
+                    file_name, content_type, file_size, file_blob
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    str(attachment_name or "attachment").strip() or "attachment",
+                    str(attachment_content_type or "application/octet-stream").strip() or "application/octet-stream",
+                    len(attachment_blob),
+                    attachment_blob,
+                ),
+            )
+            attachment_id = int(attachment_cursor.lastrowid or 0) or None
+        cursor = conn.execute(
+            """
+            INSERT INTO team_chat_messages (
+                conversation_id, role, content, author_user_id, author_username, attachment_id
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_conversation_id,
+                resolved_role,
+                resolved_content,
+                author_user_id,
+                author_username,
+                attachment_id,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
+
+
+def list_team_chat_messages(team: Group, *, conversation_id: str = "default", limit: int = 20) -> list[dict[str, Any]]:
+    resolved_conversation_id = str(conversation_id or "").strip() or "default"
+    conn = _connect_sqlite(_team_chat_db_path(team))
+    try:
+        _ensure_team_chat_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                m.role,
+                m.content,
+                m.created_at,
+                m.author_user_id,
+                m.author_username,
+                m.attachment_id,
+                COALESCE(a.file_name, '') AS attachment_name,
+                COALESCE(a.content_type, '') AS attachment_content_type,
+                COALESCE(a.file_size, 0) AS attachment_size
+            FROM (
+                SELECT
+                    id,
+                    role,
+                    content,
+                    created_at,
+                    author_user_id,
+                    author_username,
+                    attachment_id
+                FROM team_chat_messages
+                WHERE conversation_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+            ) m
+            LEFT JOIN team_chat_attachments a ON a.id = m.attachment_id
+            ORDER BY m.id ASC
+            """,
+            (resolved_conversation_id, int(max(1, limit))),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return [
+        {
+            "role": str(row["role"] or "").strip(),
+            "content": str(row["content"] or "").strip(),
+            "created_at": str(row["created_at"] or "").strip(),
+            "author_user_id": str(row["author_user_id"] or "0"),
+            "author_username": str(row["author_username"] or "").strip(),
+            "attachment_id": int(row["attachment_id"]) if row["attachment_id"] is not None else None,
+            "attachment_name": str(row["attachment_name"] or "").strip(),
+            "attachment_content_type": str(row["attachment_content_type"] or "").strip(),
+            "attachment_size": int(row["attachment_size"] or 0),
+        }
+        for row in rows
+        if (
+            str(row["role"] or "").strip() in {"user", "assistant", "system", "tool"}
+            and (
+                str(row["content"] or "").strip()
+                or row["attachment_id"] is not None
+            )
+        )
+    ]
+
+
+def get_team_chat_attachment(team: Group, *, attachment_id: int) -> dict[str, Any] | None:
+    resolved_attachment_id = int(attachment_id or 0)
+    if resolved_attachment_id <= 0:
+        return None
+    conn = _connect_sqlite(_team_chat_db_path(team))
+    try:
+        _ensure_team_chat_schema(conn)
+        row = conn.execute(
+            """
+            SELECT id, file_name, content_type, file_size, file_blob, created_at
+            FROM team_chat_attachments
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (resolved_attachment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"] or 0),
+            "file_name": str(row["file_name"] or ""),
+            "content_type": str(row["content_type"] or "application/octet-stream"),
+            "file_size": int(row["file_size"] or 0),
+            "file_blob": row["file_blob"] or b"",
+            "created_at": str(row["created_at"] or ""),
+        }
+    finally:
+        conn.close()
+
+
+_DEFAULT_TEAM_CHAT_NOTIFICATION_SETTINGS: dict[str, bool] = {
+    "team_chat_app_enabled": True,
+    "team_chat_sms_enabled": False,
+    "team_chat_email_enabled": False,
+}
+
+_ALERT_FILTER_PROMPT_MAX_CHARS = 16000
+
+
+def get_team_chat_notification_settings(team: Group, *, user_id: int) -> dict[str, bool]:
+    resolved_user_id = int(user_id or 0)
+    if resolved_user_id <= 0:
+        return dict(_DEFAULT_TEAM_CHAT_NOTIFICATION_SETTINGS)
+    conn = _connect_sqlite(_team_chat_db_path(team))
+    try:
+        _ensure_team_chat_schema(conn)
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(team_chat_app_enabled, 1) AS team_chat_app_enabled,
+                COALESCE(team_chat_sms_enabled, 0) AS team_chat_sms_enabled,
+                COALESCE(team_chat_email_enabled, 0) AS team_chat_email_enabled
+            FROM team_chat_notification_settings
+            WHERE team_id = ? AND user_id = ?
+            LIMIT 1
+            """,
+            (int(team.id), resolved_user_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return dict(_DEFAULT_TEAM_CHAT_NOTIFICATION_SETTINGS)
+    return {
+        "team_chat_app_enabled": bool(int(row["team_chat_app_enabled"] or 0)),
+        "team_chat_sms_enabled": bool(int(row["team_chat_sms_enabled"] or 0)),
+        "team_chat_email_enabled": bool(int(row["team_chat_email_enabled"] or 0)),
+    }
+
+
+def upsert_team_chat_notification_settings(
+    team: Group,
+    *,
+    user_id: int,
+    payload: dict[str, Any] | None,
+) -> dict[str, bool]:
+    resolved_user_id = int(user_id or 0)
+    if resolved_user_id <= 0:
+        return dict(_DEFAULT_TEAM_CHAT_NOTIFICATION_SETTINGS)
+    source = payload if isinstance(payload, dict) else {}
+    normalized = {
+        "team_chat_app_enabled": bool(source.get("team_chat_app_enabled", True)),
+        "team_chat_sms_enabled": bool(source.get("team_chat_sms_enabled", False)),
+        "team_chat_email_enabled": bool(source.get("team_chat_email_enabled", False)),
+    }
+    conn = _connect_sqlite(_team_chat_db_path(team))
+    try:
+        _ensure_team_chat_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO team_chat_notification_settings (
+                team_id,
+                user_id,
+                team_chat_app_enabled,
+                team_chat_sms_enabled,
+                team_chat_email_enabled,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            ON CONFLICT(team_id, user_id) DO UPDATE SET
+                team_chat_app_enabled = excluded.team_chat_app_enabled,
+                team_chat_sms_enabled = excluded.team_chat_sms_enabled,
+                team_chat_email_enabled = excluded.team_chat_email_enabled,
+                updated_at = datetime('now')
+            """,
+            (
+                int(team.id),
+                resolved_user_id,
+                1 if normalized["team_chat_app_enabled"] else 0,
+                1 if normalized["team_chat_sms_enabled"] else 0,
+                1 if normalized["team_chat_email_enabled"] else 0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return normalized
+
+
+_DEFAULT_CALENDAR_NOTIFICATION_SETTINGS: dict[str, bool] = {
+    "calendar_events_app_enabled": True,
+    "calendar_events_sms_enabled": False,
+    "calendar_events_email_enabled": False,
+}
+
+
+def get_user_calendar_notification_settings(user) -> dict[str, Any]:
+    resolved_user_id = int(getattr(user, "id", 0) or 0)
+    result: dict[str, Any] = {
+        "user_id": resolved_user_id,
+        "updated_at": "",
+    }
+    result.update(_DEFAULT_CALENDAR_NOTIFICATION_SETTINGS)
+    if resolved_user_id <= 0:
+        return result
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT
+                user_id,
+                COALESCE(calendar_events_app_enabled, 1) AS calendar_events_app_enabled,
+                COALESCE(calendar_events_sms_enabled, 0) AS calendar_events_sms_enabled,
+                COALESCE(calendar_events_email_enabled, 0) AS calendar_events_email_enabled,
+                COALESCE(updated_at, '') AS updated_at
+            FROM calendar_notification_settings
+            WHERE user_id = ?
+            LIMIT 1
+            """,
+            (resolved_user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return result
+
+    result["calendar_events_app_enabled"] = bool(int(row["calendar_events_app_enabled"] or 0))
+    result["calendar_events_sms_enabled"] = bool(int(row["calendar_events_sms_enabled"] or 0))
+    result["calendar_events_email_enabled"] = bool(int(row["calendar_events_email_enabled"] or 0))
+    result["updated_at"] = str(row["updated_at"] or "")
+    return result
+
+
+def upsert_user_calendar_notification_settings(
+    user,
+    *,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolved_user_id = int(getattr(user, "id", 0) or 0)
+    if resolved_user_id <= 0:
+        return get_user_calendar_notification_settings(user)
+
+    source = payload if isinstance(payload, dict) else {}
+    normalized = {
+        "calendar_events_app_enabled": bool(source.get("calendar_events_app_enabled", True)),
+        "calendar_events_sms_enabled": bool(source.get("calendar_events_sms_enabled", False)),
+        "calendar_events_email_enabled": bool(source.get("calendar_events_email_enabled", False)),
+    }
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO calendar_notification_settings (
+                user_id,
+                calendar_events_app_enabled,
+                calendar_events_sms_enabled,
+                calendar_events_email_enabled,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                calendar_events_app_enabled = excluded.calendar_events_app_enabled,
+                calendar_events_sms_enabled = excluded.calendar_events_sms_enabled,
+                calendar_events_email_enabled = excluded.calendar_events_email_enabled,
+                updated_at = datetime('now')
+            """,
+            (
+                resolved_user_id,
+                1 if normalized["calendar_events_app_enabled"] else 0,
+                1 if normalized["calendar_events_sms_enabled"] else 0,
+                1 if normalized["calendar_events_email_enabled"] else 0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_user_calendar_notification_settings(user)
+
+
+def _normalize_alert_filter_prompt(value: str) -> str:
+    normalized = str(value or "").replace("\r", "").strip()
+    if len(normalized) > _ALERT_FILTER_PROMPT_MAX_CHARS:
+        normalized = normalized[:_ALERT_FILTER_PROMPT_MAX_CHARS]
+    return normalized
+
+
+def get_user_alert_filter_prompt(user) -> dict[str, str]:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(prompt, '') AS prompt,
+                COALESCE(updated_at, '') AS updated_at
+            FROM alert_filter_prompt
+            WHERE id = 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return {"prompt": "", "updated_at": ""}
+        return {
+            "prompt": str(row["prompt"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+    finally:
+        conn.close()
+
+
+def update_user_alert_filter_prompt(
+    user,
+    *,
+    prompt: str = "",
+    mode: str = "replace",
+) -> dict[str, str]:
+    resolved_mode = str(mode or "").strip().lower() or "replace"
+    if resolved_mode not in {"replace", "append", "clear"}:
+        raise ValueError("mode must be one of: replace, append, clear")
+
+    incoming_prompt = _normalize_alert_filter_prompt(prompt)
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        current_row = conn.execute(
+            """
+            SELECT COALESCE(prompt, '') AS prompt
+            FROM alert_filter_prompt
+            WHERE id = 1
+            LIMIT 1
+            """
+        ).fetchone()
+        current_prompt = str(current_row["prompt"] or "") if current_row is not None else ""
+
+        if resolved_mode == "clear":
+            next_prompt = ""
+        elif resolved_mode == "append":
+            if current_prompt and incoming_prompt:
+                next_prompt = f"{current_prompt}\n{incoming_prompt}"
+            else:
+                next_prompt = current_prompt or incoming_prompt
+        else:
+            next_prompt = incoming_prompt
+
+        next_prompt = _normalize_alert_filter_prompt(next_prompt)
+        conn.execute(
+            """
+            INSERT INTO alert_filter_prompt (id, prompt, updated_at)
+            VALUES (1, ?, datetime('now'))
+            ON CONFLICT(id) DO UPDATE SET
+                prompt = excluded.prompt,
+                updated_at = datetime('now')
+            """,
+            (next_prompt,),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(prompt, '') AS prompt,
+                COALESCE(updated_at, '') AS updated_at
+            FROM alert_filter_prompt
+            WHERE id = 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return {"prompt": "", "updated_at": ""}
+        return {
+            "prompt": str(row["prompt"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+    finally:
+        conn.close()
+
+
+def add_team_chat_tool_event(
+    team: Group,
+    *,
+    actor_user=None,
+    conversation_id: str = "default",
+    kind: str,
+    tool_name: str,
+    tool_call_id: str = "",
+    tool_args_json: str = "",
+    tool_result_json: str = "",
+    content: str = "",
+) -> int:
+    resolved_kind = str(kind or "").strip().lower()
+    if resolved_kind not in {"tool_call", "tool_result"}:
+        raise ValueError("kind must be one of: tool_call, tool_result")
+    resolved_tool_name = str(tool_name or "").strip()
+    if not resolved_tool_name:
+        raise ValueError("tool_name is required")
+    resolved_content = str(content or "").strip()
+    if not resolved_content:
+        resolved_content = f"[{resolved_kind}] {resolved_tool_name}"
+    resolved_conversation_id = str(conversation_id or "").strip() or "default"
+
+    author_user_id = int(getattr(actor_user, "id", 0) or 0)
+    author_username = str(getattr(actor_user, "username", "") or "").strip()
+
+    conn = _connect_sqlite(_team_chat_db_path(team))
+    try:
+        _ensure_team_chat_schema(conn)
+        cursor = conn.execute(
+            """
+            INSERT INTO team_chat_messages (
+                conversation_id, role, content, author_user_id, author_username, message_kind, tool_name, tool_call_id, tool_args_json, tool_result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_conversation_id,
+                "tool",
+                resolved_content,
+                author_user_id,
+                author_username,
+                resolved_kind,
+                resolved_tool_name,
+                str(tool_call_id or "").strip(),
+                str(tool_args_json or "").strip(),
+                str(tool_result_json or "").strip(),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
+
+
 def list_resource_notes(user, resource_uuid: str, limit: int = 200) -> list[ResourceNoteItem]:
     resolved_uuid = str(resource_uuid or "").strip()
     if not resolved_uuid:
@@ -2118,6 +3147,1634 @@ def clear_user_notifications(user) -> int:
         return int(cursor.rowcount or 0)
     finally:
         conn.close()
+
+
+def get_user_asana_task_cache(user, *, cache_key: str = "overview") -> dict[str, Any] | None:
+    resolved_cache_key = str(cache_key or "").strip() or "overview"
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(payload_json, '{}') AS payload_json,
+                COALESCE(fetched_at_epoch, 0) AS fetched_at_epoch
+            FROM asana_task_cache
+            WHERE cache_key = ?
+            LIMIT 1
+            """,
+            (resolved_cache_key,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        fetched_at_epoch = int(row["fetched_at_epoch"] or 0)
+    except (TypeError, ValueError):
+        fetched_at_epoch = 0
+    return {
+        "cache_key": resolved_cache_key,
+        "fetched_at_epoch": fetched_at_epoch,
+        "payload": payload,
+    }
+
+
+def set_user_asana_task_cache(
+    user,
+    *,
+    payload: dict[str, Any],
+    cache_key: str = "overview",
+    fetched_at_epoch: int | None = None,
+) -> None:
+    resolved_cache_key = str(cache_key or "").strip() or "overview"
+    resolved_payload = payload if isinstance(payload, dict) else {}
+    resolved_fetched_at_epoch = int(fetched_at_epoch if fetched_at_epoch is not None else 0)
+    if resolved_fetched_at_epoch <= 0:
+        resolved_fetched_at_epoch = 0
+    payload_json = json.dumps(resolved_payload, separators=(",", ":"))
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO asana_task_cache (
+                cache_key,
+                payload_json,
+                fetched_at_epoch,
+                updated_at
+            ) VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(cache_key) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                fetched_at_epoch = excluded.fetched_at_epoch,
+                updated_at = datetime('now')
+            """,
+            (
+                resolved_cache_key,
+                payload_json,
+                resolved_fetched_at_epoch,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _normalize_resource_uuid_list(values: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        candidate = str(raw or "").strip().lower()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized
+
+
+def _normalize_agenda_item_payload(item: dict[str, Any] | None) -> dict[str, Any]:
+    source = str((item or {}).get("source") or "").strip().lower()
+    item_id = str((item or {}).get("item_id") or (item or {}).get("id") or "").strip()
+    source_item_id = str(
+        (item or {}).get("source_item_id")
+        or (item or {}).get("task_gid")
+        or (item or {}).get("event_id")
+        or ""
+    ).strip()
+    title = str((item or {}).get("title") or "").strip()
+    due_date = str((item or {}).get("date") or "").strip()
+    due_time = str((item or {}).get("time") or "").strip()
+    due_at = str((item or {}).get("due_at") or "").strip()
+    item_url = str((item or {}).get("url") or "").strip()
+    item_meta = str((item or {}).get("meta") or "").strip()
+    is_completed = bool((item or {}).get("done") or (item or {}).get("is_completed"))
+    try:
+        payload_json = json.dumps(item or {}, separators=(",", ":"))
+    except (TypeError, ValueError):
+        payload_json = "{}"
+    return {
+        "item_id": item_id,
+        "source": source,
+        "source_item_id": source_item_id,
+        "title": title,
+        "due_date": due_date,
+        "due_time": due_time,
+        "due_at": due_at,
+        "item_url": item_url,
+        "item_meta": item_meta,
+        "is_completed": is_completed,
+        "payload_json": payload_json,
+    }
+
+
+def _upsert_resource_agenda_task(
+    user,
+    *,
+    resource_uuid: str,
+    agenda_item: dict[str, Any],
+    assigned_by_user_id: int = 0,
+    assigned_by_username: str = "",
+) -> None:
+    resolved_resource_uuid = str(resource_uuid or "").strip().lower()
+    normalized_item = _normalize_agenda_item_payload(agenda_item)
+    resolved_item_id = str(normalized_item["item_id"] or "").strip()
+    if not resolved_resource_uuid or not resolved_item_id:
+        return
+    conn = _connect_resource(user, resolved_resource_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO resource_agenda_tasks (
+                item_id,
+                source,
+                source_item_id,
+                title,
+                due_date,
+                due_time,
+                due_at,
+                item_url,
+                item_meta,
+                is_completed,
+                payload_json,
+                assigned_by_user_id,
+                assigned_by_username,
+                assigned_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            ON CONFLICT(item_id) DO UPDATE SET
+                source = excluded.source,
+                source_item_id = excluded.source_item_id,
+                title = excluded.title,
+                due_date = excluded.due_date,
+                due_time = excluded.due_time,
+                due_at = excluded.due_at,
+                item_url = excluded.item_url,
+                item_meta = excluded.item_meta,
+                is_completed = excluded.is_completed,
+                payload_json = excluded.payload_json,
+                assigned_by_user_id = excluded.assigned_by_user_id,
+                assigned_by_username = excluded.assigned_by_username,
+                updated_at = datetime('now')
+            """,
+            (
+                resolved_item_id,
+                str(normalized_item["source"] or "").strip(),
+                str(normalized_item["source_item_id"] or "").strip(),
+                str(normalized_item["title"] or "").strip(),
+                str(normalized_item["due_date"] or "").strip(),
+                str(normalized_item["due_time"] or "").strip(),
+                str(normalized_item["due_at"] or "").strip(),
+                str(normalized_item["item_url"] or "").strip(),
+                str(normalized_item["item_meta"] or "").strip(),
+                1 if bool(normalized_item["is_completed"]) else 0,
+                str(normalized_item["payload_json"] or "{}"),
+                int(assigned_by_user_id or 0),
+                str(assigned_by_username or "").strip(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _delete_resource_agenda_task(user, *, resource_uuid: str, item_id: str) -> None:
+    resolved_resource_uuid = str(resource_uuid or "").strip().lower()
+    resolved_item_id = str(item_id or "").strip()
+    if not resolved_resource_uuid or not resolved_item_id:
+        return
+    conn = _connect_resource(user, resolved_resource_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        conn.execute(
+            "DELETE FROM resource_agenda_tasks WHERE item_id = ?",
+            (resolved_item_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_user_asana_board_resource_mappings(user) -> dict[str, list[str]]:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                COALESCE(board_gid, '') AS board_gid,
+                COALESCE(resource_uuid, '') AS resource_uuid
+            FROM asana_board_resource_map
+            ORDER BY COALESCE(board_gid, '') ASC, COALESCE(resource_uuid, '') ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    mappings: dict[str, list[str]] = {}
+    for row in rows:
+        board_gid = str(row["board_gid"] or "").strip()
+        resource_uuid = str(row["resource_uuid"] or "").strip().lower()
+        if not board_gid or not resource_uuid:
+            continue
+        if board_gid not in mappings:
+            mappings[board_gid] = []
+        if resource_uuid not in mappings[board_gid]:
+            mappings[board_gid].append(resource_uuid)
+    return mappings
+
+
+def list_user_asana_task_resource_mappings(user) -> dict[str, list[str]]:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                COALESCE(task_gid, '') AS task_gid,
+                COALESCE(resource_uuid, '') AS resource_uuid
+            FROM asana_task_resource_map
+            ORDER BY COALESCE(task_gid, '') ASC, COALESCE(resource_uuid, '') ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    mappings: dict[str, list[str]] = {}
+    for row in rows:
+        task_gid = str(row["task_gid"] or "").strip()
+        resource_uuid = str(row["resource_uuid"] or "").strip().lower()
+        if not task_gid or not resource_uuid:
+            continue
+        if task_gid not in mappings:
+            mappings[task_gid] = []
+        if resource_uuid not in mappings[task_gid]:
+            mappings[task_gid].append(resource_uuid)
+    return mappings
+
+
+def set_user_asana_board_resource_mapping(
+    user,
+    *,
+    board_gid: str,
+    resource_uuids: list[str] | tuple[str, ...] | set[str] | None,
+) -> list[str]:
+    resolved_board_gid = str(board_gid or "").strip()
+    if not resolved_board_gid:
+        return []
+    normalized_resource_uuids = _normalize_resource_uuid_list(resource_uuids)
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        conn.execute(
+            "DELETE FROM asana_board_resource_map WHERE board_gid = ?",
+            (resolved_board_gid,),
+        )
+        if normalized_resource_uuids:
+            conn.executemany(
+                """
+                INSERT INTO asana_board_resource_map (
+                    board_gid,
+                    resource_uuid,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, datetime('now'), datetime('now'))
+                """,
+                [
+                    (resolved_board_gid, resource_uuid)
+                    for resource_uuid in normalized_resource_uuids
+                ],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return normalized_resource_uuids
+
+
+def set_user_asana_task_resource_mapping(
+    user,
+    *,
+    task_gid: str,
+    resource_uuids: list[str] | tuple[str, ...] | set[str] | None,
+) -> list[str]:
+    resolved_task_gid = str(task_gid or "").strip()
+    if not resolved_task_gid:
+        return []
+    normalized_resource_uuids = _normalize_resource_uuid_list(resource_uuids)
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        conn.execute(
+            "DELETE FROM asana_task_resource_map WHERE task_gid = ?",
+            (resolved_task_gid,),
+        )
+        if normalized_resource_uuids:
+            conn.executemany(
+                """
+                INSERT INTO asana_task_resource_map (
+                    task_gid,
+                    resource_uuid,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, datetime('now'), datetime('now'))
+                """,
+                [
+                    (resolved_task_gid, resource_uuid)
+                    for resource_uuid in normalized_resource_uuids
+                ],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return normalized_resource_uuids
+
+
+def list_user_agenda_item_resource_mappings(user) -> dict[str, list[str]]:
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                COALESCE(item_id, '') AS item_id,
+                COALESCE(resource_uuid, '') AS resource_uuid
+            FROM agenda_item_resource_map
+            ORDER BY COALESCE(item_id, '') ASC, COALESCE(resource_uuid, '') ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    mappings: dict[str, list[str]] = {}
+    for row in rows:
+        item_id = str(row["item_id"] or "").strip()
+        resource_uuid = str(row["resource_uuid"] or "").strip().lower()
+        if not item_id or not resource_uuid:
+            continue
+        if item_id not in mappings:
+            mappings[item_id] = []
+        if resource_uuid not in mappings[item_id]:
+            mappings[item_id].append(resource_uuid)
+    return mappings
+
+
+def set_user_agenda_item_resource_mapping(
+    user,
+    *,
+    item: dict[str, Any] | None,
+    resource_uuids: list[str] | tuple[str, ...] | set[str] | None,
+) -> list[str]:
+    normalized_item = _normalize_agenda_item_payload(item)
+    resolved_item_id = str(normalized_item["item_id"] or "").strip()
+    if not resolved_item_id:
+        return []
+    normalized_resource_uuids = _normalize_resource_uuid_list(resource_uuids)
+
+    conn = _connect(user)
+    previous_resource_uuids: list[str] = []
+    try:
+        _ensure_schema(conn)
+        previous_rows = conn.execute(
+            """
+            SELECT COALESCE(resource_uuid, '') AS resource_uuid
+            FROM agenda_item_resource_map
+            WHERE item_id = ?
+            """,
+            (resolved_item_id,),
+        ).fetchall()
+        previous_resource_uuids = _normalize_resource_uuid_list(
+            [str(row["resource_uuid"] or "").strip().lower() for row in previous_rows]
+        )
+
+        conn.execute(
+            "DELETE FROM agenda_item_resource_map WHERE item_id = ?",
+            (resolved_item_id,),
+        )
+        if normalized_resource_uuids:
+            conn.executemany(
+                """
+                INSERT INTO agenda_item_resource_map (
+                    item_id,
+                    source,
+                    source_item_id,
+                    resource_uuid,
+                    title,
+                    due_date,
+                    due_time,
+                    due_at,
+                    item_url,
+                    item_meta,
+                    is_completed,
+                    payload_json,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                """,
+                [
+                    (
+                        resolved_item_id,
+                        str(normalized_item["source"] or "").strip(),
+                        str(normalized_item["source_item_id"] or "").strip(),
+                        resource_uuid,
+                        str(normalized_item["title"] or "").strip(),
+                        str(normalized_item["due_date"] or "").strip(),
+                        str(normalized_item["due_time"] or "").strip(),
+                        str(normalized_item["due_at"] or "").strip(),
+                        str(normalized_item["item_url"] or "").strip(),
+                        str(normalized_item["item_meta"] or "").strip(),
+                        1 if bool(normalized_item["is_completed"]) else 0,
+                        str(normalized_item["payload_json"] or "{}"),
+                    )
+                    for resource_uuid in normalized_resource_uuids
+                ],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    next_set = set(normalized_resource_uuids)
+    previous_set = set(previous_resource_uuids)
+    removed_resource_uuids = sorted(previous_set - next_set)
+    added_or_retained_uuids = sorted(next_set)
+
+    for resource_uuid in removed_resource_uuids:
+        _delete_resource_agenda_task(user, resource_uuid=resource_uuid, item_id=resolved_item_id)
+    for resource_uuid in added_or_retained_uuids:
+        _upsert_resource_agenda_task(
+            user,
+            resource_uuid=resource_uuid,
+            agenda_item=normalized_item,
+            assigned_by_user_id=int(getattr(user, "id", 0) or 0),
+            assigned_by_username=str(getattr(user, "username", "") or "").strip(),
+        )
+    return normalized_resource_uuids
+
+
+def list_resource_agenda_tasks(user, resource_uuid: str, limit: int = 200) -> list[dict[str, Any]]:
+    resolved_uuid = str(resource_uuid or "").strip().lower()
+    if not resolved_uuid:
+        return []
+    conn = _connect_resource(user, resolved_uuid)
+    try:
+        _ensure_resource_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                COALESCE(item_id, '') AS item_id,
+                COALESCE(source, '') AS source,
+                COALESCE(source_item_id, '') AS source_item_id,
+                COALESCE(title, '') AS title,
+                COALESCE(due_date, '') AS due_date,
+                COALESCE(due_time, '') AS due_time,
+                COALESCE(due_at, '') AS due_at,
+                COALESCE(item_url, '') AS item_url,
+                COALESCE(item_meta, '') AS item_meta,
+                COALESCE(is_completed, 0) AS is_completed,
+                COALESCE(payload_json, '{}') AS payload_json,
+                COALESCE(assigned_by_user_id, 0) AS assigned_by_user_id,
+                COALESCE(assigned_by_username, '') AS assigned_by_username,
+                COALESCE(assigned_at, '') AS assigned_at,
+                COALESCE(updated_at, '') AS updated_at
+            FROM resource_agenda_tasks
+            ORDER BY
+                CASE WHEN COALESCE(is_completed, 0) = 1 THEN 1 ELSE 0 END ASC,
+                COALESCE(due_date, '') ASC,
+                COALESCE(due_time, '') ASC,
+                id DESC
+            LIMIT ?
+            """,
+            (int(max(1, limit)),),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    task_rows: list[dict[str, Any]] = []
+    for row in rows:
+        payload = _json_loads_or(row["payload_json"], default={})
+        if not isinstance(payload, dict):
+            payload = {}
+        task_rows.append(
+            {
+                "id": int(row["id"] or 0),
+                "item_id": str(row["item_id"] or "").strip(),
+                "source": str(row["source"] or "").strip(),
+                "source_item_id": str(row["source_item_id"] or "").strip(),
+                "title": str(row["title"] or "").strip(),
+                "due_date": str(row["due_date"] or "").strip(),
+                "due_time": str(row["due_time"] or "").strip(),
+                "due_at": str(row["due_at"] or "").strip(),
+                "item_url": str(row["item_url"] or "").strip(),
+                "item_meta": str(row["item_meta"] or "").strip(),
+                "is_completed": bool(int(row["is_completed"] or 0)),
+                "payload": payload,
+                "assigned_by_user_id": int(row["assigned_by_user_id"] or 0),
+                "assigned_by_username": str(row["assigned_by_username"] or "").strip(),
+                "assigned_at": str(row["assigned_at"] or "").strip(),
+                "updated_at": str(row["updated_at"] or "").strip(),
+            }
+        )
+    return task_rows
+
+
+def replace_user_calendar_event_cache(
+    user,
+    *,
+    provider: str,
+    events: list[dict[str, Any]],
+    fetched_at_epoch: int | None = None,
+    status: str = "ok",
+    message: str = "",
+) -> int:
+    resolved_provider = str(provider or "").strip().lower()
+    if not resolved_provider:
+        return 0
+    resolved_fetched_at_epoch = int(fetched_at_epoch if fetched_at_epoch is not None else 0)
+    if resolved_fetched_at_epoch < 0:
+        resolved_fetched_at_epoch = 0
+    resolved_status = str(status or "").strip().lower() or "ok"
+    resolved_message = str(message or "").strip()
+
+    normalized_rows: list[tuple[str, str, str, str, int, str, str, str]] = []
+    for raw in events if isinstance(events, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        event_id = str(raw.get("event_id") or raw.get("id") or "").strip()
+        if not event_id:
+            continue
+        title = str(raw.get("title") or "").strip()
+        due_date = str(raw.get("due_date") or raw.get("date") or "").strip()
+        due_time = str(raw.get("due_time") or raw.get("time") or "").strip()
+        completed = bool(raw.get("is_completed") or raw.get("completed") or raw.get("done"))
+        status_value = str(raw.get("status") or "").strip().lower() or ("completed" if completed else "open")
+        source_url = str(raw.get("source_url") or raw.get("url") or "").strip()
+        try:
+            payload_json = json.dumps(raw, separators=(",", ":"))
+        except (TypeError, ValueError):
+            payload_json = "{}"
+
+        normalized_rows.append(
+            (
+                event_id,
+                title,
+                due_date,
+                due_time,
+                1 if completed else 0,
+                status_value,
+                source_url,
+                payload_json,
+            )
+        )
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        conn.execute("DELETE FROM calendar_event_cache WHERE provider = ?", (resolved_provider,))
+        if normalized_rows:
+            conn.executemany(
+                """
+                INSERT INTO calendar_event_cache (
+                    provider,
+                    event_id,
+                    title,
+                    due_date,
+                    due_time,
+                    is_completed,
+                    status,
+                    source_url,
+                    payload_json,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                [
+                    (
+                        resolved_provider,
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5],
+                        row[6],
+                        row[7],
+                    )
+                    for row in normalized_rows
+                ],
+            )
+        conn.execute(
+            """
+            INSERT INTO calendar_sync_state (
+                provider,
+                fetched_at_epoch,
+                item_count,
+                status,
+                message,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(provider) DO UPDATE SET
+                fetched_at_epoch = excluded.fetched_at_epoch,
+                item_count = excluded.item_count,
+                status = excluded.status,
+                message = excluded.message,
+                updated_at = datetime('now')
+            """,
+            (
+                resolved_provider,
+                resolved_fetched_at_epoch,
+                len(normalized_rows),
+                resolved_status,
+                resolved_message,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return len(normalized_rows)
+
+
+def list_user_calendar_event_cache(
+    user,
+    *,
+    provider: str = "",
+    limit: int = 500,
+    include_completed: bool = True,
+) -> list[dict[str, Any]]:
+    resolved_provider = str(provider or "").strip().lower()
+    resolved_limit = max(1, min(int(limit or 500), 5000))
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        params: list[Any] = []
+        where_parts: list[str] = []
+        if resolved_provider:
+            where_parts.append("provider = ?")
+            params.append(resolved_provider)
+        if not include_completed:
+            where_parts.append("COALESCE(is_completed, 0) = 0")
+
+        where_sql = ""
+        if where_parts:
+            where_sql = "WHERE " + " AND ".join(where_parts)
+        rows = conn.execute(
+            f"""
+            SELECT
+                COALESCE(provider, '') AS provider,
+                COALESCE(event_id, '') AS event_id,
+                COALESCE(title, '') AS title,
+                COALESCE(due_date, '') AS due_date,
+                COALESCE(due_time, '') AS due_time,
+                COALESCE(is_completed, 0) AS is_completed,
+                COALESCE(status, '') AS status,
+                COALESCE(source_url, '') AS source_url,
+                COALESCE(payload_json, '{{}}') AS payload_json,
+                COALESCE(updated_at, '') AS updated_at
+            FROM calendar_event_cache
+            {where_sql}
+            ORDER BY COALESCE(due_date, '') ASC, COALESCE(due_time, '') ASC, COALESCE(title, '') ASC
+            LIMIT ?
+            """,
+            (*params, resolved_limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        items.append(
+            {
+                "provider": str(row["provider"] or "").strip(),
+                "event_id": str(row["event_id"] or "").strip(),
+                "title": str(row["title"] or "").strip(),
+                "due_date": str(row["due_date"] or "").strip(),
+                "due_time": str(row["due_time"] or "").strip(),
+                "is_completed": bool(int(row["is_completed"] or 0)),
+                "status": str(row["status"] or "").strip(),
+                "source_url": str(row["source_url"] or "").strip(),
+                "payload": payload,
+                "updated_at": str(row["updated_at"] or "").strip(),
+            }
+        )
+    return items
+
+
+def get_user_calendar_sync_state(user, *, provider: str) -> dict[str, Any] | None:
+    resolved_provider = str(provider or "").strip().lower()
+    if not resolved_provider:
+        return None
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(provider, '') AS provider,
+                COALESCE(fetched_at_epoch, 0) AS fetched_at_epoch,
+                COALESCE(item_count, 0) AS item_count,
+                COALESCE(status, '') AS status,
+                COALESCE(message, '') AS message,
+                COALESCE(updated_at, '') AS updated_at
+            FROM calendar_sync_state
+            WHERE provider = ?
+            LIMIT 1
+            """,
+            (resolved_provider,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return None
+    try:
+        fetched_at_epoch = int(row["fetched_at_epoch"] or 0)
+    except (TypeError, ValueError):
+        fetched_at_epoch = 0
+    try:
+        item_count = int(row["item_count"] or 0)
+    except (TypeError, ValueError):
+        item_count = 0
+    return {
+        "provider": str(row["provider"] or "").strip().lower(),
+        "fetched_at_epoch": fetched_at_epoch,
+        "item_count": item_count,
+        "status": str(row["status"] or "").strip().lower(),
+        "message": str(row["message"] or "").strip(),
+        "updated_at": str(row["updated_at"] or "").strip(),
+    }
+
+
+def set_user_calendar_sync_state(
+    user,
+    *,
+    provider: str,
+    fetched_at_epoch: int,
+    item_count: int,
+    status: str,
+    message: str = "",
+) -> None:
+    resolved_provider = str(provider or "").strip().lower()
+    if not resolved_provider:
+        return
+    resolved_status = str(status or "").strip().lower() or "ok"
+    resolved_message = str(message or "").strip()
+    resolved_epoch = int(fetched_at_epoch or 0)
+    resolved_item_count = max(0, int(item_count or 0))
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO calendar_sync_state (
+                provider,
+                fetched_at_epoch,
+                item_count,
+                status,
+                message,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(provider) DO UPDATE SET
+                fetched_at_epoch = excluded.fetched_at_epoch,
+                item_count = excluded.item_count,
+                status = excluded.status,
+                message = excluded.message,
+                updated_at = datetime('now')
+            """,
+            (
+                resolved_provider,
+                resolved_epoch,
+                resolved_item_count,
+                resolved_status,
+                resolved_message,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_user_calendar_event_completion(
+    user,
+    *,
+    provider: str,
+    event_id: str,
+    is_completed: bool,
+    status: str = "",
+) -> bool:
+    resolved_provider = str(provider or "").strip().lower()
+    resolved_event_id = str(event_id or "").strip()
+    if not resolved_provider or not resolved_event_id:
+        return False
+    resolved_status = str(status or "").strip().lower() or ("completed" if is_completed else "open")
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        cursor = conn.execute(
+            """
+            UPDATE calendar_event_cache
+            SET
+                is_completed = ?,
+                status = ?,
+                updated_at = datetime('now')
+            WHERE provider = ? AND event_id = ?
+            """,
+            (
+                1 if is_completed else 0,
+                resolved_status,
+                resolved_provider,
+                resolved_event_id,
+            ),
+        )
+        conn.commit()
+        return int(cursor.rowcount or 0) > 0
+    finally:
+        conn.close()
+
+
+def upsert_user_outlook_mail_cache(
+    user,
+    *,
+    messages: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+) -> int:
+    normalized_rows: list[tuple[Any, ...]] = []
+    for raw in messages or []:
+        if not isinstance(raw, dict):
+            continue
+        message_id = str(raw.get("message_id") or raw.get("id") or "").strip()
+        if not message_id:
+            continue
+        folder = str(raw.get("folder") or "inbox").strip().lower() or "inbox"
+        internet_message_id = str(raw.get("internet_message_id") or "").strip()
+        conversation_id = str(raw.get("conversation_id") or "").strip()
+        subject = str(raw.get("subject") or "").strip()
+        sender_email = str(raw.get("sender_email") or "").strip().lower()
+        sender_name = str(raw.get("sender_name") or "").strip()
+        received_at = str(raw.get("received_at") or "").strip()
+        sent_at = str(raw.get("sent_at") or "").strip()
+        body_preview = str(raw.get("body_preview") or "").strip()
+        body_text = str(raw.get("body_text") or "").strip()
+        web_link = str(raw.get("web_link") or "").strip()
+        is_read = 1 if bool(raw.get("is_read")) else 0
+        has_attachments = 1 if bool(raw.get("has_attachments")) else 0
+
+        to_recipients = raw.get("to_recipients")
+        cc_recipients = raw.get("cc_recipients")
+        if not isinstance(to_recipients, list):
+            to_recipients = []
+        if not isinstance(cc_recipients, list):
+            cc_recipients = []
+        to_recipients_json = json.dumps(
+            [str(item or "").strip().lower() for item in to_recipients if str(item or "").strip()],
+            separators=(",", ":"),
+        )
+        cc_recipients_json = json.dumps(
+            [str(item or "").strip().lower() for item in cc_recipients if str(item or "").strip()],
+            separators=(",", ":"),
+        )
+        raw_payload = raw.get("raw_payload") if isinstance(raw.get("raw_payload"), dict) else raw
+        try:
+            raw_payload_json = json.dumps(raw_payload, separators=(",", ":"))
+        except (TypeError, ValueError):
+            raw_payload_json = "{}"
+
+        normalized_rows.append(
+            (
+                message_id,
+                folder,
+                internet_message_id,
+                conversation_id,
+                subject,
+                sender_email,
+                sender_name,
+                to_recipients_json,
+                cc_recipients_json,
+                received_at,
+                sent_at,
+                body_preview,
+                body_text,
+                web_link,
+                is_read,
+                has_attachments,
+                raw_payload_json,
+            )
+        )
+
+    if not normalized_rows:
+        return 0
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO outlook_mail_cache (
+                message_id,
+                folder,
+                internet_message_id,
+                conversation_id,
+                subject,
+                sender_email,
+                sender_name,
+                to_recipients_json,
+                cc_recipients_json,
+                received_at,
+                sent_at,
+                body_preview,
+                body_text,
+                web_link,
+                is_read,
+                has_attachments,
+                raw_payload_json,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(message_id) DO UPDATE SET
+                folder = excluded.folder,
+                internet_message_id = excluded.internet_message_id,
+                conversation_id = excluded.conversation_id,
+                subject = excluded.subject,
+                sender_email = excluded.sender_email,
+                sender_name = excluded.sender_name,
+                to_recipients_json = excluded.to_recipients_json,
+                cc_recipients_json = excluded.cc_recipients_json,
+                received_at = excluded.received_at,
+                sent_at = excluded.sent_at,
+                body_preview = excluded.body_preview,
+                body_text = excluded.body_text,
+                web_link = excluded.web_link,
+                is_read = excluded.is_read,
+                has_attachments = excluded.has_attachments,
+                raw_payload_json = excluded.raw_payload_json,
+                updated_at = datetime('now')
+            """,
+            normalized_rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return len(normalized_rows)
+
+
+def list_user_outlook_mail_cache(
+    user,
+    *,
+    query: str = "",
+    limit: int = 40,
+    folder: str = "",
+    include_body: bool = False,
+) -> list[dict[str, Any]]:
+    resolved_query = str(query or "").strip().lower()
+    resolved_folder = str(folder or "").strip().lower()
+    resolved_limit = max(1, min(int(limit or 40), 500))
+
+    where_parts: list[str] = []
+    params: list[Any] = []
+    if resolved_folder and resolved_folder != "all":
+        where_parts.append("folder = ?")
+        params.append(resolved_folder)
+    if resolved_query:
+        searchable_parts = [
+            "lower(COALESCE(subject, '')) LIKE ?",
+            "lower(COALESCE(sender_email, '')) LIKE ?",
+            "lower(COALESCE(sender_name, '')) LIKE ?",
+            "lower(COALESCE(body_preview, '')) LIKE ?",
+            "lower(COALESCE(conversation_id, '')) LIKE ?",
+        ]
+        if include_body:
+            searchable_parts.append("lower(COALESCE(body_text, '')) LIKE ?")
+        where_parts.append(f"({' OR '.join(searchable_parts)})")
+        like_value = f"%{resolved_query}%"
+        params.extend([like_value for _ in searchable_parts])
+
+    where_sql = ""
+    if where_parts:
+        where_sql = "WHERE " + " AND ".join(where_parts)
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            f"""
+            SELECT
+                COALESCE(message_id, '') AS message_id,
+                COALESCE(folder, 'inbox') AS folder,
+                COALESCE(internet_message_id, '') AS internet_message_id,
+                COALESCE(conversation_id, '') AS conversation_id,
+                COALESCE(subject, '') AS subject,
+                COALESCE(sender_email, '') AS sender_email,
+                COALESCE(sender_name, '') AS sender_name,
+                COALESCE(to_recipients_json, '[]') AS to_recipients_json,
+                COALESCE(cc_recipients_json, '[]') AS cc_recipients_json,
+                COALESCE(received_at, '') AS received_at,
+                COALESCE(sent_at, '') AS sent_at,
+                COALESCE(body_preview, '') AS body_preview,
+                COALESCE(body_text, '') AS body_text,
+                COALESCE(web_link, '') AS web_link,
+                COALESCE(is_read, 0) AS is_read,
+                COALESCE(has_attachments, 0) AS has_attachments,
+                COALESCE(raw_payload_json, '{{}}') AS raw_payload_json,
+                COALESCE(updated_at, '') AS updated_at
+            FROM outlook_mail_cache
+            {where_sql}
+            ORDER BY
+                CASE WHEN COALESCE(received_at, '') = '' THEN 1 ELSE 0 END ASC,
+                COALESCE(received_at, '') DESC,
+                COALESCE(updated_at, '') DESC
+            LIMIT ?
+            """,
+            (*params, resolved_limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            to_recipients = json.loads(str(row["to_recipients_json"] or "[]"))
+        except (TypeError, ValueError):
+            to_recipients = []
+        try:
+            cc_recipients = json.loads(str(row["cc_recipients_json"] or "[]"))
+        except (TypeError, ValueError):
+            cc_recipients = []
+        if not isinstance(to_recipients, list):
+            to_recipients = []
+        if not isinstance(cc_recipients, list):
+            cc_recipients = []
+        try:
+            raw_payload = json.loads(str(row["raw_payload_json"] or "{}"))
+        except (TypeError, ValueError):
+            raw_payload = {}
+        if not isinstance(raw_payload, dict):
+            raw_payload = {}
+
+        items.append(
+            {
+                "message_id": str(row["message_id"] or "").strip(),
+                "folder": str(row["folder"] or "inbox").strip().lower() or "inbox",
+                "internet_message_id": str(row["internet_message_id"] or "").strip(),
+                "conversation_id": str(row["conversation_id"] or "").strip(),
+                "subject": str(row["subject"] or "").strip(),
+                "sender_email": str(row["sender_email"] or "").strip().lower(),
+                "sender_name": str(row["sender_name"] or "").strip(),
+                "to_recipients": [str(item or "").strip().lower() for item in to_recipients if str(item or "").strip()],
+                "cc_recipients": [str(item or "").strip().lower() for item in cc_recipients if str(item or "").strip()],
+                "received_at": str(row["received_at"] or "").strip(),
+                "sent_at": str(row["sent_at"] or "").strip(),
+                "body_preview": str(row["body_preview"] or "").strip(),
+                "body_text": str(row["body_text"] or "").strip(),
+                "web_link": str(row["web_link"] or "").strip(),
+                "is_read": bool(int(row["is_read"] or 0)),
+                "has_attachments": bool(int(row["has_attachments"] or 0)),
+                "raw_payload": raw_payload,
+                "updated_at": str(row["updated_at"] or "").strip(),
+            }
+        )
+    return items
+
+
+def get_user_outlook_mail_cache_message(
+    user,
+    *,
+    message_id: str,
+) -> dict[str, Any] | None:
+    resolved_message_id = str(message_id or "").strip()
+    if not resolved_message_id:
+        return None
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(message_id, '') AS message_id,
+                COALESCE(folder, 'inbox') AS folder,
+                COALESCE(internet_message_id, '') AS internet_message_id,
+                COALESCE(conversation_id, '') AS conversation_id,
+                COALESCE(subject, '') AS subject,
+                COALESCE(sender_email, '') AS sender_email,
+                COALESCE(sender_name, '') AS sender_name,
+                COALESCE(to_recipients_json, '[]') AS to_recipients_json,
+                COALESCE(cc_recipients_json, '[]') AS cc_recipients_json,
+                COALESCE(received_at, '') AS received_at,
+                COALESCE(sent_at, '') AS sent_at,
+                COALESCE(body_preview, '') AS body_preview,
+                COALESCE(body_text, '') AS body_text,
+                COALESCE(web_link, '') AS web_link,
+                COALESCE(is_read, 0) AS is_read,
+                COALESCE(has_attachments, 0) AS has_attachments,
+                COALESCE(raw_payload_json, '{}') AS raw_payload_json,
+                COALESCE(updated_at, '') AS updated_at
+            FROM outlook_mail_cache
+            WHERE message_id = ?
+            LIMIT 1
+            """,
+            (resolved_message_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+
+    try:
+        to_recipients = json.loads(str(row["to_recipients_json"] or "[]"))
+    except (TypeError, ValueError):
+        to_recipients = []
+    try:
+        cc_recipients = json.loads(str(row["cc_recipients_json"] or "[]"))
+    except (TypeError, ValueError):
+        cc_recipients = []
+    try:
+        raw_payload = json.loads(str(row["raw_payload_json"] or "{}"))
+    except (TypeError, ValueError):
+        raw_payload = {}
+    if not isinstance(to_recipients, list):
+        to_recipients = []
+    if not isinstance(cc_recipients, list):
+        cc_recipients = []
+    if not isinstance(raw_payload, dict):
+        raw_payload = {}
+
+    return {
+        "message_id": str(row["message_id"] or "").strip(),
+        "folder": str(row["folder"] or "inbox").strip().lower() or "inbox",
+        "internet_message_id": str(row["internet_message_id"] or "").strip(),
+        "conversation_id": str(row["conversation_id"] or "").strip(),
+        "subject": str(row["subject"] or "").strip(),
+        "sender_email": str(row["sender_email"] or "").strip().lower(),
+        "sender_name": str(row["sender_name"] or "").strip(),
+        "to_recipients": [str(item or "").strip().lower() for item in to_recipients if str(item or "").strip()],
+        "cc_recipients": [str(item or "").strip().lower() for item in cc_recipients if str(item or "").strip()],
+        "received_at": str(row["received_at"] or "").strip(),
+        "sent_at": str(row["sent_at"] or "").strip(),
+        "body_preview": str(row["body_preview"] or "").strip(),
+        "body_text": str(row["body_text"] or "").strip(),
+        "web_link": str(row["web_link"] or "").strip(),
+        "is_read": bool(int(row["is_read"] or 0)),
+        "has_attachments": bool(int(row["has_attachments"] or 0)),
+        "raw_payload": raw_payload,
+        "updated_at": str(row["updated_at"] or "").strip(),
+    }
+
+
+def _normalize_reminder_action(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "notify", "notify_user", "notify_collaborators"}:
+        return REMINDER_DEFAULT_ACTION
+    raise ValueError("action must be one of: notify_user")
+
+
+def create_reminder(
+    user,
+    *,
+    title: str,
+    remind_at: str,
+    message: str | None = None,
+    recipients: list[str] | tuple[str, ...] | None = None,
+    action: str = REMINDER_DEFAULT_ACTION,
+    channels: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    created_by_user_id: int | None = None,
+    created_by_username: str = "",
+) -> dict[str, Any]:
+    resolved_title = str(title or "").strip()
+    if not resolved_title:
+        raise ValueError("title is required")
+
+    remind_dt = _parse_iso_datetime(remind_at, field_name="remind_at")
+    action_value = _normalize_reminder_action(action)
+    recipient_list = _normalize_reminder_recipients(recipients)
+    channel_map = _normalize_reminder_channels(channels)
+    metadata_map = metadata if isinstance(metadata, dict) else {}
+    now = _now_iso()
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        cursor = conn.execute(
+            """
+            INSERT INTO reminders (
+                title,
+                message,
+                recipients_json,
+                remind_at,
+                status,
+                action,
+                channels_json,
+                metadata_json,
+                created_by_user_id,
+                created_by_username,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_title,
+                str(message or "").strip() or None,
+                _json_dumps_compact(recipient_list),
+                remind_dt.isoformat(),
+                REMINDER_STATUS_SCHEDULED,
+                action_value,
+                _json_dumps_compact(channel_map),
+                _json_dumps_compact(metadata_map),
+                int(created_by_user_id) if created_by_user_id is not None else None,
+                str(created_by_username or "").strip(),
+                now,
+                now,
+            ),
+        )
+        reminder_id = int(cursor.lastrowid or 0)
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                COALESCE(title, '') AS title,
+                COALESCE(message, '') AS message,
+                COALESCE(recipients_json, '[]') AS recipients_json,
+                COALESCE(remind_at, '') AS remind_at,
+                COALESCE(status, 'scheduled') AS status,
+                COALESCE(action, 'notify_user') AS action,
+                COALESCE(channels_json, '{}') AS channels_json,
+                COALESCE(metadata_json, '{}') AS metadata_json,
+                COALESCE(last_error, '') AS last_error,
+                created_by_user_id,
+                COALESCE(created_by_username, '') AS created_by_username,
+                COALESCE(created_at, '') AS created_at,
+                COALESCE(updated_at, '') AS updated_at,
+                COALESCE(sent_at, '') AS sent_at
+            FROM reminders
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (reminder_id,),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+
+    if row is None:
+        raise RuntimeError("Failed to create reminder.")
+    return _row_to_reminder(row)
+
+
+def get_reminder(user, reminder_id: int) -> dict[str, Any] | None:
+    try:
+        resolved_id = int(reminder_id)
+    except Exception:
+        return None
+    if resolved_id <= 0:
+        return None
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                COALESCE(title, '') AS title,
+                COALESCE(message, '') AS message,
+                COALESCE(recipients_json, '[]') AS recipients_json,
+                COALESCE(remind_at, '') AS remind_at,
+                COALESCE(status, 'scheduled') AS status,
+                COALESCE(action, 'notify_user') AS action,
+                COALESCE(channels_json, '{}') AS channels_json,
+                COALESCE(metadata_json, '{}') AS metadata_json,
+                COALESCE(last_error, '') AS last_error,
+                created_by_user_id,
+                COALESCE(created_by_username, '') AS created_by_username,
+                COALESCE(created_at, '') AS created_at,
+                COALESCE(updated_at, '') AS updated_at,
+                COALESCE(sent_at, '') AS sent_at
+            FROM reminders
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (resolved_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return None
+    return _row_to_reminder(row)
+
+
+def update_reminder(
+    user,
+    reminder_id: int,
+    *,
+    title: str | None = None,
+    remind_at: str | None = None,
+    message: str | None = None,
+    recipients: list[str] | tuple[str, ...] | None = None,
+    action: str | None = None,
+    channels: dict[str, Any] | None = None,
+    status: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    last_error: str | None = None,
+) -> dict[str, Any]:
+    try:
+        resolved_id = int(reminder_id)
+    except Exception as exc:
+        raise ValueError("reminder_id must be positive") from exc
+    if resolved_id <= 0:
+        raise ValueError("reminder_id must be positive")
+
+    updates: dict[str, Any] = {}
+    if title is not None:
+        title_value = str(title or "").strip()
+        if not title_value:
+            raise ValueError("title cannot be empty")
+        updates["title"] = title_value
+    if remind_at is not None:
+        updates["remind_at"] = _parse_iso_datetime(remind_at, field_name="remind_at").isoformat()
+    if message is not None:
+        updates["message"] = str(message or "").strip() or None
+    if recipients is not None:
+        updates["recipients_json"] = _json_dumps_compact(_normalize_reminder_recipients(recipients))
+    if action is not None:
+        updates["action"] = _normalize_reminder_action(action)
+    if channels is not None:
+        updates["channels_json"] = _json_dumps_compact(_normalize_reminder_channels(channels))
+    if status is not None:
+        updates["status"] = _normalize_reminder_status(status)
+    if metadata is not None:
+        updates["metadata_json"] = _json_dumps_compact(metadata if isinstance(metadata, dict) else {})
+    if last_error is not None:
+        updates["last_error"] = str(last_error or "").strip()
+    if not updates:
+        raise ValueError("No updates provided")
+
+    updates["updated_at"] = _now_iso()
+    if updates.get("status") == REMINDER_STATUS_SENT:
+        updates["sent_at"] = updates["updated_at"]
+
+    set_clause = ", ".join(f"{field} = ?" for field in updates.keys())
+    values = list(updates.values()) + [resolved_id]
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        cursor = conn.execute(
+            f"UPDATE reminders SET {set_clause} WHERE id = ?",
+            values,
+        )
+        if int(cursor.rowcount or 0) <= 0:
+            raise ValueError(f"Reminder {resolved_id} not found")
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                COALESCE(title, '') AS title,
+                COALESCE(message, '') AS message,
+                COALESCE(recipients_json, '[]') AS recipients_json,
+                COALESCE(remind_at, '') AS remind_at,
+                COALESCE(status, 'scheduled') AS status,
+                COALESCE(action, 'notify_user') AS action,
+                COALESCE(channels_json, '{}') AS channels_json,
+                COALESCE(metadata_json, '{}') AS metadata_json,
+                COALESCE(last_error, '') AS last_error,
+                created_by_user_id,
+                COALESCE(created_by_username, '') AS created_by_username,
+                COALESCE(created_at, '') AS created_at,
+                COALESCE(updated_at, '') AS updated_at,
+                COALESCE(sent_at, '') AS sent_at
+            FROM reminders
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (resolved_id,),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+
+    if row is None:
+        raise ValueError(f"Reminder {resolved_id} not found")
+    return _row_to_reminder(row)
+
+
+def delete_reminder(user, reminder_id: int, *, hard_delete: bool = False) -> dict[str, Any]:
+    try:
+        resolved_id = int(reminder_id)
+    except Exception as exc:
+        raise ValueError("reminder_id must be positive") from exc
+    if resolved_id <= 0:
+        raise ValueError("reminder_id must be positive")
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                COALESCE(title, '') AS title,
+                COALESCE(message, '') AS message,
+                COALESCE(recipients_json, '[]') AS recipients_json,
+                COALESCE(remind_at, '') AS remind_at,
+                COALESCE(status, 'scheduled') AS status,
+                COALESCE(action, 'notify_user') AS action,
+                COALESCE(channels_json, '{}') AS channels_json,
+                COALESCE(metadata_json, '{}') AS metadata_json,
+                COALESCE(last_error, '') AS last_error,
+                created_by_user_id,
+                COALESCE(created_by_username, '') AS created_by_username,
+                COALESCE(created_at, '') AS created_at,
+                COALESCE(updated_at, '') AS updated_at,
+                COALESCE(sent_at, '') AS sent_at
+            FROM reminders
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (resolved_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Reminder {resolved_id} not found")
+        reminder = _row_to_reminder(row)
+
+        if hard_delete:
+            conn.execute("DELETE FROM reminders WHERE id = ?", (resolved_id,))
+        else:
+            now = _now_iso()
+            conn.execute(
+                """
+                UPDATE reminders
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (REMINDER_STATUS_CANCELED, now, resolved_id),
+            )
+            row = conn.execute(
+                """
+                SELECT
+                    id,
+                    COALESCE(title, '') AS title,
+                    COALESCE(message, '') AS message,
+                    COALESCE(recipients_json, '[]') AS recipients_json,
+                    COALESCE(remind_at, '') AS remind_at,
+                    COALESCE(status, 'scheduled') AS status,
+                    COALESCE(action, 'notify_user') AS action,
+                    COALESCE(channels_json, '{}') AS channels_json,
+                    COALESCE(metadata_json, '{}') AS metadata_json,
+                    COALESCE(last_error, '') AS last_error,
+                    created_by_user_id,
+                    COALESCE(created_by_username, '') AS created_by_username,
+                    COALESCE(created_at, '') AS created_at,
+                    COALESCE(updated_at, '') AS updated_at,
+                    COALESCE(sent_at, '') AS sent_at
+                FROM reminders
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (resolved_id,),
+            ).fetchone()
+            if row is not None:
+                reminder = _row_to_reminder(row)
+        conn.commit()
+        return reminder
+    finally:
+        conn.close()
+
+
+def list_due_reminders(
+    user,
+    *,
+    now_dt: datetime | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    now_utc = (now_dt or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now_iso = now_utc.isoformat()
+    try:
+        resolved_limit = max(1, int(limit or 200))
+    except Exception:
+        resolved_limit = 200
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                COALESCE(title, '') AS title,
+                COALESCE(message, '') AS message,
+                COALESCE(recipients_json, '[]') AS recipients_json,
+                COALESCE(remind_at, '') AS remind_at,
+                COALESCE(status, 'scheduled') AS status,
+                COALESCE(action, 'notify_user') AS action,
+                COALESCE(channels_json, '{}') AS channels_json,
+                COALESCE(metadata_json, '{}') AS metadata_json,
+                COALESCE(last_error, '') AS last_error,
+                created_by_user_id,
+                COALESCE(created_by_username, '') AS created_by_username,
+                COALESCE(created_at, '') AS created_at,
+                COALESCE(updated_at, '') AS updated_at,
+                COALESCE(sent_at, '') AS sent_at
+            FROM reminders
+            WHERE status = ? AND remind_at <= ?
+            ORDER BY remind_at ASC, id ASC
+            LIMIT ?
+            """,
+            (REMINDER_STATUS_SCHEDULED, now_iso, resolved_limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return [_row_to_reminder(row) for row in rows]
+
+
+def list_reminders(
+    user,
+    *,
+    statuses: list[str] | tuple[str, ...] | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    try:
+        resolved_limit = max(1, int(limit or 100))
+    except Exception:
+        resolved_limit = 100
+
+    cleaned_statuses: list[str] = []
+    for raw_status in statuses or []:
+        try:
+            cleaned_statuses.append(_normalize_reminder_status(raw_status))
+        except ValueError:
+            continue
+
+    conn = _connect(user)
+    try:
+        _ensure_schema(conn)
+        if cleaned_statuses:
+            placeholders = ", ".join("?" for _ in cleaned_statuses)
+            rows = conn.execute(
+                f"""
+                SELECT
+                    id,
+                    COALESCE(title, '') AS title,
+                    COALESCE(message, '') AS message,
+                    COALESCE(recipients_json, '[]') AS recipients_json,
+                    COALESCE(remind_at, '') AS remind_at,
+                    COALESCE(status, 'scheduled') AS status,
+                    COALESCE(action, 'notify_user') AS action,
+                    COALESCE(channels_json, '{{}}') AS channels_json,
+                    COALESCE(metadata_json, '{{}}') AS metadata_json,
+                    COALESCE(last_error, '') AS last_error,
+                    created_by_user_id,
+                    COALESCE(created_by_username, '') AS created_by_username,
+                    COALESCE(created_at, '') AS created_at,
+                    COALESCE(updated_at, '') AS updated_at,
+                    COALESCE(sent_at, '') AS sent_at
+                FROM reminders
+                WHERE status IN ({placeholders})
+                ORDER BY remind_at DESC, id DESC
+                LIMIT ?
+                """,
+                [*cleaned_statuses, resolved_limit],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    COALESCE(title, '') AS title,
+                    COALESCE(message, '') AS message,
+                    COALESCE(recipients_json, '[]') AS recipients_json,
+                    COALESCE(remind_at, '') AS remind_at,
+                    COALESCE(status, 'scheduled') AS status,
+                    COALESCE(action, 'notify_user') AS action,
+                    COALESCE(channels_json, '{}') AS channels_json,
+                    COALESCE(metadata_json, '{}') AS metadata_json,
+                    COALESCE(last_error, '') AS last_error,
+                    created_by_user_id,
+                    COALESCE(created_by_username, '') AS created_by_username,
+                    COALESCE(created_at, '') AS created_at,
+                    COALESCE(updated_at, '') AS updated_at,
+                    COALESCE(sent_at, '') AS sent_at
+                FROM reminders
+                ORDER BY remind_at DESC, id DESC
+                LIMIT ?
+                """,
+                (resolved_limit,),
+            ).fetchall()
+    finally:
+        conn.close()
+
+    return [_row_to_reminder(row) for row in rows]
 
 
 def add_resource_note(

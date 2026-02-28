@@ -8,3 +8,5 @@ requests==2.32.5
 fastapi==0.118.1
 mcp==1.20.0
 chromadb==1.1.1
+Markdown==3.8.2
+bleach==6.2.0

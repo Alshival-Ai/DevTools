@@ -1,0 +1,1070 @@
+{% extends 'vertical.html' %}
+{% load static %}
+
+{% block title %}Teams{% endblock title %}
+
+{% block page_content %}
+<section class="team-hub-page">
+  <section class="table-wrap">
+    <div class="team-hub-head">
+      <div>
+        <h2>Teams Access</h2>
+        <p class="text-muted">Everything you can access through your team memberships.</p>
+      </div>
+    </div>
+    <div class="overview-kpis team-hub-kpis">
+      <article class="overview-kpi">
+        <span class="overview-kpi-label">Teams</span>
+        <strong class="overview-kpi-value">{{ team_membership_count }}</strong>
+        <span class="overview-kpi-meta">Active memberships</span>
+      </article>
+      <article class="overview-kpi">
+        <span class="overview-kpi-label">Resources</span>
+        <strong class="overview-kpi-value">{{ team_resource_count }}</strong>
+        <span class="overview-kpi-meta">Team-accessible</span>
+      </article>
+    </div>
+    {% if team_memberships %}
+    <div class="tag-row team-membership-tags">
+      {% for item in team_memberships %}
+      <span class="status info">{{ item.name }}</span>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-muted">You are not currently in any teams.</p>
+    {% endif %}
+  </section>
+
+  {% if team_memberships %}
+  <section
+    class="{% if team_membership_count > 1 %}resources-layout team-page-shell{% else %}team-page-shell team-page-shell--single{% endif %}"
+    data-team-page>
+    {% if team_membership_count > 1 %}
+    <aside class="team-folder-panel card team-page-nav" data-team-nav>
+      <div class="team-folder-title">Team Folders</div>
+      <div class="team-folder-subtitle">Switch context across chat and resources.</div>
+      <div class="team-folder-tree">
+        {% for item in team_memberships %}
+        <button
+          class="team-folder-btn{% if forloop.first %} is-active{% endif %}"
+          type="button"
+          data-team-nav-btn
+          data-team-id="{{ item.id }}"
+          data-team-slug="{{ item.name|lower|slugify }}"
+          data-team-name="{{ item.name }}">
+          <span class="folder-icon" aria-hidden="true">TM</span>
+          <span>{{ item.name }}</span>
+        </button>
+        {% endfor %}
+      </div>
+      <div class="team-folder-group team-page-nav-sections">
+        <div class="team-folder-group-label">Sections</div>
+        <button class="team-folder-btn is-active" type="button" data-team-section-link="chat">
+          <span class="folder-icon" aria-hidden="true">CH</span>
+          <span>Team Chat</span>
+        </button>
+        <button class="team-folder-btn" type="button" data-team-section-link="resources">
+          <span class="folder-icon" aria-hidden="true">RS</span>
+          <span>Team Resources</span>
+        </button>
+      </div>
+    </aside>
+    {% endif %}
+
+    <div class="team-page-main">
+      <div class="team-filter-banner">
+        <span class="text-muted small">Viewing team</span>
+        <strong data-team-view-label>{{ team_memberships.0.name }}</strong>
+      </div>
+
+      <section class="team-workbench" data-team-section="chat" id="team-chat-section">
+        <article
+          class="table-wrap team-chat-panel"
+          data-team-chat
+          data-chat-post-url="{% url 'ask_alshival_team_chat' %}"
+          data-chat-list-url="{% url 'team_chat_messages' %}"
+          data-team-chat-alert-settings-url="{% url 'update_team_chat_notification_settings' %}">
+          <div class="table-header">
+            <h3>Team Chat</h3>
+            <div class="team-chat-active-team">
+              <span class="text-muted small">Active team</span>
+              <strong data-team-active-label>{{ team_memberships.0.name }}</strong>
+            </div>
+            <button
+              class="icon-btn detail-alert-btn"
+              type="button"
+              aria-label="Open team chat notifications"
+              data-team-chat-alert-open>
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.4-1.4a2 2 0 0 1-.6-1.4V11a6 6 0 1 0-12 0v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0a3 3 0 0 1-6 0" />
+              </svg>
+            </button>
+            <select class="d-none" data-team-chat-team aria-hidden="true" tabindex="-1">
+              {% for item in team_memberships %}
+              <option value="{{ item.id }}" data-team-slug="{{ item.name|lower|slugify }}" data-team-name="{{ item.name }}">{{ item.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <p class="text-muted small">Shared messages between team members. This is not an assistant.</p>
+          <div class="team-chat-feed" data-team-chat-messages aria-live="polite"></div>
+          <form class="team-chat-compose" data-team-chat-form enctype="multipart/form-data">
+            <div class="resource-note-chat" data-team-chat-composer>
+              <textarea
+                rows="1"
+                maxlength="8000"
+                class="resource-note-input-text"
+                data-team-chat-input
+                placeholder="Write a message to your team..."></textarea>
+              <div class="resource-note-upload-hints" aria-hidden="true">
+                <svg
+                  class="resource-note-upload-icon"
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24">
+                  <g fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="13" r="3"></circle>
+                    <path d="M9.778 21h4.444c3.121 0 4.682 0 5.803-.735a4.4 4.4 0 0 0 1.226-1.204c.749-1.1.749-2.633.749-5.697s0-4.597-.749-5.697a4.4 4.4 0 0 0-1.226-1.204c-.72-.473-1.622-.642-3.003-.702c-.659 0-1.226-.49-1.355-1.125A2.064 2.064 0 0 0 13.634 3h-3.268c-.988 0-1.839.685-2.033 1.636c-.129.635-.696 1.125-1.355 1.125c-1.38.06-2.282.23-3.003.702A4.4 4.4 0 0 0 2.75 7.667C2 8.767 2 10.299 2 13.364s0 4.596.749 5.697c.324.476.74.885 1.226 1.204C5.096 21 6.657 21 9.778 21Z"></path>
+                  </g>
+                </svg>
+                <svg
+                  class="resource-note-upload-icon"
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24">
+                  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+                    <rect width="18" height="18" x="3" y="3" rx="2" ry="2"></rect>
+                    <circle cx="9" cy="9" r="2"></circle>
+                    <path d="m21 15l-3.086-3.086a2 2 0 0 0-2.828 0L6 21"></path>
+                  </g>
+                </svg>
+                <svg
+                  class="resource-note-upload-icon"
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="m6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"></path>
+                </svg>
+              </div>
+              <label class="resource-note-label-files" title="Attach image or document" aria-label="Attach image or document">
+                <input
+                  type="file"
+                  name="attachment"
+                  accept="image/*,.txt,.md,.markdown,.csv,.tsv,.json,.xml,.yaml,.yml,.log,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.rtf"
+                  data-team-chat-file>
+                <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">
+                  <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14m-7-7v14"></path>
+                </svg>
+              </label>
+              <button class="resource-note-label-send" type="submit" aria-label="Send message" data-team-chat-send>
+                <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">
+                  <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 12l7-7l7 7m-7 7V5"></path>
+                </svg>
+              </button>
+            </div>
+            <div class="team-chat-compose-actions">
+              <span class="text-muted small" data-team-chat-status></span>
+              <span class="text-muted small team-chat-file-meta" data-team-chat-file-name hidden></span>
+            </div>
+          </form>
+        </article>
+
+        <article class="table-wrap team-planner-panel planner-panel" data-team-planner>
+          <header class="planner-head">
+            <div class="planner-title">
+              <h3>Calendar</h3>
+              <p class="text-muted small">Read-only team timeline from Asana tasks mapped to team resources.</p>
+            </div>
+          </header>
+
+          <section class="planner-stats" aria-label="Planner summary">
+            <article class="planner-stat-card planner-stat-card--today">
+              <span>Today</span>
+              <strong data-planner-stat="today">0</strong>
+              <small>Open items</small>
+            </article>
+            <article class="planner-stat-card planner-stat-card--week">
+              <span>Next 7 days</span>
+              <strong data-planner-stat="week">0</strong>
+              <small>Scheduled</small>
+            </article>
+            <article class="planner-stat-card planner-stat-card--done">
+              <span>Completed</span>
+              <strong data-planner-stat="done">0</strong>
+              <small>Checked off</small>
+            </article>
+          </section>
+
+          <div class="planner-filters" aria-label="Planner category filters">
+            <div class="planner-filter-chips">
+              <button class="planner-filter-chip is-active" type="button" data-planner-filter="all">
+                All
+                <span data-planner-filter-count></span>
+              </button>
+              <button class="planner-filter-chip" type="button" data-planner-filter="meeting">
+                Meetings
+                <span data-planner-filter-count></span>
+              </button>
+              <button class="planner-filter-chip" type="button" data-planner-filter="delivery">
+                Deliveries
+                <span data-planner-filter-count></span>
+              </button>
+              <button class="planner-filter-chip" type="button" data-planner-filter="follow-up">
+                Follow-ups
+                <span data-planner-filter-count></span>
+              </button>
+              <button class="planner-filter-chip" type="button" data-planner-filter="review">
+                Reviews
+                <span data-planner-filter-count></span>
+              </button>
+            </div>
+            <div class="planner-toolbar">
+              <div class="planner-nav">
+                <button class="icon-btn icon-btn-small" type="button" data-planner-prev aria-label="Previous month">&#8249;</button>
+                <button class="ghost-btn planner-today-btn" type="button" data-planner-today>Today</button>
+                <button class="icon-btn icon-btn-small" type="button" data-planner-next aria-label="Next month">&#8250;</button>
+              </div>
+              <strong class="planner-month-label" data-planner-month></strong>
+              <div class="planner-view-switch" role="tablist" aria-label="Calendar view">
+                <button class="planner-view-btn is-active" type="button" data-planner-view="month">Month</button>
+                <button class="planner-view-btn" type="button" data-planner-view="agenda">Agenda</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="planner-body">
+            <section class="planner-calendar-shell">
+              <div class="planner-calendar" data-planner-grid></div>
+            </section>
+            <section class="planner-agenda-shell">
+              <div class="planner-agenda-head">
+                <h4 data-planner-agenda-title>Agenda</h4>
+                <span class="text-muted small" data-planner-selected></span>
+              </div>
+              <div class="planner-agenda" data-planner-agenda></div>
+            </section>
+          </div>
+
+          <form class="planner-quick-add d-none" data-planner-form>
+            <label>
+              <span>Task</span>
+              <input type="text" maxlength="180" required data-planner-title placeholder="Sprint planning, customer review, deploy window..." />
+            </label>
+            <div class="planner-quick-grid">
+              <label>
+                <span>Date</span>
+                <input type="date" required data-planner-date />
+              </label>
+              <label>
+                <span>Time</span>
+                <input type="time" data-planner-time />
+              </label>
+              <label>
+                <span>Category</span>
+                <select data-planner-kind>
+                  <option value="meeting">Meeting</option>
+                  <option value="delivery">Delivery</option>
+                  <option value="follow-up">Follow-up</option>
+                  <option value="review">Review</option>
+                </select>
+              </label>
+              <div class="planner-submit-wrap">
+                <button type="submit" class="secondary-btn">Add event</button>
+              </div>
+            </div>
+          </form>
+
+          <div class="planner-integrations">
+            <div class="planner-integration-card">
+              <div>
+                <strong>Outlook Calendar</strong>
+                <p class="text-muted small">Planned sync: calendars, invites, attendee status, and reminders.</p>
+              </div>
+              <span class="status warning">Staged</span>
+            </div>
+            <div class="planner-integration-card">
+              <div>
+                <strong>Asana Projects</strong>
+                <p class="text-muted small">Live read-only feed for tasks mapped to resources this team can access.</p>
+              </div>
+              <span class="status success">Live</span>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="table-wrap" data-team-section="resources" id="team-resources-section">
+        <div class="table-header">
+          <h3>Team Resources</h3>
+        </div>
+        {% if team_resources %}
+        <table>
+          <thead>
+            <tr>
+              <th>Resource</th>
+              <th>Type</th>
+              <th>Target</th>
+              <th>Status</th>
+              <th>Access</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in team_resources %}
+            <tr
+              data-team-resource-row
+              data-team-slugs="{% for team_name in item.team_names %}{% if not forloop.first %}|{% endif %}{{ team_name|lower|slugify }}{% endfor %}">
+              <td>
+                <a class="resource-link" href="{{ item.detail_url }}">{{ item.name }}</a>
+                <div class="text-muted small">{{ item.resource_uuid }}</div>
+              </td>
+              <td>{{ item.resource_type|title }}</td>
+              <td>{{ item.target }}</td>
+              <td>
+                <span class="status {% if item.status == 'healthy' %}success{% elif item.status == 'unhealthy' %}warning{% else %}info{% endif %}">
+                  {{ item.status_label }}
+                </span>
+                <div class="text-muted small">Last checked {{ item.checked_display }}</div>
+              </td>
+              <td>
+                <div class="text-muted small">{{ item.source_label|title }}</div>
+                {% if item.team_names %}
+                <div class="text-muted small">{{ item.team_names|join:', ' }}</div>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+            <tr class="d-none" data-team-resources-empty>
+              <td colspan="5" class="text-muted">No resources available for this team.</td>
+            </tr>
+          </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted">No team resources are currently accessible.</p>
+        {% endif %}
+      </section>
+
+      <div class="modal resource-alert-modal" id="team-chat-alerts" data-team-chat-alert-modal aria-hidden="true">
+        <div class="modal-overlay" data-team-chat-alert-close></div>
+        <div class="modal-content alert-modal-content" role="dialog" aria-modal="true" aria-label="Team chat notification settings">
+          <div class="modal-header">
+            <div>
+              <h3 class="detail-card-title">Team Chat Notifications</h3>
+              <p class="text-muted small">Forward teammate messages for the active team.</p>
+            </div>
+            <button class="icon-btn" type="button" aria-label="Close notification modal" data-team-chat-alert-close>✕</button>
+          </div>
+          <form method="post" action="{% url 'update_team_chat_notification_settings' %}" class="alert-settings-form">
+            {% csrf_token %}
+            <input type="hidden" name="team_id" value="{{ team_memberships.0.id }}" data-team-chat-alert-team-id>
+            <div class="alert-modal-list">
+              <section class="alert-option-card">
+                <div class="alert-option-head">
+                  <h4>Delivery Channels</h4>
+                </div>
+                <div class="alert-option-grid">
+                  <label class="checkbox">
+                    <input type="checkbox" name="team_chat_app_enabled" value="1" checked data-team-chat-alert-app>
+                    <span>App</span>
+                  </label>
+                  {% if twilio_sms_available %}
+                  <label class="checkbox">
+                    <input type="checkbox" name="team_chat_sms_enabled" value="1" data-team-chat-alert-sms>
+                    <span>SMS</span>
+                  </label>
+                  {% endif %}
+                  {% if email_notifications_available %}
+                  <label class="checkbox">
+                    <input type="checkbox" name="team_chat_email_enabled" value="1" data-team-chat-alert-email>
+                    <span>Email</span>
+                  </label>
+                  {% endif %}
+                </div>
+              </section>
+              {% if not twilio_sms_available %}
+              <p class="text-muted small">SMS notifications are unavailable until Twilio is configured in Connector Settings.</p>
+              {% endif %}
+              {% if not email_notifications_available %}
+              <p class="text-muted small">Email notifications are unavailable until the Microsoft support inbox mailbox is configured and support inbox monitoring is enabled in Alshival Admin.</p>
+              {% endif %}
+            </div>
+            <div class="modal-actions">
+              <button class="ghost-btn" type="button" data-team-chat-alert-close>Close</button>
+              <button class="primary-btn" type="submit">Save</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+</section>
+{{ team_chat_notification_settings_by_team|json_script:"team-chat-alert-settings-by-team" }}
+{{ team_planner_external_items_by_team|json_script:"team-planner-external-items-by-team" }}
+{% endblock page_content %}
+
+{% block page_js %}
+{{ block.super }}
+<script src="{% static 'js/planner-ui.js' %}"></script>
+<script>
+  (function () {
+    const pageShell = document.querySelector('[data-team-page]');
+    const chatShell = document.querySelector('[data-team-chat]');
+    const plannerShell = document.querySelector('[data-team-planner]');
+    if (!pageShell || !chatShell) return;
+
+    const postUrl = chatShell.getAttribute('data-chat-post-url') || '';
+    const listUrl = chatShell.getAttribute('data-chat-list-url') || '';
+    const teamChatAlertSettingsUrl = chatShell.getAttribute('data-team-chat-alert-settings-url') || '';
+    const teamSelect = chatShell.querySelector('[data-team-chat-team]');
+    const messagesEl = chatShell.querySelector('[data-team-chat-messages]');
+    const form = chatShell.querySelector('[data-team-chat-form]');
+    const composer = chatShell.querySelector('[data-team-chat-composer]');
+    const input = chatShell.querySelector('[data-team-chat-input]');
+    const fileInput = chatShell.querySelector('[data-team-chat-file]');
+    const fileNameEl = chatShell.querySelector('[data-team-chat-file-name]');
+    const send = chatShell.querySelector('[data-team-chat-send]');
+    const statusEl = chatShell.querySelector('[data-team-chat-status]');
+    const activeTeamLabels = Array.from(document.querySelectorAll('[data-team-active-label]'));
+    const teamViewLabel = document.querySelector('[data-team-view-label]');
+    const teamNavButtons = Array.from(document.querySelectorAll('[data-team-nav-btn]'));
+    const sectionNavButtons = Array.from(document.querySelectorAll('[data-team-section-link]'));
+    const resourceRows = Array.from(document.querySelectorAll('[data-team-resource-row]'));
+    const resourcesEmptyRow = document.querySelector('[data-team-resources-empty]');
+    const alertOpenButton = chatShell.querySelector('[data-team-chat-alert-open]');
+    const alertModal = document.querySelector('[data-team-chat-alert-modal]');
+    const alertTeamIdInput = alertModal ? alertModal.querySelector('[data-team-chat-alert-team-id]') : null;
+    const alertAppInput = alertModal ? alertModal.querySelector('[data-team-chat-alert-app]') : null;
+    const alertSmsInput = alertModal ? alertModal.querySelector('[data-team-chat-alert-sms]') : null;
+    const alertEmailInput = alertModal ? alertModal.querySelector('[data-team-chat-alert-email]') : null;
+    if (!postUrl || !listUrl || !teamSelect || !messagesEl || !form || !input || !send) return;
+    let teamChatAlertSettingsByTeam = {};
+    try {
+      const settingsNode = document.getElementById('team-chat-alert-settings-by-team');
+      teamChatAlertSettingsByTeam = JSON.parse(settingsNode ? settingsNode.textContent : '{}') || {};
+    } catch (error) {
+      teamChatAlertSettingsByTeam = {};
+    }
+    let teamPlannerExternalItemsByTeam = {};
+    try {
+      const plannerItemsNode = document.getElementById('team-planner-external-items-by-team');
+      teamPlannerExternalItemsByTeam = JSON.parse(plannerItemsNode ? plannerItemsNode.textContent : '{}') || {};
+    } catch (error) {
+      teamPlannerExternalItemsByTeam = {};
+    }
+
+    const getCookie = (name) => {
+      const encoded = `${encodeURIComponent(name)}=`;
+      const parts = String(document.cookie || '').split(';');
+      for (const rawPart of parts) {
+        const part = String(rawPart || '').trim();
+        if (part.startsWith(encoded)) return decodeURIComponent(part.slice(encoded.length));
+      }
+      return '';
+    };
+
+    const toYmd = (value) => {
+      const date = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(date.getTime())) return '';
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    };
+
+    const prettyTime = (value) => {
+      if (!value) return '';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '';
+      return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    };
+
+    const prettyBytes = (value) => {
+      const bytes = Number(value || 0);
+      if (!Number.isFinite(bytes) || bytes <= 0) return '';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let scaled = bytes;
+      let unitIndex = 0;
+      while (scaled >= 1024 && unitIndex < units.length - 1) {
+        scaled /= 1024;
+        unitIndex += 1;
+      }
+      const precision = scaled >= 10 || unitIndex === 0 ? 0 : 1;
+      return `${scaled.toFixed(precision)} ${units[unitIndex]}`;
+    };
+
+    const selectedFile = () => (fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null);
+
+    const syncFileMeta = () => {
+      const file = selectedFile();
+      if (fileNameEl) {
+        fileNameEl.textContent = file ? `${file.name} (${prettyBytes(file.size)})` : '';
+        fileNameEl.hidden = !file;
+      }
+      if (composer) {
+        composer.classList.toggle('has-file', Boolean(file));
+      }
+    };
+
+    const authorInitials = (value) => {
+      const text = String(value || '').trim();
+      if (!text) return '?';
+      const parts = text.split(/\s+/).filter(Boolean);
+      if (parts.length >= 2) {
+        return `${parts[0].charAt(0)}${parts[1].charAt(0)}`.toUpperCase();
+      }
+      return text.slice(0, 2).toUpperCase();
+    };
+
+    const activeTeamId = () => String(teamSelect.value || '').trim();
+    const activeTeamOption = () => teamSelect.options[teamSelect.selectedIndex] || null;
+    const activeTeamSlug = () => String(activeTeamOption()?.getAttribute('data-team-slug') || '').trim();
+    const activeTeamLabel = () => String(activeTeamOption()?.getAttribute('data-team-name') || activeTeamOption()?.text || '').trim();
+    const activeTeamPlannerExternalItems = () => {
+      const key = String(activeTeamId() || '').trim();
+      const rows = teamPlannerExternalItemsByTeam && teamPlannerExternalItemsByTeam[key];
+      return Array.isArray(rows) ? rows : [];
+    };
+    const plannerItemSource = (item) => String(item && item.source ? item.source : '').trim().toLowerCase();
+    const formatTimelineWhen = (value) => {
+      const text = String(value || '').trim();
+      if (!text) return '';
+      const parsed = new Date(text);
+      if (Number.isNaN(parsed.getTime())) return text;
+      try {
+        return new Intl.DateTimeFormat([], {
+          month: 'short',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+        }).format(parsed);
+      } catch (error) {
+        return parsed.toLocaleString();
+      }
+    };
+    const normalizedBoardId = (value) => (
+      String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+    );
+    const openExternal = (rawUrl) => {
+      const url = String(rawUrl || '').trim();
+      if (!url) return;
+      window.open(url, '_blank', 'noopener,noreferrer');
+    };
+    const openTeamAsanaAgendaSections = (context) => {
+      const activeFilter = String(context && context.activeFilter ? context.activeFilter : 'all').trim().toLowerCase();
+      if (activeFilter !== 'all') return [];
+
+      const asanaItems = activeTeamPlannerExternalItems().filter((item) => plannerItemSource(item) === 'asana');
+      if (!asanaItems.length) return [];
+
+      const boardBuckets = new Map();
+      const ensureBoardBucket = (board) => {
+        const boardName = String(board && board.name ? board.name : 'Unassigned').trim() || 'Unassigned';
+        const boardGid = String(board && board.gid ? board.gid : '').trim();
+        const boardUrl = String(board && board.url ? board.url : '').trim();
+        const boardKey = boardGid || normalizedBoardId(boardName) || 'unassigned';
+        const sectionId = `team-asana-board-${boardKey}`;
+        if (!boardBuckets.has(sectionId)) {
+          boardBuckets.set(sectionId, {
+            id: sectionId,
+            title: `Asana - ${boardName}`,
+            description: 'Tasks mapped to resources this team can access.',
+            boardGid,
+            boardUrl,
+            actions: boardUrl ? [{ id: 'open-board', label: 'Open' }] : [],
+            items: [],
+          });
+        }
+        return boardBuckets.get(sectionId);
+      };
+
+      asanaItems.forEach((item) => {
+        const taskId = String(item && item.task_gid ? item.task_gid : '').trim() || String(item && item.id ? item.id : '').trim();
+        if (!taskId) return;
+        const dueDate = String(item && item.date ? item.date : '').trim();
+        const dueTime = String(item && item.time ? item.time : '').trim();
+        const completed = Boolean(item && item.done);
+        const completedAt = String(item && item.completed_at ? item.completed_at : '').trim();
+        const sectionName = String(item && item.section_name ? item.section_name : '').trim();
+        const mappedResources = Array.isArray(item && item.resource_names)
+          ? item.resource_names.map((name) => String(name || '').trim()).filter(Boolean)
+          : [];
+        const metaParts = [];
+        if (completed) {
+          metaParts.push(completedAt ? `Completed ${formatTimelineWhen(completedAt)}` : 'Completed');
+        } else if (dueDate) {
+          metaParts.push(dueTime ? `${dueDate} ${dueTime}` : dueDate);
+        }
+        if (sectionName) metaParts.push(sectionName);
+        if (mappedResources.length) metaParts.push(`Resources: ${mappedResources.join(', ')}`);
+
+        const sortPrefix = completed ? '1' : '0';
+        const sortDirection = `${dueDate || '9999-12-31'} ${dueTime || '99:99'}`;
+        const sectionItem = {
+          id: `team-asana-${taskId}`,
+          title: String(item && item.title ? item.title : '').trim() || `Asana task ${taskId}`,
+          meta: metaParts.join(' · '),
+          date: dueDate,
+          time: dueTime,
+          source: 'asana',
+          sourceItemId: taskId,
+          taskGid: taskId,
+          url: String(item && item.url ? item.url : '').trim(),
+          done: completed,
+          canToggle: false,
+          isExternal: false,
+          actions: String(item && item.url ? item.url : '').trim()
+            ? [{ id: 'open-task', label: 'Open' }]
+            : [],
+          sortKey: `${sortPrefix}-${sortDirection}-${String(item && item.title ? item.title : '').trim().toLowerCase()}`,
+        };
+
+        const projectLinks = Array.isArray(item && item.project_links) ? item.project_links : [];
+        if (!projectLinks.length) {
+          ensureBoardBucket({ name: 'Unassigned' }).items.push(sectionItem);
+          return;
+        }
+        projectLinks.forEach((project) => {
+          const boardGid = String(project && project.gid ? project.gid : '').trim();
+          const boardName = String(project && project.name ? project.name : '').trim();
+          const boardUrl = String(project && project.url ? project.url : '').trim();
+          ensureBoardBucket({
+            gid: boardGid,
+            name: boardName || 'Unassigned',
+            url: boardUrl,
+          }).items.push(sectionItem);
+        });
+      });
+
+      return Array.from(boardBuckets.values())
+        .sort((left, right) => String(left.title || '').localeCompare(String(right.title || '')))
+        .map((section) => ({
+          ...section,
+          emptyText: 'No mapped tasks in this board.',
+          items: section.items
+            .slice()
+            .sort((left, right) => String(left.sortKey || '').localeCompare(String(right.sortKey || '')))
+            .map(({ sortKey, ...rest }) => rest),
+        }));
+    };
+    const conversationKey = () => `team_chat_conversation_${activeTeamId()}`;
+    const defaultConversationId = () => `team-${activeTeamId()}`;
+
+    const setPersistentTeam = (teamId) => {
+      try {
+        window.localStorage.setItem('team_page_active_team_id', String(teamId || '').trim());
+      } catch (error) {
+        // Ignore storage issues.
+      }
+    };
+
+    const getPersistentTeam = () => {
+      try {
+        return String(window.localStorage.getItem('team_page_active_team_id') || '').trim();
+      } catch (error) {
+        return '';
+      }
+    };
+
+    const getConversationId = () => {
+      try {
+        return String(window.localStorage.getItem(conversationKey()) || '').trim() || defaultConversationId();
+      } catch (error) {
+        return defaultConversationId();
+      }
+    };
+
+    const setConversationId = (value) => {
+      const resolved = String(value || '').trim();
+      if (!resolved) return;
+      try {
+        window.localStorage.setItem(conversationKey(), resolved);
+      } catch (error) {
+        // Ignore storage issues.
+      }
+    };
+
+    const activeTeamAlertSettings = () => {
+      const key = String(activeTeamId() || '');
+      const current = teamChatAlertSettingsByTeam && teamChatAlertSettingsByTeam[key];
+      return {
+        team_chat_app_enabled: Boolean(current && current.team_chat_app_enabled !== false),
+        team_chat_sms_enabled: Boolean(current && current.team_chat_sms_enabled),
+        team_chat_email_enabled: Boolean(current && current.team_chat_email_enabled),
+      };
+    };
+
+    const syncAlertSettingsForm = () => {
+      const teamId = activeTeamId();
+      const settings = activeTeamAlertSettings();
+      if (alertTeamIdInput) alertTeamIdInput.value = teamId;
+      if (alertAppInput) alertAppInput.checked = Boolean(settings.team_chat_app_enabled);
+      if (alertSmsInput) alertSmsInput.checked = Boolean(settings.team_chat_sms_enabled);
+      if (alertEmailInput) alertEmailInput.checked = Boolean(settings.team_chat_email_enabled);
+    };
+
+    const openAlertModal = () => {
+      if (!alertModal) return;
+      syncAlertSettingsForm();
+      alertModal.classList.add('is-active');
+      alertModal.setAttribute('aria-hidden', 'false');
+      document.body.classList.add('modal-open');
+    };
+
+    const closeAlertModal = () => {
+      if (!alertModal) return;
+      alertModal.classList.remove('is-active');
+      alertModal.setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('modal-open');
+    };
+
+    let plannerController = null;
+    const seedPlannerItems = () => [];
+
+    const initPlanner = () => {
+      if (!plannerShell || !window.AlshivalPlanner || typeof window.AlshivalPlanner.init !== 'function') return;
+      plannerController = window.AlshivalPlanner.init(plannerShell, {
+        getStorageKey: () => '',
+        seedItems: seedPlannerItems,
+        externalItems: activeTeamPlannerExternalItems,
+        agendaSections: openTeamAsanaAgendaSections,
+        onAgendaSectionAction: async (item, actionId, section) => {
+          const normalizedAction = String(actionId || '').trim().toLowerCase();
+          if (normalizedAction === 'open-task') {
+            openExternal(item && item.url ? item.url : '');
+            return;
+          }
+          if (normalizedAction === 'open-board') {
+            openExternal(section && section.boardUrl ? section.boardUrl : '');
+          }
+        },
+        readOnly: true,
+        monthEmptyText: 'No mapped team tasks for this day.',
+        listEmptyText: 'No mapped team tasks scheduled in this range.',
+        listWindowDays: 21,
+      });
+    };
+
+    let chatPending = false;
+    let chatPollTimer = null;
+    let chatInitialized = false;
+
+    const setChatStatus = (text) => {
+      if (statusEl) statusEl.textContent = String(text || '');
+    };
+
+    const setChatPending = (next) => {
+      chatPending = Boolean(next);
+      send.disabled = chatPending;
+      input.disabled = chatPending;
+      if (fileInput) fileInput.disabled = chatPending;
+      teamSelect.disabled = chatPending;
+      teamNavButtons.forEach((button) => {
+        button.disabled = chatPending;
+      });
+    };
+
+    const updateTeamLabels = () => {
+      const label = activeTeamLabel();
+      if (teamViewLabel) teamViewLabel.textContent = label || 'Team';
+      activeTeamLabels.forEach((node) => {
+        node.textContent = label || 'Team';
+      });
+      teamNavButtons.forEach((button) => {
+        const isActive = String(button.getAttribute('data-team-id') || '') === activeTeamId();
+        button.classList.toggle('is-active', isActive);
+      });
+    };
+
+    const rowMatchesTeam = (row, slug) => {
+      const teamSlugs = String(row.getAttribute('data-team-slugs') || '').split('|').map((item) => String(item || '').trim()).filter(Boolean);
+      if (!slug) return true;
+      if (!teamSlugs.length) return false;
+      return teamSlugs.includes(slug);
+    };
+
+    const filterRowsForTeam = () => {
+      const slug = activeTeamSlug();
+      let visibleResources = 0;
+
+      resourceRows.forEach((row) => {
+        const show = rowMatchesTeam(row, slug);
+        row.classList.toggle('d-none', !show);
+        if (show) visibleResources += 1;
+      });
+      if (resourcesEmptyRow) {
+        resourcesEmptyRow.classList.toggle('d-none', visibleResources > 0);
+      }
+    };
+
+    const renderChatMessages = (messages) => {
+      while (messagesEl.firstChild) messagesEl.removeChild(messagesEl.firstChild);
+      if (!messages.length) {
+        const empty = document.createElement('div');
+        empty.className = 'team-chat-empty';
+        empty.textContent = `No messages yet for ${activeTeamLabel() || 'this team'}.`;
+        messagesEl.appendChild(empty);
+      } else {
+        messages.forEach((item) => {
+          const row = document.createElement('article');
+          row.className = `team-chat-msg ${item.is_mine ? 'team-chat-msg--mine' : 'team-chat-msg--other'}`;
+
+          const authorWrap = document.createElement('div');
+          authorWrap.className = 'team-chat-msg__author';
+          const avatarUrl = String(item.author_avatar_url || '').trim();
+          if (avatarUrl) {
+            const avatar = document.createElement('img');
+            avatar.className = 'comment-avatar';
+            avatar.src = avatarUrl;
+            avatar.alt = '';
+            avatar.loading = 'lazy';
+            avatar.decoding = 'async';
+            authorWrap.appendChild(avatar);
+          } else {
+            const fallback = document.createElement('span');
+            fallback.className = 'comment-avatar-fallback';
+            fallback.textContent = authorInitials(item.author_username || 'Team member');
+            fallback.setAttribute('aria-hidden', 'true');
+            authorWrap.appendChild(fallback);
+          }
+
+          const meta = document.createElement('div');
+          meta.className = 'team-chat-msg__meta';
+          const author = document.createElement('strong');
+          author.textContent = String(item.author_username || 'Team member');
+          const time = document.createElement('span');
+          time.textContent = prettyTime(item.created_at);
+          meta.appendChild(author);
+          meta.appendChild(time);
+
+          row.appendChild(authorWrap);
+          row.appendChild(meta);
+
+          const content = String(item.content || '').trim();
+          if (content) {
+            const body = document.createElement('p');
+            body.className = 'team-chat-msg__body';
+            body.textContent = content;
+            row.appendChild(body);
+          }
+
+          const attachmentUrl = String(item.attachment_url || '').trim();
+          if (attachmentUrl) {
+            const attachmentName = String(item.attachment_name || 'Attachment').trim() || 'Attachment';
+            const attachmentSize = prettyBytes(item.attachment_size);
+            if (Boolean(item.attachment_is_image)) {
+              const imageLink = document.createElement('a');
+              imageLink.className = 'resource-note-attachment team-chat-msg__attachment';
+              imageLink.href = attachmentUrl;
+              imageLink.target = '_blank';
+              imageLink.rel = 'noopener';
+              const image = document.createElement('img');
+              image.src = attachmentUrl;
+              image.alt = attachmentName;
+              image.loading = 'lazy';
+              image.decoding = 'async';
+              imageLink.appendChild(image);
+              row.appendChild(imageLink);
+            } else {
+              const fileLink = document.createElement('a');
+              fileLink.className = 'team-chat-msg__file';
+              fileLink.href = attachmentUrl;
+              fileLink.target = '_blank';
+              fileLink.rel = 'noopener';
+              fileLink.textContent = attachmentSize ? `${attachmentName} (${attachmentSize})` : attachmentName;
+              row.appendChild(fileLink);
+            }
+          }
+
+          messagesEl.appendChild(row);
+        });
+      }
+      if (!chatInitialized) {
+        messagesEl.scrollTop = 0;
+        chatInitialized = true;
+      }
+    };
+
+    const fetchChatMessages = async () => {
+      const teamId = activeTeamId();
+      if (!teamId) return;
+      const params = new URLSearchParams({
+        team_id: String(teamId),
+        conversation_id: getConversationId(),
+        limit: '220',
+      });
+      const response = await fetch(`${listUrl}?${params.toString()}`, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(payload.error || 'request_failed'));
+      }
+      const nextConversationId = String(payload.conversation_id || '').trim();
+      if (nextConversationId) setConversationId(nextConversationId);
+      renderChatMessages(Array.isArray(payload.messages) ? payload.messages : []);
+    };
+
+    const reloadForTeam = async () => {
+      chatInitialized = false;
+      if (plannerController) {
+        plannerController.reload({ resetDate: true, resetView: true });
+      }
+      filterRowsForTeam();
+      try {
+        await fetchChatMessages();
+      } catch (error) {
+        setChatStatus(`Unable to load team chat (${String(error.message || 'failed')})`);
+      }
+    };
+
+    const setActiveTeam = (teamId, options = {}) => {
+      const resolvedTeamId = String(teamId || '').trim();
+      let nextIndex = -1;
+      for (let idx = 0; idx < teamSelect.options.length; idx += 1) {
+        if (String(teamSelect.options[idx].value || '').trim() === resolvedTeamId) {
+          nextIndex = idx;
+          break;
+        }
+      }
+      if (nextIndex < 0) nextIndex = 0;
+      teamSelect.selectedIndex = nextIndex;
+      updateTeamLabels();
+      setPersistentTeam(activeTeamId());
+      syncAlertSettingsForm();
+      if (options.reload !== false) {
+        setChatStatus('');
+        reloadForTeam();
+      } else {
+        filterRowsForTeam();
+      }
+    };
+
+    if (chatPollTimer) window.clearInterval(chatPollTimer);
+    chatPollTimer = window.setInterval(() => {
+      if (chatPending) return;
+      fetchChatMessages().catch(() => {});
+    }, 12000);
+
+    teamSelect.addEventListener('change', () => {
+      setActiveTeam(activeTeamId());
+    });
+    if (alertOpenButton && alertModal) {
+      alertOpenButton.addEventListener('click', openAlertModal);
+      alertModal.querySelectorAll('[data-team-chat-alert-close]').forEach((el) => {
+        el.addEventListener('click', closeAlertModal);
+      });
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        if (!alertModal.classList.contains('is-active')) return;
+        closeAlertModal();
+      });
+      if (String(window.location.hash || '') === '#team-chat-alerts') {
+        openAlertModal();
+      }
+    }
+
+    teamNavButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const teamId = String(button.getAttribute('data-team-id') || '').trim();
+        if (!teamId || teamId === activeTeamId()) return;
+        setActiveTeam(teamId);
+      });
+    });
+
+    sectionNavButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const section = String(button.getAttribute('data-team-section-link') || '').trim();
+        if (!section) return;
+        sectionNavButtons.forEach((node) => node.classList.toggle('is-active', node === button));
+        const target = document.querySelector(`[data-team-section="${section}"]`);
+        if (!target) return;
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+      const hasText = Boolean(String(input.value || '').trim());
+      const hasFile = Boolean(selectedFile());
+      if (!hasText && !hasFile) return;
+      event.preventDefault();
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (chatPending) return;
+      const message = String(input.value || '').trim();
+      const file = selectedFile();
+      const teamId = activeTeamId();
+      if ((!message && !file) || !teamId) return;
+
+      setChatPending(true);
+      setChatStatus('Sending...');
+      try {
+        const requestBody = new FormData();
+        requestBody.append('message', message);
+        requestBody.append('team_id', String(teamId));
+        requestBody.append('conversation_id', getConversationId());
+        if (file) requestBody.append('attachment', file);
+        const response = await fetch(postUrl, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'X-CSRFToken': getCookie('csrftoken'),
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: requestBody,
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(String(payload.error || 'request_failed'));
+        }
+        const nextConversationId = String(payload.conversation_id || '').trim();
+        if (nextConversationId) setConversationId(nextConversationId);
+        input.value = '';
+        if (fileInput) fileInput.value = '';
+        syncFileMeta();
+        await fetchChatMessages();
+        setChatStatus('Message sent.');
+      } catch (error) {
+        setChatStatus(`Unable to send (${String(error.message || 'failed')})`);
+      } finally {
+        setChatPending(false);
+        input.focus();
+      }
+    });
+
+    if (fileInput) {
+      fileInput.addEventListener('change', syncFileMeta);
+    }
+    const resizeInput = () => {
+      input.style.height = 'auto';
+      input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+    };
+    input.addEventListener('input', resizeInput);
+    resizeInput();
+    syncFileMeta();
+
+    initPlanner();
+    const initialTeamId = getPersistentTeam();
+    setActiveTeam(initialTeamId, { reload: false });
+    reloadForTeam();
+  })();
+</script>
+{% endblock page_js %}

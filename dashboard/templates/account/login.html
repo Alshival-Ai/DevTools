@@ -8,7 +8,10 @@
 {% microsoft_login_url as microsoft_login_path %}
 {% github_login_available as show_github_login %}
 {% github_login_url as github_login_path %}
+{% asana_login_available as show_asana_login %}
+{% asana_login_url as asana_login_path %}
 <div class="auth-shell">
+  <canvas id="landing-page-matrix" class="landing-page-matrix" aria-hidden="true"></canvas>
   <section class="auth-card auth-card-split">
     <div class="auth-panel">
       <div class="auth-brand">
@@ -68,20 +71,33 @@
         </button>
       </form>
 
-      {% if show_microsoft_login or show_github_login %}
-      <div class="auth-social-login">
-        <span class="auth-social-login__label">Or continue with</span>
+      {% if show_microsoft_login or show_github_login or show_asana_login %}
+      <div class="auth-social-login" aria-label="Third-party sign in options">
+        <div class="auth-social-login__heading">
+          <span class="auth-social-login__rule" aria-hidden="true"></span>
+          <span class="auth-social-login__label">Or continue with</span>
+          <span class="auth-social-login__rule" aria-hidden="true"></span>
+        </div>
+        <div class="auth-social-login__providers">
         {% if show_microsoft_login %}
-        <a class="ms-signin-btn auth-ms-signin-btn" href="{{ microsoft_login_path }}?process=login{% if next %}&next={{ next|urlencode }}{% endif %}">
-          <img src="{% static 'img/branding/connectors/ms-symbollockup_signin_dark_short.svg' %}" alt="Sign in with Microsoft" />
+        <a class="auth-social-provider auth-social-provider--microsoft" href="{{ microsoft_login_path }}?process=login{% if next %}&next={{ next|urlencode }}{% endif %}">
+          <img src="{% static 'img/branding/connectors/microsoft.svg' %}" alt="" aria-hidden="true" />
+          <span>Microsoft</span>
         </a>
         {% endif %}
         {% if show_github_login %}
-        <a class="github-signin-btn" href="{{ github_login_path }}?process=login{% if next %}&next={{ next|urlencode }}{% endif %}">
+        <a class="auth-social-provider auth-social-provider--github" href="{{ github_login_path }}?process=login{% if next %}&next={{ next|urlencode }}{% endif %}">
           <img src="{% static 'img/branding/connectors/github.svg' %}" alt="" aria-hidden="true" />
-          <span>Sign in with GitHub</span>
+          <span>GitHub</span>
         </a>
         {% endif %}
+        {% if show_asana_login %}
+        <a class="auth-social-provider auth-social-provider--asana" href="{{ asana_login_path }}?process=login{% if next %}&next={{ next|urlencode }}{% endif %}">
+          <img src="{% static 'img/branding/connectors/asana.svg' %}" alt="" aria-hidden="true" />
+          <span>Asana</span>
+        </a>
+        {% endif %}
+        </div>
       </div>
       {% endif %}
 

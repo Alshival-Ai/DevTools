@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import os
 import re
 import requests
@@ -14,23 +15,25 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.core.mail import send_mail
 
 from dashboard.knowledge_store import upsert_resource_health_knowledge
 from dashboard.models import ResourcePackageOwner, ResourceTeamShare, UserNotificationSettings
 from dashboard.request_context import get_current_user
 from dashboard.resources_store import (
+    add_ask_chat_context_event,
     add_user_notification,
+    get_user_alert_filter_prompt,
     get_resource_alert_settings,
     get_resource,
     log_resource_check,
     store_resource_logs,
     update_resource_health,
 )
+from dashboard.support_inbox import send_support_inbox_email
 from dashboard.setup_state import (
     get_setup_state,
-    is_email_provider_configured,
     is_global_monitoring_enabled,
+    is_support_inbox_email_alerts_enabled,
     is_twilio_configured,
 )
 
@@ -160,23 +163,209 @@ def _send_transition_sms(*, recipient, message: str) -> tuple[bool, str]:
 
 
 def _send_transition_email(*, recipient, subject: str, message: str) -> tuple[bool, str]:
-    if not is_email_provider_configured():
-        return False, "email_not_configured"
+    if not is_support_inbox_email_alerts_enabled():
+        return False, "support_inbox_email_disabled"
     recipient_email = str(getattr(recipient, "email", "") or "").strip()
     if not recipient_email:
         return False, "missing_email_address"
-    from_email = str(getattr(settings, "DEFAULT_FROM_EMAIL", "") or "").strip() or "noreply@alshival.local"
+    return send_support_inbox_email(
+        recipient_email=recipient_email,
+        subject=str(subject or "").strip(),
+        body_text=str(message or "").strip(),
+    )
+
+
+def _normalize_alert_channels(channels: list[str] | tuple[str, ...] | set[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for channel in channels:
+        candidate = str(channel or "").strip().lower()
+        if candidate not in {"app", "sms", "email"}:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized
+
+
+def _log_alert_context_event_safe(*, recipient, event_type: str, summary: str, payload: dict[str, object]) -> None:
     try:
-        sent = send_mail(
-            str(subject or "").strip()[:255],
-            str(message or "").strip(),
-            from_email,
-            [recipient_email],
-            fail_silently=False,
+        add_ask_chat_context_event(
+            recipient,
+            event_type=event_type,
+            summary=summary,
+            payload=payload,
+            conversation_id="default",
         )
-    except Exception as exc:
-        return False, f"email_send_failed:{exc}"
-    return bool(int(sent or 0) > 0), ""
+    except Exception:
+        return
+
+
+def _extract_chat_completion_text(payload: dict[str, object] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first, dict) else {}
+    if not isinstance(message, dict):
+        return ""
+    return str(message.get("content") or "").strip()
+
+
+def _parse_json_object(raw_text: str) -> dict[str, object]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return {}
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
+        if text.endswith("```"):
+            text = text[:-3].strip()
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception:
+            return {}
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
+
+
+def _alert_filter_openai_config() -> tuple[str, str]:
+    setup = get_setup_state()
+    api_key = str(getattr(setup, "openai_api_key", "") or "").strip()
+    if not api_key:
+        api_key = str(os.getenv("OPENAI_API_KEY", "") or "").strip()
+    model = (
+        str(getattr(settings, "ALSHIVAL_OPENAI_CHAT_MODEL", "") or "").strip()
+        or str(getattr(setup, "default_model", "") or "").strip()
+        or "gpt-4o-mini"
+    )
+    return api_key, model
+
+
+def _alert_filter_allowed_channels(
+    *,
+    recipient,
+    alert_kind: str,
+    candidate_channels: list[str],
+    subject: str,
+    body: str,
+    context: dict[str, object] | None = None,
+) -> set[str]:
+    candidates = _normalize_alert_channels(candidate_channels)
+    if not candidates:
+        return set()
+
+    preferences = get_user_alert_filter_prompt(recipient)
+    custom_prompt = str(preferences.get("prompt") or "").strip()
+    if not custom_prompt:
+        return set(candidates)
+
+    api_key, model = _alert_filter_openai_config()
+    if not api_key:
+        return set(candidates)
+
+    context_payload = context if isinstance(context, dict) else {}
+    request_payload = {
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "system",
+                "content": "\n".join(
+                    [
+                        "You are Alshival's alert_filter agent.",
+                        "Decide which channels should receive this alert for this user.",
+                        "Return strict JSON only.",
+                        '{"allowed_channels":["app","sms","email"],"reason":"short reason"}',
+                        "Rules:",
+                        "- allowed_channels must be a subset of candidate_channels.",
+                        "- Use the user preferences as highest priority.",
+                        "- If the preferences do not clearly block this alert, allow it.",
+                        "- Do not add channels that are not listed in candidate_channels.",
+                        "",
+                        "User alert preferences:",
+                        custom_prompt,
+                    ]
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "alert_kind": str(alert_kind or "").strip(),
+                        "candidate_channels": candidates,
+                        "subject": str(subject or "").strip()[:255],
+                        "body": str(body or "").strip()[:3000],
+                        "context": context_payload,
+                        "recipient": {
+                            "id": int(getattr(recipient, "id", 0) or 0),
+                            "username": str(getattr(recipient, "username", "") or "").strip(),
+                            "email": str(getattr(recipient, "email", "") or "").strip(),
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            },
+        ],
+    }
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_payload,
+            timeout=20,
+        )
+    except requests.RequestException:
+        return set(candidates)
+    if response.status_code >= 400:
+        return set(candidates)
+
+    data = response.json() if response.content else {}
+    content = _extract_chat_completion_text(data)
+    parsed = _parse_json_object(content)
+    if not parsed:
+        return set(candidates)
+
+    allowed_raw = parsed.get("allowed_channels")
+    if isinstance(allowed_raw, list):
+        allowed = {
+            channel
+            for channel in _normalize_alert_channels([str(item or "") for item in allowed_raw])
+            if channel in candidates
+        }
+        return allowed
+
+    blocked_raw = parsed.get("blocked_channels")
+    if isinstance(blocked_raw, list):
+        blocked = {
+            channel
+            for channel in _normalize_alert_channels([str(item or "") for item in blocked_raw])
+            if channel in candidates
+        }
+        return set(candidates) - blocked
+
+    send_value = parsed.get("send")
+    if isinstance(send_value, bool):
+        return set(candidates) if send_value else set()
+    if isinstance(send_value, str):
+        lowered = send_value.strip().lower()
+        if lowered in {"false", "0", "no"}:
+            return set()
+        if lowered in {"true", "1", "yes"}:
+            return set(candidates)
+    return set(candidates)
 
 
 def _extract_cloud_log_alert_entries(payload: dict[str, object] | None) -> list[dict[str, str]]:
@@ -246,9 +435,33 @@ def dispatch_cloud_log_error_alerts(*, user, resource, payload: dict[str, object
         if recipient_id <= 0:
             continue
         settings_payload = get_resource_alert_settings(user, resource.resource_uuid, recipient_id)
-
+        candidate_channels: list[str] = []
         if bool(settings_payload.get("cloud_log_errors_app_enabled", True)):
-            add_user_notification(
+            candidate_channels.append("app")
+        if bool(settings_payload.get("cloud_log_errors_sms_enabled", False)):
+            candidate_channels.append("sms")
+        if bool(settings_payload.get("cloud_log_errors_email_enabled", False)):
+            candidate_channels.append("email")
+        allowed_channels = _alert_filter_allowed_channels(
+            recipient=recipient,
+            alert_kind="cloud_log_error",
+            candidate_channels=candidate_channels,
+            subject=subject,
+            body=body,
+            context={
+                "resource_uuid": str(resource.resource_uuid or "").strip(),
+                "resource_name": str(resource.name or "").strip(),
+                "received_at": received_at,
+                "entry_count": len(entries),
+                "highest_level": highest_level,
+                "sample_entries": entries[:3],
+            },
+        )
+        if not allowed_channels:
+            continue
+
+        if "app" in allowed_channels:
+            notification_id = add_user_notification(
                 recipient,
                 kind="cloud_log_alert",
                 title=subject,
@@ -265,13 +478,77 @@ def dispatch_cloud_log_error_alerts(*, user, resource, payload: dict[str, object
                     "received_at": received_at,
                 },
             )
-            dispatched += 1
+            if notification_id:
+                dispatched += 1
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_cloud_log_app",
+                    summary=f"Cloud-log alert for {resource.name} delivered in app.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "app",
+                        "entry_count": len(entries),
+                        "highest_level": highest_level,
+                        "received_at": received_at,
+                    },
+                )
 
-        if bool(settings_payload.get("cloud_log_errors_sms_enabled", False)):
-            _send_transition_sms(recipient=recipient, message=sms_body)
+        if "sms" in allowed_channels:
+            sms_sent, sms_error = _send_transition_sms(recipient=recipient, message=sms_body)
+            if sms_sent:
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_cloud_log_sms",
+                    summary=f"Cloud-log alert for {resource.name} sent by SMS.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "sms",
+                        "entry_count": len(entries),
+                        "highest_level": highest_level,
+                    },
+                )
+            elif sms_error:
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_cloud_log_sms_failed",
+                    summary=f"Cloud-log alert SMS failed for {resource.name}.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "sms",
+                        "error": sms_error,
+                    },
+                )
 
-        if bool(settings_payload.get("cloud_log_errors_email_enabled", False)):
-            _send_transition_email(recipient=recipient, subject=subject, message=body)
+        if "email" in allowed_channels:
+            email_sent, email_error = _send_transition_email(recipient=recipient, subject=subject, message=body)
+            if email_sent:
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_cloud_log_email",
+                    summary=f"Cloud-log alert for {resource.name} sent by email.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "email",
+                        "entry_count": len(entries),
+                        "highest_level": highest_level,
+                    },
+                )
+            elif email_error:
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_cloud_log_email_failed",
+                    summary=f"Cloud-log alert email failed for {resource.name}.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "email",
+                        "error": email_error,
+                    },
+                )
 
     return dispatched
 
@@ -332,9 +609,37 @@ def _dispatch_health_transition_alerts(
         if recipient_id <= 0:
             continue
         settings_payload = get_resource_alert_settings(user, resource.resource_uuid, recipient_id)
-
+        candidate_channels: list[str] = []
         if bool(settings_payload.get("health_alerts_app_enabled", True)):
-            add_user_notification(
+            candidate_channels.append("app")
+        if bool(settings_payload.get("health_alerts_sms_enabled", False)):
+            candidate_channels.append("sms")
+        if bool(settings_payload.get("health_alerts_email_enabled", False)):
+            candidate_channels.append("email")
+        allowed_channels = _alert_filter_allowed_channels(
+            recipient=recipient,
+            alert_kind="health_transition",
+            candidate_channels=candidate_channels,
+            subject=subject,
+            body=body,
+            context={
+                "resource_uuid": str(resource.resource_uuid or "").strip(),
+                "resource_name": str(resource.name or "").strip(),
+                "previous_status": previous,
+                "current_status": current,
+                "checked_at": checked_at,
+                "check_method": check_method,
+                "target": target,
+                "error": error,
+                "latency_ms": latency_ms,
+                "packet_loss_pct": packet_loss_pct,
+            },
+        )
+        if not allowed_channels:
+            continue
+
+        if "app" in allowed_channels:
+            notification_id = add_user_notification(
                 recipient,
                 kind=event_label,
                 title=subject,
@@ -356,12 +661,78 @@ def _dispatch_health_transition_alerts(
                     "checked_at": checked_at,
                 },
             )
+            if notification_id:
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_health_app",
+                    summary=f"Resource health alert for {resource.name} delivered in app.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "app",
+                        "previous_status": previous,
+                        "current_status": current,
+                        "checked_at": checked_at,
+                    },
+                )
 
-        if bool(settings_payload.get("health_alerts_sms_enabled", False)):
-            _send_transition_sms(recipient=recipient, message=sms_body)
+        if "sms" in allowed_channels:
+            sms_sent, sms_error = _send_transition_sms(recipient=recipient, message=sms_body)
+            if sms_sent:
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_health_sms",
+                    summary=f"Resource health alert for {resource.name} sent by SMS.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "sms",
+                        "previous_status": previous,
+                        "current_status": current,
+                        "checked_at": checked_at,
+                    },
+                )
+            elif sms_error:
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_health_sms_failed",
+                    summary=f"Resource health alert SMS failed for {resource.name}.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "sms",
+                        "error": sms_error,
+                    },
+                )
 
-        if bool(settings_payload.get("health_alerts_email_enabled", False)):
-            _send_transition_email(recipient=recipient, subject=subject, message=body)
+        if "email" in allowed_channels:
+            email_sent, email_error = _send_transition_email(recipient=recipient, subject=subject, message=body)
+            if email_sent:
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_health_email",
+                    summary=f"Resource health alert for {resource.name} sent by email.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "email",
+                        "previous_status": previous,
+                        "current_status": current,
+                        "checked_at": checked_at,
+                    },
+                )
+            elif email_error:
+                _log_alert_context_event_safe(
+                    recipient=recipient,
+                    event_type="alert_health_email_failed",
+                    summary=f"Resource health alert email failed for {resource.name}.",
+                    payload={
+                        "resource_uuid": str(resource.resource_uuid or "").strip(),
+                        "resource_name": str(resource.name or "").strip(),
+                        "channel": "email",
+                        "error": email_error,
+                    },
+                )
 
 
 def _http_healthcheck(url: str, timeout: float) -> tuple[str, str]:
@@ -485,7 +856,8 @@ def _fallback_check(resource) -> tuple[str, str, str]:
         status, error = _http_healthcheck(resource.healthcheck_url, timeout=6)
         return status, error, "http"
 
-    if resource.resource_type == "vm" and resource.address and _resource_has_ssh_config(resource):
+    if resource.resource_type == "vm" and resource.address:
+        # VM endpoints commonly disable ICMP; allow TCP/SSH reachability as fallback.
         ssh_port = _coerce_port(resource.ssh_port, 22)
         status, error = _socket_check(resource.address, ssh_port, timeout=4)
         return status, error, "ssh"
@@ -525,6 +897,14 @@ def _check_resource(resource) -> tuple[str, str, str, float | None, float | None
 
     fallback_status, fallback_error, fallback_method = _fallback_check(resource)
     return fallback_status, fallback_error, fallback_method, None, None
+
+
+def probe_resource_ping(resource) -> tuple[str, str, str, float | None, float | None]:
+    ping_target = _ping_address_from_resource(resource)
+    if not ping_target:
+        return STATUS_UNKNOWN, "No ping target configured", "", None, None
+    status, error, latency_ms, packet_loss_pct = _ping_check(ping_target)
+    return status, error, ping_target, latency_ms, packet_loss_pct
 
 
 def _log_health_transition(
