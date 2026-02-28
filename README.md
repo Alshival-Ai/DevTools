@@ -185,7 +185,7 @@ These are persisted to host `./var` via compose volume.
 
 ## Knowledge Base Note (Alpha)
 
-- Team-owned resource health knowledge is currently duplicated into each active team member's personal KB (`var/user_data/<user>/knowledge.db`).
+- Team-owned resource health knowledge is currently duplicated into each active team member's personal KB (`var/user_data/<user>/home/.alshival/knowledge.db`).
 - This is intentional for alpha simplicity so user-scoped retrieval can include team assets without team KB joins.
 - Tradeoff: increased storage/memory usage due to duplication.
 - Team `knowledge.db` stores are treated as inactive in this mode and are pruned by cleanup.

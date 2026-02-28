@@ -260,18 +260,104 @@ def _rotate_encrypted(value: str) -> str:
     return _encrypt_key_text(decrypted)
 
 
+def _user_home_dir(user) -> Path:
+    home_dir = _user_owner_dir(user) / "home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    return home_dir
+
+
+def _user_app_data_dir_for_owner_root(owner_dir: Path) -> Path:
+    owner_name = str(owner_dir.name or "").strip()
+    if owner_name == ".alshival":
+        data_dir = owner_dir
+    else:
+        data_dir = owner_dir / "home" / ".alshival"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def _user_app_data_dir(user) -> Path:
+    owner_dir = _user_owner_dir(user)
+    app_data_dir = _user_app_data_dir_for_owner_root(owner_dir)
+    _migrate_legacy_user_root_files(owner_dir=owner_dir, app_data_dir=app_data_dir)
+    return app_data_dir
+
+
+def _migrate_legacy_user_file(*, owner_dir: Path, filename: str, target_path: Path) -> None:
+    legacy_path = owner_dir / filename
+    if not legacy_path.exists() or target_path.exists():
+        return
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.move(str(legacy_path), str(target_path))
+    except Exception:
+        try:
+            shutil.copy2(str(legacy_path), str(target_path))
+        except Exception:
+            return
+        try:
+            legacy_path.unlink(missing_ok=True)
+        except Exception:
+            return
+
+
+def _migrate_legacy_resources_tree(*, owner_dir: Path, app_data_dir: Path) -> None:
+    legacy_resources_dir = owner_dir / "resources"
+    if not legacy_resources_dir.exists() or not legacy_resources_dir.is_dir():
+        return
+    target_resources_dir = app_data_dir / "resources"
+    target_resources_dir.parent.mkdir(parents=True, exist_ok=True)
+    if not target_resources_dir.exists():
+        try:
+            shutil.move(str(legacy_resources_dir), str(target_resources_dir))
+        except Exception:
+            return
+        return
+
+    for child in list(legacy_resources_dir.iterdir()):
+        destination = target_resources_dir / child.name
+        if destination.exists():
+            continue
+        try:
+            shutil.move(str(child), str(destination))
+        except Exception:
+            continue
+    try:
+        legacy_resources_dir.rmdir()
+    except Exception:
+        return
+
+
+def _migrate_legacy_user_root_files(*, owner_dir: Path, app_data_dir: Path) -> None:
+    _migrate_legacy_user_file(owner_dir=owner_dir, filename="member.db", target_path=app_data_dir / "member.db")
+    _migrate_legacy_user_file(owner_dir=owner_dir, filename="knowledge.db", target_path=app_data_dir / "knowledge.db")
+    _migrate_legacy_resources_tree(owner_dir=owner_dir, app_data_dir=app_data_dir)
+
+
 def _user_db_path(user) -> Path:
-    base_dir = Path(getattr(settings, 'USER_DATA_ROOT', Path(settings.BASE_DIR) / 'user_data'))
-    base_dir.mkdir(parents=True, exist_ok=True)
-    username = user.get_username() or f"user-{user.pk}"
-    safe_username = slugify(username) or f"user-{user.pk}"
-    user_dir = base_dir / f"{safe_username}-{user.pk}"
-    user_dir.mkdir(parents=True, exist_ok=True)
-    return user_dir / 'member.db'
+    owner_dir = _user_owner_dir(user)
+    app_data_dir = _user_app_data_dir_for_owner_root(owner_dir)
+    _migrate_legacy_user_root_files(owner_dir=owner_dir, app_data_dir=app_data_dir)
+    db_path = app_data_dir / "member.db"
+    return db_path
+
+
+def _user_knowledge_db_path_for_owner_root(owner_dir: Path) -> Path:
+    app_data_dir = _user_app_data_dir_for_owner_root(owner_dir)
+    owner_name = str(owner_dir.name or "").strip()
+    if owner_name != ".alshival":
+        _migrate_legacy_user_root_files(owner_dir=owner_dir, app_data_dir=app_data_dir)
+    knowledge_path = app_data_dir / "knowledge.db"
+    return knowledge_path
+
+
+def _user_knowledge_db_path(user) -> Path:
+    owner_dir = _user_owner_dir(user)
+    return _user_knowledge_db_path_for_owner_root(owner_dir)
 
 
 def _user_data_dir(user) -> Path:
-    return _user_db_path(user).parent
+    return _user_app_data_dir(user)
 
 
 def _base_user_data_root() -> Path:
@@ -396,9 +482,9 @@ def _owner_root_dir_for_row(row, fallback_user=None) -> Path:
     if scope == "global":
         return _global_owner_dir()
     if owner_user is not None:
-        return _user_owner_dir(owner_user)
+        return _user_app_data_dir(owner_user)
     if fallback_user is not None:
-        return _user_owner_dir(fallback_user)
+        return _user_app_data_dir(fallback_user)
     raise ValueError("resource package user owner is missing")
 
 
@@ -462,7 +548,10 @@ def get_resource_owner_context(user, resource_uuid: str) -> dict[str, Any]:
 def get_resource_knowledge_db_path(user, resource_uuid: str) -> Path:
     owner_context = get_resource_owner_context(user, resource_uuid)
     owner_root = Path(owner_context["owner_root"])
+    owner_scope = str(owner_context.get("owner_scope") or "").strip().lower()
     owner_root.mkdir(parents=True, exist_ok=True)
+    if owner_scope == "user":
+        return _user_knowledge_db_path_for_owner_root(owner_root)
     return owner_root / "knowledge.db"
 
 
@@ -492,15 +581,19 @@ def transfer_resource_package(
         )
         if row is None:
             safe_uuid = "".join(ch for ch in resolved_uuid.lower() if ch.isalnum() or ch in {"-", "_"}) or "unknown-resource"
-            legacy_source_dir = _user_data_dir(actor) / "resources" / safe_uuid
+            source_candidates = [
+                _user_data_dir(actor) / "resources" / safe_uuid,
+                _user_owner_dir(actor) / "resources" / safe_uuid,
+            ]
+            legacy_source_dir = next((path for path in source_candidates if path.exists()), source_candidates[0])
             if target_owner["owner_scope"] == "team" and target_owner["owner_team"] is not None:
                 target_root = _team_owner_dir(target_owner["owner_team"])
             elif target_owner["owner_scope"] == "global":
                 target_root = _global_owner_dir()
             elif target_owner["owner_user"] is not None:
-                target_root = _user_owner_dir(target_owner["owner_user"])
+                target_root = _user_app_data_dir(target_owner["owner_user"])
             else:
-                target_root = _user_owner_dir(actor)
+                target_root = _user_app_data_dir(actor)
             destination_dir = target_root / "resources" / safe_uuid
             destination_dir.parent.mkdir(parents=True, exist_ok=True)
             if legacy_source_dir.exists() and legacy_source_dir != destination_dir:
@@ -538,9 +631,9 @@ def transfer_resource_package(
         elif target_scope == "global":
             target_root = _global_owner_dir()
         elif target_owner["owner_user"] is not None:
-            target_root = _user_owner_dir(target_owner["owner_user"])
+            target_root = _user_app_data_dir(target_owner["owner_user"])
         else:
-            target_root = _user_owner_dir(actor)
+            target_root = _user_app_data_dir(actor)
         destination_dir = target_root / "resources" / (
             "".join(ch for ch in resolved_uuid.lower() if ch.isalnum() or ch in {"-", "_"}) or "unknown-resource"
         )

@@ -47,7 +47,8 @@ from dashboard.request_auth import authenticate_api_key, get_twilio_auth_token, 
 from dashboard.resource_ssh_exec import execute_resource_ssh_command  # noqa: E402
 from dashboard.resources_store import (
     _global_owner_dir,
-    _user_owner_dir,
+    _user_db_path,
+    _user_knowledge_db_path,
     get_user_outlook_mail_cache_message,
     get_user_alert_filter_prompt,
     get_resource_by_uuid,
@@ -742,7 +743,7 @@ def _outlook_index_for_actor(actor, rows: list[dict[str, Any]]) -> tuple[int, st
     except Exception:
         return 0, "chromadb package is not installed"
 
-    knowledge_path = _user_owner_dir(actor) / "knowledge.db"
+    knowledge_path = _user_knowledge_db_path(actor)
     try:
         client = chromadb.PersistentClient(path=str(knowledge_path))
         collection = client.get_or_create_collection(name="outlook_mail")
@@ -814,7 +815,7 @@ def _outlook_vector_search_for_actor(actor, *, query: str, limit: int) -> tuple[
     except Exception:
         return [], "chromadb package is not installed"
 
-    knowledge_path = _user_owner_dir(actor) / "knowledge.db"
+    knowledge_path = _user_knowledge_db_path(actor)
     if not knowledge_path.exists():
         return [], ""
     try:
@@ -1091,7 +1092,7 @@ def search_kb(
     if actor is None:
         return {"ok": False, "error": "authenticated user identity is required", "results": []}
 
-    personal_path = _user_owner_dir(actor) / "knowledge.db"
+    personal_path = _user_knowledge_db_path(actor)
     global_path = _global_owner_dir() / "knowledge.db"
 
     personal_results, personal_error = _query_chroma_resources(
@@ -1250,8 +1251,8 @@ def outlook_mail(
             "action": "read",
             "auth_mode": "delegated",
             "from_cache": from_cache,
-            "member_db_path": str(_user_owner_dir(actor) / "member.db"),
-            "knowledge_path": str(_user_owner_dir(actor) / "knowledge.db"),
+            "member_db_path": str(_user_db_path(actor)),
+            "knowledge_path": str(_user_knowledge_db_path(actor)),
             "message": message_row,
         }
 
@@ -1354,8 +1355,8 @@ def outlook_mail(
         "cached_count": len(cached_rows),
         "vector_result_count": len(vector_rows),
         "result_count": len(merged[:resolved_limit]),
-        "member_db_path": str(_user_owner_dir(actor) / "member.db"),
-        "knowledge_path": str(_user_owner_dir(actor) / "knowledge.db"),
+        "member_db_path": str(_user_db_path(actor)),
+        "knowledge_path": str(_user_knowledge_db_path(actor)),
         "results": merged[:resolved_limit],
     }
 

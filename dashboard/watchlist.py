@@ -1,10 +1,8 @@
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
 from typing import List
 
-from django.conf import settings
-from django.utils.text import slugify
+from .resources_store import _user_db_path as _resources_user_db_path
 
 
 @dataclass
@@ -17,14 +15,8 @@ class WatchlistItem:
     created_at: str
 
 
-def _user_db_path(user) -> Path:
-    base_dir = Path(getattr(settings, 'USER_DATA_ROOT', Path(settings.BASE_DIR) / 'user_data'))
-    base_dir.mkdir(parents=True, exist_ok=True)
-    username = user.get_username() or f"user-{user.pk}"
-    safe_username = slugify(username) or f"user-{user.pk}"
-    user_dir = base_dir / f"{safe_username}-{user.pk}"
-    user_dir.mkdir(parents=True, exist_ok=True)
-    return user_dir / 'member.db'
+def _user_db_path(user):
+    return _resources_user_db_path(user)
 
 
 def _connect(user) -> sqlite3.Connection:

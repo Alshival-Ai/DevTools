@@ -266,6 +266,14 @@
   - `dashboard/views.py::update_resource_alert_settings`
   - `dashboard/resources_store.py::upsert_resource_alert_settings`
 
+### Overview Agenda Resource Mapping UX
+- Scope is currently Overview page only (`/`); do not assume this UX is enabled on other planner pages yet.
+- In Agenda section task cards, a `Resources` badge is shown in the task row header (right side).
+- Clicking `Resources` opens the agenda resource mapping modal (same `attach-resources` action path).
+- The modal displays resources the user can access across personal/team/global scope (from the Overview resource options payload).
+- Mapping persistence remains via `update_overview_agenda_item_resource_mapping` and existing Asana/agenda mapping flows in `dashboard/static/js/home-overview.js`.
+- Shared planner badge rendering support lives in `dashboard/static/js/planner-ui.js` and styling in `dashboard/static/css/app.css`.
+
 ### Resource Route Aliases and Canonical Forwarding
 - Resource routes now support alias history via `dashboard.models.ResourceRouteAlias`.
 - A resource can be addressed by either:

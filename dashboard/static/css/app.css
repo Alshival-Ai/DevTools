@@ -2830,6 +2830,44 @@ p {
   font-size: 0.9rem;
 }
 
+.planner-item__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.42rem;
+}
+
+.planner-item__badges {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+}
+
+.planner-item-badge-btn {
+  border: 1px solid rgba(59, 130, 246, 0.45);
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.16);
+  color: #dbeafe;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.planner-item-badge-btn:hover {
+  background: rgba(59, 130, 246, 0.28);
+}
+
+.light-style .planner-item-badge-btn {
+  color: #1d4ed8;
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(37, 99, 235, 0.35);
+}
+
 .planner-item__actions {
   display: inline-flex;
   align-items: center;

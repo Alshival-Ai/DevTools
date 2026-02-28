@@ -935,9 +935,17 @@
     form.appendChild(replyLabel);
 
     const submitBtn = document.createElement('button');
-    submitBtn.type = 'submit';
+    submitBtn.type = 'button';
     submitBtn.className = 'primary-btn';
     submitBtn.textContent = 'Post reply';
+    submitBtn.addEventListener('click', (event) => {
+      event.preventDefault();
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
     modalApi.actions.appendChild(submitBtn);
 
     const closeBtn = document.createElement('button');
@@ -1109,6 +1117,10 @@
       const legend = document.createElement('legend');
       legend.textContent = 'Available resources';
       fieldset.appendChild(legend);
+      const helper = document.createElement('p');
+      helper.className = 'text-muted small';
+      helper.textContent = 'Includes personal, team, and global resources you can access.';
+      fieldset.appendChild(helper);
       asanaResourceOptions.forEach((option) => {
         const row = document.createElement('label');
         row.className = 'checkbox';
@@ -1268,9 +1280,11 @@
         done: completed,
         canToggle: true,
         isExternal: true,
+        badges: [
+          { id: 'attach-resources', label: 'Resources', title: 'Attach resources' },
+        ],
         actions: [
           { id: 'comments', label: 'Comments' },
-          { id: 'attach-resources', label: 'Attach Resources' },
           { id: 'delete', label: 'Delete' },
         ],
         sortKey: `${sortPrefix}-${sortDirection}-${String(row.name || '').trim().toLowerCase()}`,
@@ -1347,7 +1361,6 @@
         if (teamsJoinUrl) {
           actions.push({ id: 'join-teams', label: 'Join Teams' });
         }
-        actions.push({ id: 'attach-resources', label: 'Attach Resources' });
         return {
           id: agendaItemId,
           title: String(item && item.title ? item.title : '').trim() || 'Outlook event',
@@ -1360,6 +1373,9 @@
           done: Boolean(item && item.done),
           canToggle: false,
           isExternal: false,
+          badges: [
+            { id: 'attach-resources', label: 'Resources', title: 'Attach resources' },
+          ],
           actions,
           sortKey: `${dueDate || '9999-12-31'} ${dueTime || '99:99'}-${String(item && item.title ? item.title : '').trim().toLowerCase()}`,
         };

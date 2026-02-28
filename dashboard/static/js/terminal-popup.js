@@ -12,7 +12,9 @@
   let askClient = null;
   let askWidgetDragCleanup = null;
   const root = document.body || document.documentElement;
-  const isSuperuser = String((root && root.getAttribute('data-superuser')) || '0') === '1';
+  const isStaff = String(
+    (root && (root.getAttribute('data-staff') || root.getAttribute('data-superuser'))) || '0'
+  ) === '1';
 
   const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (char) => {
     if (char === '&') return '&amp;';
@@ -545,7 +547,7 @@
     askWidget.innerHTML = `
       <div class="ask-terminal-widget__head">
         <strong>${escapeHtml(title || 'Ask Alshival')}</strong>
-        ${isSuperuser ? '<a href="#" class="ask-terminal-widget__sudo" aria-label="Open terminal sudo mode">Sudo mode</a>' : ''}
+        ${isStaff ? '<a href="#" class="ask-terminal-widget__sudo" aria-label="Open terminal sudo mode">Sudo mode</a>' : ''}
         <button type="button" class="ask-terminal-widget__close" aria-label="Close chat">×</button>
       </div>
       <div class="ask-terminal-widget__body ask-chat-widget">
@@ -621,7 +623,7 @@
         await openAskWidget({
           mode: 'shell',
           title: 'System Terminal',
-          hintText: 'Superuser host login shell',
+          hintText: 'Staff host login shell',
         });
       });
     }
@@ -1052,7 +1054,7 @@
     const title = String((options && options.title) || 'Ask Alshival');
     const hintText = String((options && options.hintText) || DEFAULT_HINT);
     if (mode === 'shell') {
-      if (!isSuperuser) return false;
+      if (!isStaff) return false;
       await openAskWidget({
         mode: 'shell',
         title,

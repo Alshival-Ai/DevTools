@@ -154,6 +154,15 @@
                   }))
                   .filter((action) => action.id && action.label)
                 : [],
+              badges: Array.isArray(row && row.badges)
+                ? row.badges
+                  .map((badge, badgeIndex) => ({
+                    id: String(badge && badge.id ? badge.id : `badge-${badgeIndex + 1}`).trim(),
+                    label: String(badge && badge.label ? badge.label : '').trim(),
+                    title: String(badge && badge.title ? badge.title : '').trim(),
+                  }))
+                  .filter((badge) => badge.id && badge.label)
+                : [],
             };
           })
           .filter(Boolean);
@@ -520,7 +529,32 @@
         meta.appendChild(source);
       }
 
-      body.appendChild(titleWrap);
+      const head = document.createElement('div');
+      head.className = 'planner-item__head';
+      head.appendChild(titleWrap);
+      if (Array.isArray(item.badges) && item.badges.length) {
+        const badgesWrap = document.createElement('div');
+        badgesWrap.className = 'planner-item__badges';
+        item.badges.forEach((badge) => {
+          const badgeButton = document.createElement('button');
+          badgeButton.type = 'button';
+          badgeButton.className = 'planner-item-badge-btn';
+          badgeButton.setAttribute('data-planner-section-action', badge.id);
+          badgeButton.setAttribute('data-planner-section-item-key', key);
+          badgeButton.textContent = badge.label;
+          if (badge.title) {
+            badgeButton.title = badge.title;
+            badgeButton.setAttribute('aria-label', badge.title);
+          }
+          badgeButton.addEventListener('click', (event) => {
+            event.preventDefault();
+          });
+          badgesWrap.appendChild(badgeButton);
+        });
+        head.appendChild(badgesWrap);
+      }
+
+      body.appendChild(head);
       if (Array.isArray(item.actions) && item.actions.length) {
         const actionsWrap = document.createElement('div');
         actionsWrap.className = 'planner-item__actions';

@@ -24,7 +24,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.sessions.backends.db import SessionStore
 from django.utils.text import slugify
 
-from dashboard.models import ResourcePackageOwner, ResourceRouteAlias, ResourceTeamShare
+from dashboard.models import ResourcePackageOwner, ResourceRouteAlias, ResourceTeamShare, SystemSetup
 from dashboard.global_ssh_store import get_global_ssh_private_key
 from dashboard.request_auth import user_can_access_resource
 from dashboard.resources_store import (
@@ -46,6 +46,32 @@ def _ensure_terminal_env(env: dict[str, str]) -> dict[str, str]:
     if not str(resolved.get("COLORTERM", "") or "").strip():
         resolved["COLORTERM"] = "truecolor"
     return resolved
+
+
+def _resolve_codex_binary() -> str:
+    configured = str(os.getenv("WEB_TERMINAL_CODEX_BIN", "") or "").strip()
+    if configured:
+        if os.path.isabs(configured):
+            return configured if os.path.exists(configured) else ""
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+    resolved = shutil.which("codex")
+    if resolved:
+        return resolved
+    for candidate in ("/usr/local/bin/codex", "/usr/bin/codex"):
+        if os.path.exists(candidate):
+            return candidate
+    return ""
+
+
+def _interactive_shell_exec_command(shell: str) -> str:
+    shell_name = os.path.basename(str(shell or "").strip())
+    if shell_name == "bash":
+        return f"exec {shlex.quote(shell)} --noprofile --norc -i"
+    if shell_name == "zsh":
+        return f"exec {shlex.quote(shell)} -l -i"
+    return f"exec {shlex.quote(shell)} -i"
 
 
 class TerminalWebSocketApp:
@@ -75,9 +101,38 @@ class TerminalWebSocketApp:
             await session.start()
         except Exception as exc:
             logger.exception("Failed to start terminal session")
-            if isinstance(session, HostShellSession):
+            if isinstance(session, HostResourceSSHSession):
                 try:
-                    fallback = LocalShellSession(user)
+                    fallback = LocalResourceSSHSession(
+                        user,
+                        session.config,
+                        openai_api_key=getattr(session, "_openai_api_key", ""),
+                    )
+                    await fallback.start()
+                    session = fallback
+                    await send(
+                        {
+                            "type": "websocket.send",
+                            "text": "Host shell unavailable; started local resource shell mode instead.\r\n",
+                        }
+                    )
+                except Exception as fallback_exc:
+                    logger.exception("Failed to start fallback local resource shell session")
+                    await send(
+                        {
+                            "type": "websocket.send",
+                            "text": f"Failed to start terminal session: {fallback_exc}\r\n",
+                        }
+                    )
+                    await send({"type": "websocket.close", "code": 1011})
+                    await session.stop()
+                    return
+            elif isinstance(session, HostShellSession):
+                try:
+                    fallback = LocalShellSession(
+                        user,
+                        openai_api_key=getattr(session, "_openai_api_key", ""),
+                    )
                     await fallback.start()
                     session = fallback
                     await send(
@@ -289,6 +344,38 @@ class SSHConfig:
     extra_args: str
 
 
+def _build_ssh_exec_args(config: SSHConfig) -> list[str]:
+    ssh_bin = os.getenv("WEB_TERMINAL_SSH_BIN", "").strip()
+    if not ssh_bin:
+        ssh_bin = shutil.which("ssh") or "/usr/bin/ssh"
+    if not os.path.exists(ssh_bin):
+        raise RuntimeError(f"ssh binary not found at {ssh_bin}")
+
+    args = [ssh_bin, "-tt"]
+    if config.key_path:
+        args.extend(["-i", config.key_path, "-o", "IdentitiesOnly=yes"])
+    args.extend(
+        [
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            f"StrictHostKeyChecking={config.strict_checking}",
+            "-p",
+            str(config.port),
+        ]
+    )
+    if config.known_hosts:
+        args.extend(["-o", f"UserKnownHostsFile={config.known_hosts}"])
+    if config.extra_args:
+        args.extend(shlex.split(config.extra_args))
+    args.append(f"{config.username}@{config.host}")
+    return args
+
+
 class SSHSession(PTYProcessSession):
     def __init__(self, config: SSHConfig):
         super().__init__()
@@ -296,41 +383,14 @@ class SSHSession(PTYProcessSession):
         self.cleanup_paths = [config.key_path]
 
     def _build_args(self) -> list[str]:
-        ssh_bin = os.getenv("WEB_TERMINAL_SSH_BIN", "").strip()
-        if not ssh_bin:
-            ssh_bin = shutil.which("ssh") or "/usr/bin/ssh"
-        if not os.path.exists(ssh_bin):
-            raise RuntimeError(f"ssh binary not found at {ssh_bin}")
-
-        args = [ssh_bin, "-tt"]
-        if self.config.key_path:
-            args.extend(["-i", self.config.key_path, "-o", "IdentitiesOnly=yes"])
-        args.extend(
-            [
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "ServerAliveInterval=30",
-                "-o",
-                "ServerAliveCountMax=3",
-                "-o",
-                f"StrictHostKeyChecking={self.config.strict_checking}",
-                "-p",
-                str(self.config.port),
-            ]
-        )
-        if self.config.known_hosts:
-            args.extend(["-o", f"UserKnownHostsFile={self.config.known_hosts}"])
-        if self.config.extra_args:
-            args.extend(shlex.split(self.config.extra_args))
-        args.append(f"{self.config.username}@{self.config.host}")
-        return args
+        return _build_ssh_exec_args(self.config)
 
 
 class HostShellSession(PTYProcessSession):
-    def __init__(self, user):
+    def __init__(self, user, *, openai_api_key: str = ""):
         super().__init__()
         self.user = user
+        self._openai_api_key = str(openai_api_key or "").strip()
         self._target_username = ""
         self._os_username = ""
         self._os_home = ""
@@ -428,10 +488,72 @@ class HostShellSession(PTYProcessSession):
         self._target_username = candidate[:32]
         return self._target_username
 
+    def _resolve_host_home_root(self) -> str:
+        configured_root = str(os.getenv("WEB_TERMINAL_HOST_HOME_ROOT", "") or "").strip()
+        if configured_root:
+            os.makedirs(configured_root, exist_ok=True)
+            return configured_root
+        user_data_root = str(getattr(settings, "USER_DATA_ROOT", "") or "").strip()
+        if not user_data_root:
+            user_data_root = str(settings.BASE_DIR / "var" / "user_data")
+        host_home_root = os.path.join(user_data_root, "host_homes")
+        os.makedirs(host_home_root, exist_ok=True)
+        return host_home_root
+
+    def _desired_target_home(self, username: str) -> str:
+        return os.path.join(self._resolve_host_home_root(), username, "home")
+
+    def _ensure_target_home_mapping(self, *, username: str, current_home: str) -> None:
+        desired_home = self._desired_target_home(username)
+        if str(current_home or "").strip() == desired_home:
+            return
+        privileged_prefix = self._privileged_prefix()
+        usermod_bin = shutil.which("usermod") or "/usr/sbin/usermod"
+        subprocess.run(
+            [*privileged_prefix, "mkdir", "-p", os.path.dirname(desired_home)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        move_result = subprocess.run(
+            [*privileged_prefix, usermod_bin, "--home", desired_home, "--move-home", username],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if move_result.returncode != 0:
+            set_home_result = subprocess.run(
+                [*privileged_prefix, usermod_bin, "--home", desired_home, username],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if set_home_result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to set persistent home for host user '{username}' at '{desired_home}'."
+                )
+            subprocess.run(
+                [*privileged_prefix, "mkdir", "-p", desired_home],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        subprocess.run(
+            [*privileged_prefix, "chown", "-R", f"{username}:{username}", desired_home],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
     def _ensure_target_account(self) -> None:
         target_username = self._resolve_target_username()
+        target_home = self._desired_target_home(target_username)
         try:
-            pwd.getpwnam(target_username)
+            entry = pwd.getpwnam(target_username)
+            self._ensure_target_home_mapping(
+                username=target_username,
+                current_home=str(entry.pw_dir or "").strip(),
+            )
             return
         except KeyError:
             pass
@@ -439,11 +561,14 @@ class HostShellSession(PTYProcessSession):
         default_shell = str(os.getenv("WEB_TERMINAL_HOST_DEFAULT_SHELL", "") or "").strip() or "/bin/bash"
         useradd_bin = shutil.which("useradd") or "/usr/sbin/useradd"
         privileged_prefix = self._privileged_prefix()
+        os.makedirs(os.path.dirname(target_home), exist_ok=True)
         result = subprocess.run(
             [
                 *privileged_prefix,
                 useradd_bin,
                 "--create-home",
+                "--home-dir",
+                target_home,
                 "--shell",
                 default_shell,
                 target_username,
@@ -460,11 +585,38 @@ class HostShellSession(PTYProcessSession):
             raise RuntimeError(f"Host user '{target_username}' was not created.") from exc
 
     def _ensure_codex_ready_for_target(self) -> None:
+        target_username = self._resolve_target_username()
         ensure_flag = str(os.getenv("WEB_TERMINAL_ENSURE_CODEX", "1") or "").strip().lower()
-        if ensure_flag in {"0", "false", "no", "off"}:
+        if ensure_flag not in {"0", "false", "no", "off"}:
+            self._ensure_codex_global_install()
+            self._ensure_codex_profile(target_username)
+        self._ensure_codex_api_key_login(target_username)
+
+    def _ensure_codex_api_key_login(self, username: str) -> None:
+        if not self._openai_api_key:
             return
-        self._ensure_codex_global_install()
-        self._ensure_codex_profile(self._resolve_target_username())
+        codex_bin = _resolve_codex_binary()
+        if not codex_bin:
+            return
+        cmd = self._run_as_user_command(username, [codex_bin, "login", "--with-api-key"])
+        try:
+            result = subprocess.run(
+                cmd,
+                input=f"{self._openai_api_key}\n".encode("utf-8"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "Failed to persist Codex API key for host terminal user '%s'.",
+                    username,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to provision Codex API key for host terminal user '%s'.",
+                username,
+            )
 
     def _ensure_codex_global_install(self) -> None:
         if shutil.which("codex") or os.path.exists("/usr/local/bin/codex") or os.path.exists("/usr/bin/codex"):
@@ -619,6 +771,8 @@ path.write_text("\\n".join(lines).rstrip() + "\\n", encoding="utf-8")
             env["LOGNAME"] = username
         if home_dir and os.path.isdir(home_dir):
             env["HOME"] = home_dir
+        if self._openai_api_key:
+            env["OPENAI_API_KEY"] = self._openai_api_key
         return env
 
     def _build_cwd(self) -> str | None:
@@ -632,9 +786,10 @@ path.write_text("\\n".join(lines).rstrip() + "\\n", encoding="utf-8")
 
 
 class LocalShellSession(PTYProcessSession):
-    def __init__(self, user):
+    def __init__(self, user, *, openai_api_key: str = ""):
         super().__init__()
         self.user = user
+        self._openai_api_key = str(openai_api_key or "").strip()
         self._resolved_username = ""
         self._resolved_home = ""
 
@@ -692,6 +847,8 @@ class LocalShellSession(PTYProcessSession):
             current_path = str(env.get("PATH") or "")
             env["PATH"] = f"{venv_bin}:{current_path}" if current_path else venv_bin
             env["VIRTUAL_ENV"] = venv_dir
+        if self._openai_api_key:
+            env["OPENAI_API_KEY"] = self._openai_api_key
         return env
 
     def _build_cwd(self) -> str | None:
@@ -750,6 +907,7 @@ class LocalShellSession(PTYProcessSession):
 
     def _prepare_local_environment_sync(self, home_dir: str):
         self._ensure_codex_profile_sync(home_dir)
+        self._ensure_codex_api_key_sync(home_dir)
         venv_dir = self._venv_dir(home_dir)
         venv_python = os.path.join(venv_dir, "bin", "python")
         base_env = os.environ.copy()
@@ -785,6 +943,34 @@ class LocalShellSession(PTYProcessSession):
             stderr=subprocess.DEVNULL,
             check=False,
         )
+
+    def _ensure_codex_api_key_sync(self, home_dir: str) -> None:
+        if not self._openai_api_key:
+            return
+        codex_bin = _resolve_codex_binary()
+        if not codex_bin:
+            return
+        base_env = os.environ.copy()
+        base_env["HOME"] = home_dir
+        try:
+            result = subprocess.run(
+                [codex_bin, "login", "--with-api-key"],
+                env=base_env,
+                input=f"{self._openai_api_key}\n".encode("utf-8"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "Failed to persist Codex API key for local terminal user '%s'.",
+                    self._resolve_local_identity()[0],
+                )
+        except Exception:
+            logger.warning(
+                "Failed to provision Codex API key for local terminal user '%s'.",
+                self._resolve_local_identity()[0],
+            )
 
     @staticmethod
     def _ensure_codex_profile_sync(home_dir: str) -> None:
@@ -847,6 +1033,81 @@ class LocalShellSession(PTYProcessSession):
                 handle.write("\n".join(lines).rstrip() + "\n")
         except OSError:
             return
+
+
+class HostResourceSSHSession(HostShellSession):
+    def __init__(self, user, config: SSHConfig, *, openai_api_key: str = ""):
+        super().__init__(user, openai_api_key=openai_api_key)
+        self.config = config
+        self.cleanup_paths = [config.key_path]
+
+    async def start(self):
+        await asyncio.to_thread(self._ensure_target_account)
+        await PTYProcessSession.start(self)
+
+    def _build_args(self) -> list[str]:
+        username, _home, os_shell = self._resolve_os_identity()
+        if not username:
+            raise RuntimeError("Unable to resolve host terminal account.")
+        shell = str(os.getenv("WEB_TERMINAL_HOST_SHELL", "") or "").strip() or os_shell
+        if not shell:
+            shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+        if not os.path.exists(shell):
+            raise RuntimeError(f"host shell not found at {shell}")
+
+        ssh_command = " ".join(shlex.quote(part) for part in _build_ssh_exec_args(self.config))
+        fallback_shell = _interactive_shell_exec_command(shell)
+        startup_script = (
+            "set +e; "
+            "cd \"$HOME\" >/dev/null 2>&1 || true; "
+            "export TERM=\"${TERM:-xterm-256color}\"; "
+            "export COLORTERM=\"${COLORTERM:-truecolor}\"; "
+            f"{ssh_command}; "
+            "ssh_status=$?; "
+            "if [ \"$ssh_status\" -ne 0 ]; then "
+            "echo ''; "
+            "echo \"[ssh session ended with status ${ssh_status}]\"; "
+            "fi; "
+            f"{fallback_shell}"
+        )
+        return self._run_as_user_command(username, [shell, "-lc", startup_script])
+
+
+class LocalResourceSSHSession(LocalShellSession):
+    def __init__(self, user, config: SSHConfig, *, openai_api_key: str = ""):
+        super().__init__(user, openai_api_key=openai_api_key)
+        self.config = config
+        self.cleanup_paths = [config.key_path]
+
+    async def start(self):
+        _username, home_dir = self._resolve_local_identity()
+        if home_dir:
+            os.makedirs(home_dir, exist_ok=True)
+        await PTYProcessSession.start(self)
+
+    def _build_args(self) -> list[str]:
+        shell = str(os.getenv("WEB_TERMINAL_LOCAL_SHELL", "") or "").strip()
+        if not shell:
+            shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+        if not os.path.exists(shell):
+            raise RuntimeError(f"local shell not found at {shell}")
+
+        ssh_command = " ".join(shlex.quote(part) for part in _build_ssh_exec_args(self.config))
+        fallback_shell = _interactive_shell_exec_command(shell)
+        startup_script = (
+            "set +e; "
+            "cd \"$HOME\" >/dev/null 2>&1 || true; "
+            "export TERM=\"${TERM:-xterm-256color}\"; "
+            "export COLORTERM=\"${COLORTERM:-truecolor}\"; "
+            f"{ssh_command}; "
+            "ssh_status=$?; "
+            "if [ \"$ssh_status\" -ne 0 ]; then "
+            "echo ''; "
+            "echo \"[ssh session ended with status ${ssh_status}]\"; "
+            "fi; "
+            f"{fallback_shell}"
+        )
+        return [shell, "-lc", startup_script]
 
 
 class AgentSession:
@@ -1054,14 +1315,15 @@ async def _build_terminal_session(scope, user):
     mode = str((query_params.get("mode") or [""])[0] or "").strip().lower()
 
     if mode == "shell":
-        if not bool(getattr(user, "is_superuser", False)):
-            raise PermissionError("Local shell access is restricted to superusers.")
-        # Prefer host-account shells for superusers so sessions open in the
+        if not bool(getattr(user, "is_staff", False)):
+            raise PermissionError("Local shell access is restricted to staff.")
+        openai_api_key = await _resolve_terminal_openai_api_key()
+        # Prefer host-account shells for staff users so sessions open in the
         # provisioned per-user OS home (for example /home/<username>). Fall
         # back to local shell mode when sudo/root user switching is unavailable.
         if HostShellSession._can_switch_users():
-            return HostShellSession(user)
-        return LocalShellSession(user)
+            return HostShellSession(user, openai_api_key=openai_api_key)
+        return LocalShellSession(user, openai_api_key=openai_api_key)
 
     if mode == "agent":
         return AgentSession(user)
@@ -1075,7 +1337,21 @@ async def _build_terminal_session(scope, user):
         resource_id=resource_id,
         resource_uuid=resource_uuid,
     )
+    if bool(getattr(user, "is_staff", False)):
+        openai_api_key = await _resolve_terminal_openai_api_key()
+        if HostShellSession._can_switch_users():
+            return HostResourceSSHSession(user, ssh_config, openai_api_key=openai_api_key)
+        return LocalResourceSSHSession(user, ssh_config, openai_api_key=openai_api_key)
     return SSHSession(ssh_config)
+
+
+@sync_to_async
+def _resolve_terminal_openai_api_key() -> str:
+    setup = SystemSetup.objects.order_by("-updated_at", "-created_at").first()
+    configured = str(getattr(setup, "openai_api_key", "") or "").strip() if setup is not None else ""
+    if configured:
+        return configured
+    return str(os.getenv("OPENAI_API_KEY", "") or "").strip()
 
 
 @sync_to_async

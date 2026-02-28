@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
+import os
 from pathlib import Path
 import random
+import socket
 import time
 
 from django.conf import settings
@@ -71,6 +73,56 @@ class Command(BaseCommand):
             help="Maximum concurrent workers per cycle (default: 16).",
         )
 
+    def _egress_probe_targets(self) -> list[tuple[str, int]]:
+        raw_targets = str(os.getenv("HEALTH_EGRESS_PROBE_TARGETS", "") or "").strip()
+        if raw_targets:
+            candidates = [item.strip() for item in raw_targets.split(",") if item.strip()]
+        else:
+            candidates = [
+                "1.1.1.1:443",
+                "8.8.8.8:53",
+                "9.9.9.9:53",
+            ]
+
+        parsed: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
+        for candidate in candidates:
+            host = candidate
+            port = 443
+            if ":" in candidate:
+                maybe_host, maybe_port = candidate.rsplit(":", 1)
+                host = maybe_host.strip()
+                try:
+                    port = int(maybe_port.strip())
+                except Exception:
+                    continue
+            host = str(host or "").strip()
+            if not host:
+                continue
+            if not (1 <= int(port) <= 65535):
+                continue
+            key = (host, int(port))
+            if key in seen:
+                continue
+            seen.add(key)
+            parsed.append(key)
+        return parsed
+
+    def _verify_egress(self, timeout_seconds: float = 3.0) -> tuple[bool, str]:
+        probe_targets = self._egress_probe_targets()
+        if not probe_targets:
+            return False, "no egress probe targets configured"
+
+        failures: list[str] = []
+        for host, port in probe_targets:
+            try:
+                with socket.create_connection((host, int(port)), timeout=float(timeout_seconds)):
+                    pass
+                return True, f"{host}:{int(port)}"
+            except Exception as exc:
+                failures.append(f"{host}:{int(port)} ({exc})")
+        return False, "; ".join(failures[:3])
+
     def _resource_data_roots(self) -> dict[str, Path]:
         return {
             "user": Path(getattr(settings, "USER_DATA_ROOT", Path(settings.BASE_DIR) / "var" / "user_data")),
@@ -89,6 +141,13 @@ class Command(BaseCommand):
                     continue
                 if scope == "global":
                     resource_roots = [root_path / "resources"]
+                elif scope == "user":
+                    resource_roots = []
+                    for entry in root_path.iterdir():
+                        if not entry.is_dir():
+                            continue
+                        resource_roots.append(entry / "home" / ".alshival" / "resources")
+                        resource_roots.append(entry / "resources")
                 else:
                     resource_roots = [entry / "resources" for entry in root_path.iterdir() if entry.is_dir()]
                 for resources_dir in resource_roots:
@@ -194,7 +253,11 @@ class Command(BaseCommand):
         finally:
             close_old_connections()
 
-    def _run_cycle(self, users_per_worker: int, max_workers: int) -> tuple[int, int, int, int, int, int, int, int, int]:
+    def _run_cycle(
+        self,
+        users_per_worker: int,
+        max_workers: int,
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int]:
         if not is_global_monitoring_enabled():
             cleanup = self._safe_cleanup_stale_knowledge_records()
             return (
@@ -207,7 +270,26 @@ class Command(BaseCommand):
                 int(cleanup.get("scanned", 0)),
                 int(cleanup.get("removed_knowledge", 0)),
                 int(cleanup.get("removed_snapshots", 0)),
+                0,
             )
+
+        egress_ok, egress_detail = self._verify_egress()
+        if not egress_ok:
+            self.stderr.write(f"[health-worker] egress check failed; skipping cycle ({egress_detail})")
+            cleanup = self._safe_cleanup_stale_knowledge_records()
+            return (
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                int(cleanup.get("scanned", 0)),
+                int(cleanup.get("removed_knowledge", 0)),
+                int(cleanup.get("removed_snapshots", 0)),
+                1,
+            )
+
         targets, discovery_errors, unresolved, discovered_total = self._discover_targets()
         target_count = len(targets)
         if target_count == 0:
@@ -222,6 +304,7 @@ class Command(BaseCommand):
                 int(cleanup.get("scanned", 0)),
                 int(cleanup.get("removed_knowledge", 0)),
                 int(cleanup.get("removed_snapshots", 0)),
+                0,
             )
 
         ratio = max(1, int(users_per_worker))
@@ -258,6 +341,7 @@ class Command(BaseCommand):
             int(cleanup.get("scanned", 0)),
             int(cleanup.get("removed_knowledge", 0)),
             int(cleanup.get("removed_snapshots", 0)),
+            0,
         )
 
     def handle(self, *args, **options):
@@ -286,6 +370,7 @@ class Command(BaseCommand):
                 cleanup_scanned,
                 cleanup_removed_knowledge,
                 cleanup_removed_snapshots,
+                egress_skipped,
             ) = self._run_cycle(
                 users_per_worker=users_per_worker,
                 max_workers=max_workers,
@@ -296,6 +381,7 @@ class Command(BaseCommand):
                 f"targets={target_count} pool_workers={pool_workers} "
                 f"checked={checked_count} errors={error_count} "
                 f"discovered={discovered_total} unresolved={unresolved} "
+                f"egress_skipped={egress_skipped} "
                 f"cleanup_scanned={cleanup_scanned} cleanup_removed_knowledge={cleanup_removed_knowledge} "
                 f"cleanup_removed_snapshots={cleanup_removed_snapshots} elapsed={elapsed:.1f}s"
             )

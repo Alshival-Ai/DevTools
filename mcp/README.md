@@ -41,7 +41,7 @@ Tools:
 - `ping` (dummy tool)
 - `search_kb`:
   - input: `query`
-  - searches authenticated user's `var/user_data/<user>/knowledge.db` (top 4)
+  - searches authenticated user's `var/user_data/<user>/home/.alshival/knowledge.db` (top 4)
   - searches `var/global_data/knowledge.db` (top 3)
   - includes accessible Workspace Wiki matches (top 4)
   - returns both buckets and merged results

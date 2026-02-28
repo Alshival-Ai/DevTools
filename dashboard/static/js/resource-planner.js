@@ -1026,10 +1026,11 @@
   };
 
   const openAsanaAgendaSections = (context) => {
+    const view = String(context && context.view ? context.view : '').trim().toLowerCase();
+    if (view !== 'agenda') return [];
     const activeFilter = String(context && context.activeFilter ? context.activeFilter : 'all').trim().toLowerCase();
     if (activeFilter !== 'all') return [];
-    const view = String(context && context.view ? context.view : '').trim().toLowerCase();
-    const includeCompletedWindow = view === 'agenda';
+    const includeCompletedWindow = true;
 
     const candidateRows = asanaTasks
       .filter((row) => row && typeof row === 'object')
@@ -1182,5 +1183,8 @@
       const message = String(error && error.message ? error.message : 'request_failed');
       window.alert(`Unable to run ${actionName} for "${taskName}": ${message}`);
     },
+    showListTimelineItems: (context) => String(context && context.activeFilter ? context.activeFilter : 'all')
+      .trim()
+      .toLowerCase() !== 'all',
   });
 })();

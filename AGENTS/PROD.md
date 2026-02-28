@@ -13,6 +13,8 @@
 - Static root: `/app/var/staticfiles`
 - Entrypoint: `docker/entrypoint.sh`
   - Applies migrations (unless `RUN_MIGRATE=0`)
+  - Runs per-user home data migration (`migrate_user_home_data`) when `RUN_USER_HOME_MIGRATION=1` (defaults to `RUN_MIGRATE`)
+    - Optional flags: `RUN_USER_HOME_MIGRATION_DRY_RUN=1`, `RUN_USER_HOME_MIGRATION_SKIP_PRUNE=1`, `RUN_USER_HOME_MIGRATION_FINALIZE=1`
   - Runs collectstatic (unless `RUN_COLLECTSTATIC=0`)
 
 ## Resource Details: Current Production UI State

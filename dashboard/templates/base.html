@@ -56,7 +56,9 @@
   {% vite_hmr %}
   {% vite_asset 'src/main.jsx' %}
 </head>
-<body data-superuser="{% if request.user.is_authenticated and request.user.is_superuser %}1{% else %}0{% endif %}">
+<body
+  data-superuser="{% if request.user.is_authenticated and request.user.is_superuser %}1{% else %}0{% endif %}"
+  data-staff="{% if request.user.is_authenticated and request.user.is_staff %}1{% else %}0{% endif %}">
   <div class="page-loader" aria-hidden="true">
     <div class="page-loader__backdrop"></div>
     <div class="page-loader__card">

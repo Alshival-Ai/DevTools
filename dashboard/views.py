@@ -109,6 +109,8 @@ from .resources_store import (
     list_resources,
     list_ssh_credentials,
     _global_owner_dir,
+    _user_db_path,
+    _user_knowledge_db_path,
     _user_owner_dir,
     get_resource_owner_context,
     mark_all_user_notifications_read,
@@ -11153,7 +11155,7 @@ def _build_topbar_kb_suggestions(*, actor, rows: list[dict], limit: int = 8) -> 
 
 def _tool_search_kb_for_actor(actor, args: dict) -> dict:
     query = str(args.get("query") or "").strip()
-    user_path = _user_owner_dir(actor) / "knowledge.db"
+    user_path = _user_knowledge_db_path(actor)
     global_path = _global_owner_dir() / "knowledge.db"
 
     user_results, user_error = _query_kb_resources(
@@ -12339,7 +12341,7 @@ def _outlook_mail_index_for_actor(actor, rows: list[dict]) -> tuple[int, str]:
     except Exception:
         return 0, "chromadb package is not installed"
 
-    knowledge_path = _user_owner_dir(actor) / "knowledge.db"
+    knowledge_path = _user_knowledge_db_path(actor)
     try:
         client = chromadb.PersistentClient(path=str(knowledge_path))
         collection = client.get_or_create_collection(name="outlook_mail")
@@ -12411,7 +12413,7 @@ def _outlook_mail_vector_search_for_actor(actor, *, query: str, limit: int) -> t
     except Exception:
         return [], "chromadb package is not installed"
 
-    knowledge_path = _user_owner_dir(actor) / "knowledge.db"
+    knowledge_path = _user_knowledge_db_path(actor)
     if not knowledge_path.exists():
         return [], ""
     try:
@@ -12751,8 +12753,8 @@ def _tool_outlook_mail_for_actor(
             "action": "read",
             "auth_mode": "delegated",
             "from_cache": from_cache,
-            "member_db_path": str(_user_owner_dir(actor) / "member.db"),
-            "knowledge_path": str(_user_owner_dir(actor) / "knowledge.db"),
+            "member_db_path": str(_user_db_path(actor)),
+            "knowledge_path": str(_user_knowledge_db_path(actor)),
             "message": message_row,
         }
 
@@ -12859,8 +12861,8 @@ def _tool_outlook_mail_for_actor(
         "cached_count": len(cached_rows),
         "vector_result_count": len(vector_rows),
         "result_count": len(merged[:resolved_limit]),
-        "member_db_path": str(_user_owner_dir(actor) / "member.db"),
-        "knowledge_path": str(_user_owner_dir(actor) / "knowledge.db"),
+        "member_db_path": str(_user_db_path(actor)),
+        "knowledge_path": str(_user_knowledge_db_path(actor)),
         "results": merged[:resolved_limit],
     }
 

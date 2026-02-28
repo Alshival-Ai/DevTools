@@ -15,7 +15,8 @@ from django.contrib.auth.models import Group
 
 from .models import ResourcePackageOwner, WikiPage
 from .resources_store import (
-    _user_owner_dir,
+    _user_knowledge_db_path,
+    _user_knowledge_db_path_for_owner_root,
     get_resource_knowledge_db_path,
     get_resource_owner_context,
     list_resource_agenda_tasks,
@@ -88,7 +89,23 @@ def _owner_sqlite_db_path(owner_root: Path, owner_scope: str) -> Path:
         return owner_root / "global.db"
     if scope == "team":
         return owner_root / "team.db"
-    return owner_root / "member.db"
+    root_name = str(owner_root.name or "").strip()
+    if root_name == ".alshival":
+        member_db_path = owner_root / "member.db"
+        home_dir = owner_root.parent
+        legacy_owner_root = home_dir.parent if str(home_dir.name or "").strip() == "home" else None
+    else:
+        member_db_path = owner_root / "home" / ".alshival" / "member.db"
+        legacy_owner_root = owner_root
+    if legacy_owner_root is not None:
+        legacy_path = legacy_owner_root / "member.db"
+        if legacy_path.exists() and not member_db_path.exists():
+            try:
+                member_db_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(legacy_path), str(member_db_path))
+            except Exception:
+                pass
+    return member_db_path
 
 
 def _ensure_owner_snapshot_schema(conn: sqlite3.Connection) -> None:
@@ -586,7 +603,7 @@ def upsert_resource_health_knowledge(
             team = Group.objects.filter(id=owner_team_id).first()
             team_members = list(team.user_set.filter(is_active=True).order_by("id")) if team is not None else []
             for member in team_members:
-                member_kb_path = _user_owner_dir(member) / "knowledge.db"
+                member_kb_path = _user_knowledge_db_path(member)
                 member_collection = _get_chroma_collection(member_kb_path)
                 if member_collection is None:
                     continue
@@ -632,7 +649,12 @@ def _iter_owner_roots() -> list[tuple[str, Path]]:
 
     if user_root.exists():
         for entry in user_root.iterdir():
-            if entry.is_dir():
+            if not entry.is_dir():
+                continue
+            home_app_root = entry / "home" / ".alshival"
+            if home_app_root.exists() and home_app_root.is_dir():
+                roots.append(("user", home_app_root))
+            else:
                 roots.append(("user", entry))
     if team_root.exists():
         for entry in team_root.iterdir():
@@ -645,6 +667,10 @@ def _iter_owner_roots() -> list[tuple[str, Path]]:
 
 def _user_id_from_owner_root(owner_root: Path) -> int:
     slug = str(owner_root.name or "").strip()
+    if slug == ".alshival":
+        home_dir = owner_root.parent
+        user_dir = home_dir.parent if str(home_dir.name or "").strip() == "home" else Path("")
+        slug = str(user_dir.name or "").strip()
     if "-" not in slug:
         return 0
     suffix = slug.rsplit("-", 1)[-1]
@@ -702,8 +728,12 @@ def cleanup_stale_knowledge_records() -> dict[str, int]:
         scanned += 1
         existing = _existing_resource_uuids(owner_root, owner_scope)
 
-        knowledge_path = owner_root / "knowledge.db"
         scope = str(owner_scope or "").strip().lower()
+        knowledge_path = (
+            _user_knowledge_db_path_for_owner_root(owner_root)
+            if scope == "user"
+            else owner_root / "knowledge.db"
+        )
         if scope == "team":
             # Alpha behavior duplicates team-owned resource knowledge into member KBs.
             # Team knowledge.db is no longer an active source and can be pruned.
