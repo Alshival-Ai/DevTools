@@ -149,6 +149,7 @@ ACCOUNT_LOGIN_METHODS = {'username', 'email'}
 ACCOUNT_SIGNUP_FIELDS = ['email', 'username*', 'password1*', 'password2*']
 SOCIALACCOUNT_LOGIN_ON_GET = True
 SOCIALACCOUNT_STORE_TOKENS = True
+SOCIALACCOUNT_ADAPTER = "dashboard.allauth_adapter.SocialAccountAdapter"
 ALSHIVAL_INGEST_API_KEY = os.getenv('ALSHIVAL_INGEST_API_KEY', '').strip()
 
 _ssh_keys_env = os.getenv('ALSHIVAL_SSH_KEY_MASTER_KEYS', '').strip()

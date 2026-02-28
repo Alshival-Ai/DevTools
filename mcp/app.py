@@ -64,6 +64,12 @@ from dashboard.calendar_sync_service import (
     DEFAULT_CALENDAR_REFRESH_MIN_INTERVAL_SECONDS,
     refresh_calendar_cache_for_user,
 )  # noqa: E402
+from dashboard.views import (  # noqa: E402
+    _asana_access_token_for_user,
+    _asana_api_request_json,
+    _asana_api_list,
+    _asana_error_requires_refresh,
+)
 
 API_KEY_HEADER = (os.getenv("MCP_API_KEY_HEADER") or "x-api-key").strip() or "x-api-key"
 USERNAME_HEADER = (os.getenv("MCP_USERNAME_HEADER") or "x-user-username").strip() or "x-user-username"
@@ -1519,6 +1525,568 @@ def outlook_calendar(
         "context_lines": context_lines,
         "results": limited,
     }
+
+
+@mcp.tool()
+def asana_calendar(
+    query: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    board: str = "",
+    section: str = "",
+    refresh: bool = True,
+    include_completed: bool = False,
+    include_unscheduled: bool = False,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """
+    Query Asana tasks from the per-user calendar cache in member.db.
+
+    Examples:
+    - `asana_calendar(start_date="2026-02-28", end_date="2026-03-07", refresh=True)`
+    - `asana_calendar(query="infrastructure", board="Engineering", include_completed=False, limit=25)`
+    - `asana_calendar(section="In Progress", include_unscheduled=True)`
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required", "results": []}
+
+    resolved_query = str(query or "").strip().lower()
+    resolved_board = str(board or "").strip().lower()
+    resolved_section = str(section or "").strip().lower()
+    resolved_limit = max(1, min(int(limit or 200), 1000))
+    start_dt = _parse_ymd(start_date)
+    end_dt = _parse_ymd(end_date)
+    if start_date and start_dt is None:
+        return {"ok": False, "error": "start_date must be YYYY-MM-DD", "results": []}
+    if end_date and end_dt is None:
+        return {"ok": False, "error": "end_date must be YYYY-MM-DD", "results": []}
+    if start_dt is not None and end_dt is not None and end_dt < start_dt:
+        return {"ok": False, "error": "end_date must be on/after start_date", "results": []}
+
+    refresh_requested = bool(refresh)
+    refresh_applied = False
+    refresh_result: dict[str, Any] = {}
+    refresh_error = ""
+    refresh_min_interval_seconds = int(DEFAULT_CALENDAR_REFRESH_MIN_INTERVAL_SECONDS)
+    if refresh_requested:
+        try:
+            refresh_result = refresh_calendar_cache_for_user(
+                actor,
+                provider="asana",
+                force=False,
+                min_interval_seconds=refresh_min_interval_seconds,
+            )
+            provider_result = refresh_result.get("asana") if isinstance(refresh_result, dict) else {}
+            refresh_applied = bool(provider_result.get("refresh_attempted")) if isinstance(provider_result, dict) else False
+        except Exception as exc:
+            refresh_error = str(exc)
+
+    rows = list_user_calendar_event_cache(
+        actor,
+        provider="asana",
+        limit=5000,
+        include_completed=bool(include_completed),
+    )
+
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        row_title = str(row.get("title") or "").strip()
+        row_due_date = str(row.get("due_date") or "").strip()
+        row_due_time = str(row.get("due_time") or "").strip()
+        row_status = str(row.get("status") or "").strip().lower()
+        row_source_url = str(row.get("source_url") or "").strip()
+        row_payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        row_completed = bool(row.get("is_completed"))
+
+        if not include_unscheduled and not row_due_date:
+            continue
+
+        row_due_dt = _parse_ymd(row_due_date) if row_due_date else None
+        if start_dt is not None and (row_due_dt is None or row_due_dt < start_dt):
+            continue
+        if end_dt is not None and (row_due_dt is None or row_due_dt > end_dt):
+            continue
+
+        # Extract Asana-specific fields from payload
+        memberships = row_payload.get("memberships") if isinstance(row_payload, dict) else []
+        memberships = memberships if isinstance(memberships, list) else []
+        row_boards: list[str] = []
+        row_sections: list[str] = []
+        for m in memberships:
+            if not isinstance(m, dict):
+                continue
+            project = m.get("project") if isinstance(m.get("project"), dict) else {}
+            project_name = str(project.get("name") or "").strip()
+            if project_name:
+                row_boards.append(project_name)
+            sec = m.get("section") if isinstance(m.get("section"), dict) else {}
+            sec_name = str(sec.get("name") or "").strip()
+            if sec_name:
+                row_sections.append(sec_name)
+        row_notes = str(row_payload.get("notes") or "").strip() if isinstance(row_payload, dict) else ""
+        workspace_name = ""
+        if isinstance(row_payload, dict):
+            ws = row_payload.get("workspace")
+            if isinstance(ws, dict):
+                workspace_name = str(ws.get("name") or "").strip()
+
+        # Filter by board name
+        if resolved_board:
+            if not any(resolved_board in b.lower() for b in row_boards):
+                continue
+
+        # Filter by section name
+        if resolved_section:
+            if not any(resolved_section in s.lower() for s in row_sections):
+                continue
+
+        # Filter by query (title, notes, board, section, source_url)
+        if resolved_query:
+            haystack = " ".join(
+                [
+                    row_title,
+                    row_notes,
+                    row_status,
+                    row_source_url,
+                    row_due_date,
+                    " ".join(row_boards),
+                    " ".join(row_sections),
+                    workspace_name,
+                ]
+            ).lower()
+            if resolved_query not in haystack:
+                continue
+
+        filtered.append(
+            {
+                "provider": "asana",
+                "event_id": str(row.get("event_id") or "").strip(),
+                "title": row_title,
+                "due_date": row_due_date,
+                "due_time": row_due_time,
+                "is_completed": row_completed,
+                "status": row_status or ("completed" if row_completed else "open"),
+                "source_url": row_source_url,
+                "boards": row_boards,
+                "sections": row_sections,
+                "workspace": workspace_name,
+                "notes": row_notes,
+                "payload": row_payload,
+                "updated_at": str(row.get("updated_at") or "").strip(),
+            }
+        )
+
+    filtered.sort(key=_calendar_row_sort_key)
+    limited = filtered[:resolved_limit]
+
+    today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    seven_day_key = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d")
+    completed_count = 0
+    open_count = 0
+    overdue_open_count = 0
+    today_open_count = 0
+    next_7d_open_count = 0
+    board_counts: dict[str, int] = {}
+    for row in filtered:
+        is_completed = bool(row.get("is_completed"))
+        due_date = str(row.get("due_date") or "").strip()
+        for b in row.get("boards") or []:
+            board_counts[b] = board_counts.get(b, 0) + 1
+        if is_completed:
+            completed_count += 1
+            continue
+        open_count += 1
+        if due_date:
+            if due_date < today_key:
+                overdue_open_count += 1
+            if due_date == today_key:
+                today_open_count += 1
+            if today_key <= due_date <= seven_day_key:
+                next_7d_open_count += 1
+
+    context_lines = [_calendar_context_line(row) for row in limited[:50]]
+    return {
+        "ok": True,
+        "tool": "asana_calendar",
+        "query": str(query or ""),
+        "board_filter": str(board or ""),
+        "section_filter": str(section or ""),
+        "provider": "asana",
+        "refresh_requested": refresh_requested,
+        "refresh_applied": refresh_applied,
+        "refresh_error": refresh_error,
+        "refresh_min_interval_seconds": refresh_min_interval_seconds,
+        "refresh_result": refresh_result,
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "include_completed": bool(include_completed),
+        "include_unscheduled": bool(include_unscheduled),
+        "limit": resolved_limit,
+        "result_count": len(limited),
+        "total_filtered_count": len(filtered),
+        "summary": {
+            "open_count": open_count,
+            "completed_count": completed_count,
+            "overdue_open_count": overdue_open_count,
+            "today_open_count": today_open_count,
+            "next_7d_open_count": next_7d_open_count,
+            "board_counts": board_counts,
+        },
+        "context_lines": context_lines,
+        "results": limited,
+    }
+
+
+@mcp.tool()
+def asana_get_subtasks(task_gid: str) -> dict[str, Any]:
+    """
+    List subtasks for an Asana task.
+
+    Returns a list of subtask objects with gid, name, completed, due_on, assignee.
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required", "subtasks": []}
+    resolved_gid = str(task_gid or "").strip()
+    if not resolved_gid:
+        return {"ok": False, "error": "task_gid is required", "subtasks": []}
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected"), "subtasks": []}
+    subtasks, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/tasks/{resolved_gid}/subtasks",
+        params={"opt_fields": "gid,name,completed,due_on,assignee.name"},
+        max_items=100,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            subtasks, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/tasks/{resolved_gid}/subtasks",
+                params={"opt_fields": "gid,name,completed,due_on,assignee.name"},
+                max_items=100,
+            )
+    if fetch_error:
+        return {"ok": False, "error": fetch_error, "subtasks": []}
+    rows = [
+        {"gid": t.get("gid"), "name": t.get("name"), "completed": t.get("completed"),
+         "due_on": t.get("due_on"), "assignee": (t.get("assignee") or {}).get("name")}
+        for t in (subtasks or [])
+    ]
+    return {"ok": True, "task_gid": resolved_gid, "subtasks": rows}
+
+
+@mcp.tool()
+def asana_list_sections(project_gid: str) -> dict[str, Any]:
+    """
+    List sections for an Asana project/board.
+
+    Returns a list of section objects with gid and name.
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required", "sections": []}
+    resolved_gid = str(project_gid or "").strip()
+    if not resolved_gid:
+        return {"ok": False, "error": "project_gid is required", "sections": []}
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected"), "sections": []}
+    sections, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/projects/{resolved_gid}/sections",
+        params={"opt_fields": "gid,name"},
+        max_items=200,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            sections, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/projects/{resolved_gid}/sections",
+                params={"opt_fields": "gid,name"},
+                max_items=200,
+            )
+    if fetch_error:
+        return {"ok": False, "error": fetch_error, "sections": []}
+    rows = [{"gid": s.get("gid"), "name": s.get("name")} for s in (sections or [])]
+    return {"ok": True, "project_gid": resolved_gid, "sections": rows}
+
+
+@mcp.tool()
+def asana_move_task_to_section(task_gid: str, section_gid: str) -> dict[str, Any]:
+    """
+    Move an Asana task into a specific section.
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required"}
+    resolved_task = str(task_gid or "").strip()
+    resolved_section = str(section_gid or "").strip()
+    if not resolved_task or not resolved_section:
+        return {"ok": False, "error": "task_gid and section_gid are required"}
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected")}
+    _result, move_error = _asana_api_request_json(
+        method="POST", access_token=access_token,
+        path=f"/sections/{resolved_section}/addTask",
+        body={"data": {"task": resolved_task}},
+    )
+    if _asana_error_requires_refresh(move_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            _result, move_error = _asana_api_request_json(
+                method="POST", access_token=refreshed,
+                path=f"/sections/{resolved_section}/addTask",
+                body={"data": {"task": resolved_task}},
+            )
+    if move_error:
+        return {"ok": False, "error": move_error}
+    return {"ok": True, "task_gid": resolved_task, "section_gid": resolved_section}
+
+
+@mcp.tool()
+def asana_update_assignee(task_gid: str, assignee_gid: str = "") -> dict[str, Any]:
+    """
+    Update (or clear) the assignee on an Asana task.
+
+    Pass an empty assignee_gid to unassign the task.
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required"}
+    resolved_task = str(task_gid or "").strip()
+    if not resolved_task:
+        return {"ok": False, "error": "task_gid is required"}
+    resolved_assignee = str(assignee_gid or "").strip()
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected")}
+    body_data = {"data": {"assignee": resolved_assignee if resolved_assignee else None}}
+    _result, assign_error = _asana_api_request_json(
+        method="PUT", access_token=access_token,
+        path=f"/tasks/{resolved_task}", body=body_data,
+    )
+    if _asana_error_requires_refresh(assign_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            _result, assign_error = _asana_api_request_json(
+                method="PUT", access_token=refreshed,
+                path=f"/tasks/{resolved_task}", body=body_data,
+            )
+    if assign_error:
+        return {"ok": False, "error": assign_error}
+    return {"ok": True, "task_gid": resolved_task, "assignee_gid": resolved_assignee}
+
+
+@mcp.tool()
+def asana_list_workspace_members(workspace_gid: str) -> dict[str, Any]:
+    """
+    List members of an Asana workspace.
+
+    Returns a list of user objects with gid, name, email.
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required", "members": []}
+    resolved_gid = str(workspace_gid or "").strip()
+    if not resolved_gid:
+        return {"ok": False, "error": "workspace_gid is required", "members": []}
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected"), "members": []}
+    members, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/workspaces/{resolved_gid}/users",
+        params={"opt_fields": "gid,name,email"},
+        max_items=500,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            members, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/workspaces/{resolved_gid}/users",
+                params={"opt_fields": "gid,name,email"},
+                max_items=500,
+            )
+    if fetch_error:
+        return {"ok": False, "error": fetch_error, "members": []}
+    rows = [{"gid": m.get("gid"), "name": m.get("name"), "email": m.get("email")} for m in (members or [])]
+    return {"ok": True, "workspace_gid": resolved_gid, "members": rows}
+
+
+@mcp.tool()
+def asana_get_dependencies(task_gid: str) -> dict[str, Any]:
+    """
+    List dependencies for an Asana task.
+
+    Returns a list of dependency task objects with gid, name, completed.
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required", "dependencies": []}
+    resolved_gid = str(task_gid or "").strip()
+    if not resolved_gid:
+        return {"ok": False, "error": "task_gid is required", "dependencies": []}
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected"), "dependencies": []}
+    deps, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/tasks/{resolved_gid}/dependencies",
+        params={"opt_fields": "gid,name,completed"},
+        max_items=100,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            deps, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/tasks/{resolved_gid}/dependencies",
+                params={"opt_fields": "gid,name,completed"},
+                max_items=100,
+            )
+    if fetch_error:
+        return {"ok": False, "error": fetch_error, "dependencies": []}
+    rows = [{"gid": d.get("gid"), "name": d.get("name"), "completed": d.get("completed")} for d in (deps or [])]
+    return {"ok": True, "task_gid": resolved_gid, "dependencies": rows}
+
+
+@mcp.tool()
+def asana_add_dependency(task_gid: str, dependency_gid: str) -> dict[str, Any]:
+    """
+    Add a dependency to an Asana task (task_gid depends on dependency_gid).
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required"}
+    resolved_task = str(task_gid or "").strip()
+    resolved_dep = str(dependency_gid or "").strip()
+    if not resolved_task or not resolved_dep:
+        return {"ok": False, "error": "task_gid and dependency_gid are required"}
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected")}
+    _result, add_error = _asana_api_request_json(
+        method="POST", access_token=access_token,
+        path=f"/tasks/{resolved_task}/addDependencies",
+        body={"data": {"dependencies": [resolved_dep]}},
+    )
+    if _asana_error_requires_refresh(add_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            _result, add_error = _asana_api_request_json(
+                method="POST", access_token=refreshed,
+                path=f"/tasks/{resolved_task}/addDependencies",
+                body={"data": {"dependencies": [resolved_dep]}},
+            )
+    if add_error:
+        return {"ok": False, "error": add_error}
+    return {"ok": True, "task_gid": resolved_task, "dependency_gid": resolved_dep}
+
+
+@mcp.tool()
+def asana_remove_dependency(task_gid: str, dependency_gid: str) -> dict[str, Any]:
+    """
+    Remove a dependency from an Asana task.
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required"}
+    resolved_task = str(task_gid or "").strip()
+    resolved_dep = str(dependency_gid or "").strip()
+    if not resolved_task or not resolved_dep:
+        return {"ok": False, "error": "task_gid and dependency_gid are required"}
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected")}
+    _result, remove_error = _asana_api_request_json(
+        method="POST", access_token=access_token,
+        path=f"/tasks/{resolved_task}/removeDependencies",
+        body={"data": {"dependencies": [resolved_dep]}},
+    )
+    if _asana_error_requires_refresh(remove_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            _result, remove_error = _asana_api_request_json(
+                method="POST", access_token=refreshed,
+                path=f"/tasks/{resolved_task}/removeDependencies",
+                body={"data": {"dependencies": [resolved_dep]}},
+            )
+    if remove_error:
+        return {"ok": False, "error": remove_error}
+    return {"ok": True, "task_gid": resolved_task, "dependency_gid": resolved_dep}
+
+
+@mcp.tool()
+def asana_get_project_status(project_gid: str) -> dict[str, Any]:
+    """
+    Get the latest status update for an Asana project/board.
+
+    Returns the most recent status entry with title, color, text, author, and created_at.
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required", "latest_status": None}
+    resolved_gid = str(project_gid or "").strip()
+    if not resolved_gid:
+        return {"ok": False, "error": "project_gid is required", "latest_status": None}
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected"), "latest_status": None}
+    statuses, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/projects/{resolved_gid}/project_statuses",
+        params={"opt_fields": "gid,title,color,text,created_at,author.name", "limit": 5},
+        max_items=5,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            statuses, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/projects/{resolved_gid}/project_statuses",
+                params={"opt_fields": "gid,title,color,text,created_at,author.name", "limit": 5},
+                max_items=5,
+            )
+    if fetch_error:
+        return {"ok": False, "error": fetch_error, "latest_status": None}
+    latest = statuses[0] if statuses else None
+    return {"ok": True, "project_gid": resolved_gid, "latest_status": latest}
+
+
+@mcp.tool()
+def asana_get_attachments(task_gid: str) -> dict[str, Any]:
+    """
+    List attachments for an Asana task.
+
+    Returns a list of attachment objects with gid, name, download_url, view_url, created_at, size.
+    """
+    actor = _request_actor()
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required", "attachments": []}
+    resolved_gid = str(task_gid or "").strip()
+    if not resolved_gid:
+        return {"ok": False, "error": "task_gid is required", "attachments": []}
+    access_token, token_error = _asana_access_token_for_user(actor)
+    if not access_token:
+        return {"ok": False, "error": str(token_error or "asana_not_connected"), "attachments": []}
+    attachments, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/tasks/{resolved_gid}/attachments",
+        params={"opt_fields": "gid,name,download_url,view_url,created_at,size"},
+        max_items=100,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(actor, force_refresh=True)
+        if refreshed:
+            attachments, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/tasks/{resolved_gid}/attachments",
+                params={"opt_fields": "gid,name,download_url,view_url,created_at,size"},
+                max_items=100,
+            )
+    if fetch_error:
+        return {"ok": False, "error": fetch_error, "attachments": []}
+    rows = [
+        {"gid": a.get("gid"), "name": a.get("name"), "download_url": a.get("download_url"),
+         "view_url": a.get("view_url"), "created_at": a.get("created_at"), "size": a.get("size")}
+        for a in (attachments or [])
+    ]
+    return {"ok": True, "task_gid": resolved_gid, "attachments": rows}
 
 
 @mcp.tool()

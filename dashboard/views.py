@@ -2873,6 +2873,9 @@ _ASANA_TASK_OPT_FIELDS = ",".join(
         "memberships.project.permalink_url",
         "workspace.gid",
         "workspace.name",
+        "assignee.gid",
+        "assignee.name",
+        "num_subtasks",
     ]
 )
 _MICROSOFT_CONNECTOR_SCOPES = [
@@ -3701,6 +3704,15 @@ def _asana_task_row_from_api_task(
     if len(notes) > 8000:
         notes = notes[:8000]
 
+    assignee_obj = task.get("assignee")
+    assignee_gid = ""
+    assignee_name = ""
+    if isinstance(assignee_obj, dict):
+        assignee_gid = str(assignee_obj.get("gid") or "").strip()
+        assignee_name = str(assignee_obj.get("name") or "").strip()
+
+    subtask_count = int(task.get("num_subtasks") or 0)
+
     return {
         "gid": task_gid,
         "name": task_name,
@@ -3717,6 +3729,9 @@ def _asana_task_row_from_api_task(
         "section_name": section_name,
         "workspace_name": workspace_name,
         "modified_at": str(task.get("modified_at") or "").strip(),
+        "assignee_gid": assignee_gid,
+        "assignee_name": assignee_name,
+        "subtask_count": subtask_count,
     }
 
 
@@ -3867,17 +3882,25 @@ def _asana_overview_payload_from_api(
         workspace_name_by_gid[workspace_gid] = str(workspace.get("name") or "").strip()
         workspace_gids.append(workspace_gid)
 
-    projects, projects_truncated, project_error = _asana_api_list(
-        access_token=access_token,
-        path="/users/me/projects",
-        params={
-            "opt_fields": "gid,name,permalink_url,archived,workspace.gid,workspace.name",
-            "limit": _ASANA_OVERVIEW_PER_REQUEST_LIMIT,
-        },
-        max_items=1000,
-    )
-    if project_error:
-        return None, project_error
+    # /users/me/projects requires a workspace parameter — fetch per workspace.
+    projects: list[dict[str, object]] = []
+    projects_truncated = False
+    for workspace_gid in workspace_gids:
+        ws_projects, ws_projects_truncated, ws_project_error = _asana_api_list(
+            access_token=access_token,
+            path="/users/me/projects",
+            params={
+                "workspace": workspace_gid,
+                "opt_fields": "gid,name,permalink_url,archived,workspace.gid,workspace.name",
+                "limit": _ASANA_OVERVIEW_PER_REQUEST_LIMIT,
+            },
+            max_items=1000,
+        )
+        if ws_project_error:
+            continue
+        if ws_projects_truncated:
+            projects_truncated = True
+        projects.extend(ws_projects)
     project_board_rows = [
         board_row
         for board_row in (
@@ -3918,7 +3941,9 @@ def _asana_overview_payload_from_api(
             max_items=remaining,
         )
         if task_error:
-            return None, task_error
+            # Some workspace types (e.g. organizations) may reject this query;
+            # skip and rely on the project-level task fetch below.
+            continue
         if workspace_truncated:
             truncated = True
         fetched_count += len(tasks)
@@ -3929,6 +3954,41 @@ def _asana_overview_payload_from_api(
             normalized_task = dict(task)
             normalized_task["_workspace_gid"] = workspace_gid
             all_tasks_by_gid[task_gid] = normalized_task
+
+    # Also fetch tasks from each project so all project tasks appear,
+    # not just those assigned to the current user.
+    for project in projects:
+        if fetched_count >= resolved_task_fetch_limit:
+            truncated = True
+            break
+        project_gid = str(project.get("gid") or "").strip()
+        if not project_gid:
+            continue
+        project_workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+        project_workspace_gid = str(project_workspace.get("gid") or "").strip()
+        remaining = resolved_task_fetch_limit - fetched_count
+        project_tasks, project_truncated, _project_task_error = _asana_api_list(
+            access_token=access_token,
+            path=f"/projects/{project_gid}/tasks",
+            params={
+                "completed_since": "now",
+                "limit": _ASANA_OVERVIEW_PER_REQUEST_LIMIT,
+                "opt_fields": _ASANA_TASK_OPT_FIELDS,
+            },
+            max_items=min(remaining, 500),
+        )
+        if _project_task_error:
+            continue
+        if project_truncated:
+            truncated = True
+        for task in project_tasks:
+            task_gid = str(task.get("gid") or "").strip()
+            if not task_gid or task_gid in all_tasks_by_gid:
+                continue
+            normalized_task = dict(task)
+            normalized_task["_workspace_gid"] = project_workspace_gid
+            all_tasks_by_gid[task_gid] = normalized_task
+            fetched_count += 1
 
     task_rows: list[dict[str, object]] = []
     for task in all_tasks_by_gid.values():
@@ -5864,7 +5924,7 @@ def setup_welcome(request):
                     except NoReverseMatch:
                         asana_login_url = "/accounts/asana/login/"
                     messages.success(request, "Setup saved. Continue with Asana sign-in to test connection.")
-                    return redirect(f"{asana_login_url}?process=login")
+                    return redirect(f"{asana_login_url}?process=connect")
                 if targeted_connector:
                     messages.success(
                         request,
@@ -6824,6 +6884,479 @@ def add_asana_task_comment(request, task_gid: str):
 
 
 @login_required
+@require_GET
+def list_asana_task_subtasks(request, task_gid: str):
+    resolved_task_gid = str(task_gid or "").strip()
+    if not resolved_task_gid:
+        return JsonResponse({"ok": False, "error": "missing_task_gid"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    subtasks, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/tasks/{resolved_task_gid}/subtasks",
+        params={"opt_fields": "gid,name,completed,due_on,assignee.name"},
+        max_items=100,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            subtasks, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/tasks/{resolved_task_gid}/subtasks",
+                params={"opt_fields": "gid,name,completed,due_on,assignee.name"},
+                max_items=100,
+            )
+    if fetch_error:
+        return JsonResponse({"ok": False, "error": fetch_error}, status=502)
+    rows = [
+        {
+            "gid": t.get("gid"),
+            "name": t.get("name"),
+            "completed": t.get("completed"),
+            "due_on": t.get("due_on"),
+            "assignee": (t.get("assignee") or {}).get("name"),
+        }
+        for t in (subtasks or [])
+    ]
+    return JsonResponse({"ok": True, "task_gid": resolved_task_gid, "subtasks": rows})
+
+
+@login_required
+@require_GET
+def list_asana_project_sections(request, board_gid: str):
+    resolved_board_gid = str(board_gid or "").strip()
+    if not resolved_board_gid:
+        return JsonResponse({"ok": False, "error": "missing_board_gid"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    sections, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/projects/{resolved_board_gid}/sections",
+        params={"opt_fields": "gid,name"},
+        max_items=200,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            sections, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/projects/{resolved_board_gid}/sections",
+                params={"opt_fields": "gid,name"},
+                max_items=200,
+            )
+    if fetch_error:
+        return JsonResponse({"ok": False, "error": fetch_error}, status=502)
+    rows = [{"gid": s.get("gid"), "name": s.get("name")} for s in (sections or [])]
+    return JsonResponse({"ok": True, "board_gid": resolved_board_gid, "sections": rows})
+
+
+@login_required
+@require_POST
+def move_asana_task_to_section(request, section_gid: str):
+    resolved_section_gid = str(section_gid or "").strip()
+    if not resolved_section_gid:
+        return JsonResponse({"ok": False, "error": "missing_section_gid"}, status=400)
+    payload = _request_json_payload(request)
+    task_gid = str(request.POST.get("task_gid") or payload.get("task_gid") or "").strip()
+    if not task_gid:
+        return JsonResponse({"ok": False, "error": "task_gid_required"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    _result, move_error = _asana_api_request_json(
+        method="POST",
+        access_token=access_token,
+        path=f"/sections/{resolved_section_gid}/addTask",
+        body={"data": {"task": task_gid}},
+    )
+    if _asana_error_requires_refresh(move_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            _result, move_error = _asana_api_request_json(
+                method="POST",
+                access_token=refreshed,
+                path=f"/sections/{resolved_section_gid}/addTask",
+                body={"data": {"task": task_gid}},
+            )
+    if move_error:
+        return JsonResponse({"ok": False, "error": move_error}, status=502)
+    return JsonResponse({"ok": True, "task_gid": task_gid, "section_gid": resolved_section_gid})
+
+
+@login_required
+@require_POST
+def update_asana_task_assignee(request, task_gid: str):
+    resolved_task_gid = str(task_gid or "").strip()
+    if not resolved_task_gid:
+        return JsonResponse({"ok": False, "error": "missing_task_gid"}, status=400)
+    payload = _request_json_payload(request)
+    assignee_gid = str(request.POST.get("assignee_gid") or payload.get("assignee_gid") or "").strip()
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    body_data = {"data": {"assignee": assignee_gid if assignee_gid else None}}
+    _result, assign_error = _asana_api_request_json(
+        method="PUT",
+        access_token=access_token,
+        path=f"/tasks/{resolved_task_gid}",
+        body=body_data,
+    )
+    if _asana_error_requires_refresh(assign_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            _result, assign_error = _asana_api_request_json(
+                method="PUT",
+                access_token=refreshed,
+                path=f"/tasks/{resolved_task_gid}",
+                body=body_data,
+            )
+    if assign_error:
+        return JsonResponse({"ok": False, "error": assign_error}, status=502)
+    return JsonResponse({"ok": True, "task_gid": resolved_task_gid, "assignee_gid": assignee_gid})
+
+
+@login_required
+@require_GET
+def list_asana_workspace_members(request, workspace_gid: str):
+    resolved_workspace_gid = str(workspace_gid or "").strip()
+    if not resolved_workspace_gid:
+        return JsonResponse({"ok": False, "error": "missing_workspace_gid"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    members, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/workspaces/{resolved_workspace_gid}/users",
+        params={"opt_fields": "gid,name,email"},
+        max_items=500,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            members, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/workspaces/{resolved_workspace_gid}/users",
+                params={"opt_fields": "gid,name,email"},
+                max_items=500,
+            )
+    if fetch_error:
+        return JsonResponse({"ok": False, "error": fetch_error}, status=502)
+    rows = [
+        {"gid": m.get("gid"), "name": m.get("name"), "email": m.get("email")}
+        for m in (members or [])
+    ]
+    return JsonResponse({"ok": True, "workspace_gid": resolved_workspace_gid, "members": rows})
+
+
+@login_required
+@require_GET
+def list_asana_task_dependencies(request, task_gid: str):
+    resolved_task_gid = str(task_gid or "").strip()
+    if not resolved_task_gid:
+        return JsonResponse({"ok": False, "error": "missing_task_gid"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    deps, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/tasks/{resolved_task_gid}/dependencies",
+        params={"opt_fields": "gid,name,completed"},
+        max_items=100,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            deps, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/tasks/{resolved_task_gid}/dependencies",
+                params={"opt_fields": "gid,name,completed"},
+                max_items=100,
+            )
+    if fetch_error:
+        return JsonResponse({"ok": False, "error": fetch_error}, status=502)
+    rows = [{"gid": d.get("gid"), "name": d.get("name"), "completed": d.get("completed")} for d in (deps or [])]
+    return JsonResponse({"ok": True, "task_gid": resolved_task_gid, "dependencies": rows})
+
+
+@login_required
+@require_POST
+def add_asana_task_dependency(request, task_gid: str):
+    resolved_task_gid = str(task_gid or "").strip()
+    if not resolved_task_gid:
+        return JsonResponse({"ok": False, "error": "missing_task_gid"}, status=400)
+    payload = _request_json_payload(request)
+    dependency_gid = str(request.POST.get("dependency_gid") or payload.get("dependency_gid") or "").strip()
+    if not dependency_gid:
+        return JsonResponse({"ok": False, "error": "dependency_gid_required"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    _result, add_error = _asana_api_request_json(
+        method="POST",
+        access_token=access_token,
+        path=f"/tasks/{resolved_task_gid}/addDependencies",
+        body={"data": {"dependencies": [dependency_gid]}},
+    )
+    if _asana_error_requires_refresh(add_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            _result, add_error = _asana_api_request_json(
+                method="POST",
+                access_token=refreshed,
+                path=f"/tasks/{resolved_task_gid}/addDependencies",
+                body={"data": {"dependencies": [dependency_gid]}},
+            )
+    if add_error:
+        return JsonResponse({"ok": False, "error": add_error}, status=502)
+    return JsonResponse({"ok": True, "task_gid": resolved_task_gid, "dependency_gid": dependency_gid})
+
+
+@login_required
+@require_POST
+def remove_asana_task_dependency(request, task_gid: str):
+    resolved_task_gid = str(task_gid or "").strip()
+    if not resolved_task_gid:
+        return JsonResponse({"ok": False, "error": "missing_task_gid"}, status=400)
+    payload = _request_json_payload(request)
+    dependency_gid = str(request.POST.get("dependency_gid") or payload.get("dependency_gid") or "").strip()
+    if not dependency_gid:
+        return JsonResponse({"ok": False, "error": "dependency_gid_required"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    _result, remove_error = _asana_api_request_json(
+        method="POST",
+        access_token=access_token,
+        path=f"/tasks/{resolved_task_gid}/removeDependencies",
+        body={"data": {"dependencies": [dependency_gid]}},
+    )
+    if _asana_error_requires_refresh(remove_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            _result, remove_error = _asana_api_request_json(
+                method="POST",
+                access_token=refreshed,
+                path=f"/tasks/{resolved_task_gid}/removeDependencies",
+                body={"data": {"dependencies": [dependency_gid]}},
+            )
+    if remove_error:
+        return JsonResponse({"ok": False, "error": remove_error}, status=502)
+    return JsonResponse({"ok": True, "task_gid": resolved_task_gid, "dependency_gid": dependency_gid})
+
+
+@login_required
+@require_GET
+def get_asana_project_status(request, board_gid: str):
+    resolved_board_gid = str(board_gid or "").strip()
+    if not resolved_board_gid:
+        return JsonResponse({"ok": False, "error": "missing_board_gid"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    statuses, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/projects/{resolved_board_gid}/project_statuses",
+        params={"opt_fields": "gid,title,color,text,created_at,author.name", "limit": 5},
+        max_items=5,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            statuses, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/projects/{resolved_board_gid}/project_statuses",
+                params={"opt_fields": "gid,title,color,text,created_at,author.name", "limit": 5},
+                max_items=5,
+            )
+    if fetch_error:
+        return JsonResponse({"ok": False, "error": fetch_error}, status=502)
+    latest = statuses[0] if statuses else None
+    return JsonResponse({"ok": True, "board_gid": resolved_board_gid, "latest_status": latest})
+
+
+@login_required
+@require_GET
+def list_asana_task_attachments(request, task_gid: str):
+    resolved_task_gid = str(task_gid or "").strip()
+    if not resolved_task_gid:
+        return JsonResponse({"ok": False, "error": "missing_task_gid"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+    attachments, _trunc, fetch_error = _asana_api_list(
+        access_token, f"/tasks/{resolved_task_gid}/attachments",
+        params={"opt_fields": "gid,name,download_url,view_url,created_at,size"},
+        max_items=100,
+    )
+    if _asana_error_requires_refresh(fetch_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            attachments, _trunc, fetch_error = _asana_api_list(
+                refreshed, f"/tasks/{resolved_task_gid}/attachments",
+                params={"opt_fields": "gid,name,download_url,view_url,created_at,size"},
+                max_items=100,
+            )
+    if fetch_error:
+        return JsonResponse({"ok": False, "error": fetch_error}, status=502)
+    rows = [
+        {
+            "gid": a.get("gid"),
+            "name": a.get("name"),
+            "download_url": a.get("download_url"),
+            "view_url": a.get("view_url"),
+            "created_at": a.get("created_at"),
+            "size": a.get("size"),
+        }
+        for a in (attachments or [])
+    ]
+    return JsonResponse({"ok": True, "task_gid": resolved_task_gid, "attachments": rows})
+
+
+@login_required
+@require_POST
+def register_asana_webhook(request, board_gid: str):
+    resolved_board_gid = str(board_gid or "").strip()
+    if not resolved_board_gid:
+        return JsonResponse({"ok": False, "error": "missing_board_gid"}, status=400)
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse({"ok": False, "error": str(token_error or "asana_not_connected")}, status=403)
+
+    app_base_url = str(getattr(settings, "APP_BASE_URL", "") or "").rstrip("/")
+    if not app_base_url:
+        return JsonResponse({"ok": False, "error": "APP_BASE_URL is not configured"}, status=500)
+    target_url = f"{app_base_url}/calendar/asana/webhook/receive/"
+
+    webhook_body = {
+        "data": {
+            "resource": resolved_board_gid,
+            "target": target_url,
+            "filters": [
+                {"resource_type": "task", "action": "changed"},
+                {"resource_type": "task", "action": "added"},
+                {"resource_type": "task", "action": "removed"},
+            ],
+        }
+    }
+    result_payload, reg_error = _asana_api_request_json(
+        method="POST",
+        access_token=access_token,
+        path="/webhooks",
+        body=webhook_body,
+    )
+    if _asana_error_requires_refresh(reg_error):
+        refreshed, _ = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed:
+            result_payload, reg_error = _asana_api_request_json(
+                method="POST",
+                access_token=refreshed,
+                path="/webhooks",
+                body=webhook_body,
+            )
+    if reg_error:
+        return JsonResponse({"ok": False, "error": reg_error}, status=502)
+
+    webhook_data = result_payload.get("data") if isinstance(result_payload, dict) else {}
+    webhook_data = webhook_data if isinstance(webhook_data, dict) else {}
+    webhook_gid = str(webhook_data.get("gid") or "").strip()
+    webhook_secret = str(webhook_data.get("secret") or "").strip()
+
+    # Persist the webhook secret for HMAC verification of incoming events
+    if webhook_gid:
+        webhooks_file = _user_owner_dir(request.user) / "asana_webhooks.json"
+        try:
+            existing: dict[str, object] = {}
+            if webhooks_file.exists():
+                existing = json.loads(webhooks_file.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+        existing[resolved_board_gid] = {"webhook_gid": webhook_gid, "secret": webhook_secret}
+        try:
+            webhooks_file.write_text(json.dumps(existing), encoding="utf-8")
+        except Exception:
+            pass
+
+    return JsonResponse({
+        "ok": True,
+        "board_gid": resolved_board_gid,
+        "webhook_gid": webhook_gid,
+        "target": target_url,
+    })
+
+
+@csrf_exempt
+@require_POST
+def receive_asana_webhook(request):
+    # Asana handshake: echo back X-Hook-Secret on first delivery
+    hook_secret_header = request.headers.get("X-Hook-Secret") or request.META.get("HTTP_X_HOOK_SECRET", "")
+    if hook_secret_header:
+        response = HttpResponse(status=200)
+        response["X-Hook-Secret"] = hook_secret_header
+        return response
+
+    # Verify HMAC-SHA256 signature for subsequent event deliveries
+    hook_signature = request.headers.get("X-Hook-Signature") or request.META.get("HTTP_X_HOOK_SIGNATURE", "")
+    raw_body = request.body
+    if hook_signature and raw_body:
+        # Find a matching webhook secret across all users
+        var_dir = Path(settings.BASE_DIR) / "var" / "user_data"
+        verified = False
+        if var_dir.exists():
+            for webhooks_file in var_dir.glob("*/asana_webhooks.json"):
+                try:
+                    stored: dict[str, object] = json.loads(webhooks_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                for _board_gid, entry in stored.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    secret = str(entry.get("secret") or "").strip()
+                    if not secret:
+                        continue
+                    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+                    if hmac.compare_digest(expected, hook_signature):
+                        verified = True
+                        break
+                if verified:
+                    break
+        if not verified:
+            return HttpResponse(status=403)
+
+    # Parse and process events — invalidate the relevant user's cache
+    try:
+        events_payload = json.loads(raw_body)
+    except Exception:
+        return HttpResponse(status=400)
+
+    events = events_payload.get("events") if isinstance(events_payload, dict) else []
+    if not isinstance(events, list):
+        return HttpResponse(status=200)
+
+    # Best-effort cache invalidation: trigger a refresh for all users with Asana connected
+    from .calendar_sync_service import refresh_calendar_cache_for_user
+    User = get_user_model()
+    processed_user_ids: set[int] = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        resource_obj = event.get("resource") if isinstance(event.get("resource"), dict) else {}
+        if not resource_obj:
+            continue
+        # Trigger cache refresh for users — run in background thread to not block webhook response
+        if not processed_user_ids:
+            try:
+                from allauth.socialaccount.models import SocialAccount as _SA
+                asana_users = list(User.objects.filter(
+                    socialaccount__provider="asana"
+                ).distinct()[:10])
+                for u in asana_users:
+                    if u.pk in processed_user_ids:
+                        continue
+                    processed_user_ids.add(u.pk)
+                    try:
+                        refresh_calendar_cache_for_user(u, provider="asana", force=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        break  # Only need to trigger once per webhook call
+
+    return HttpResponse(status=200)
+
+
+@login_required
 @require_POST
 def update_asana_board_resource_mapping(request, board_gid: str):
     resolved_board_gid = str(board_gid or "").strip()
@@ -7260,7 +7793,7 @@ def _connector_settings_ui_state(
                 except NoReverseMatch:
                     asana_login_url = "/accounts/asana/login/"
                 messages.success(request, "Connector settings saved. Continue with Asana sign-in to test connection.")
-                return {}, redirect(f"{asana_login_url}?process=login")
+                return {}, redirect(f"{asana_login_url}?process=connect")
 
             if targeted_connector:
                 messages.success(

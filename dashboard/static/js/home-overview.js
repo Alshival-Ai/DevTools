@@ -36,6 +36,8 @@
   const asanaCommentAddUrlTemplate = dashboard.getAttribute('data-asana-comment-add-url-template') || '';
   const asanaBoardMapUrlTemplate = dashboard.getAttribute('data-asana-board-map-url-template') || '';
   const asanaTaskMapUrlTemplate = dashboard.getAttribute('data-asana-task-map-url-template') || '';
+  const asanaBoardSectionsUrlTemplate = dashboard.getAttribute('data-asana-board-sections-url-template') || '';
+  const asanaSectionAddTaskUrlTemplate = dashboard.getAttribute('data-asana-section-add-task-url-template') || '';
   const agendaItemMapUrl = dashboard.getAttribute('data-agenda-item-map-url') || '';
   const completedWindowDays = Math.max(
     1,
@@ -373,6 +375,18 @@
     const gid = String(taskGid || '').trim();
     if (!asanaTaskMapUrlTemplate || !gid) return '';
     return asanaTaskMapUrlTemplate.replace('__TASK_GID__', encodeURIComponent(gid));
+  };
+
+  const asanaBoardSectionsUrlForBoard = (boardGid) => {
+    const gid = String(boardGid || '').trim();
+    if (!asanaBoardSectionsUrlTemplate || !gid) return '';
+    return asanaBoardSectionsUrlTemplate.replace('__BOARD_GID__', encodeURIComponent(gid));
+  };
+
+  const asanaSectionAddTaskUrlForSection = (sectionGid) => {
+    const gid = String(sectionGid || '').trim();
+    if (!asanaSectionAddTaskUrlTemplate || !gid) return '';
+    return asanaSectionAddTaskUrlTemplate.replace('__SECTION_GID__', encodeURIComponent(gid));
   };
 
   const asanaTaskRowByGid = (taskGid) => {
@@ -1197,6 +1211,82 @@
     });
   };
 
+  const openAsanaMoveToSectionModal = async (item, section) => {
+    const taskGid = asanaTaskGidForItem(item);
+    if (!taskGid) throw new Error('missing_task_gid');
+    const boardGid = String(section && (section.boardGid || section.board_gid) ? (section.boardGid || section.board_gid) : '').trim();
+    if (!boardGid) throw new Error('missing_board_gid');
+
+    const sectionsUrl = asanaBoardSectionsUrlForBoard(boardGid);
+    if (!sectionsUrl) throw new Error('missing_sections_endpoint');
+
+    let sectionsList = [];
+    try {
+      const sectionsPayload = await fetchJson(sectionsUrl);
+      sectionsList = Array.isArray(sectionsPayload && sectionsPayload.sections) ? sectionsPayload.sections : [];
+    } catch (error) {
+      throw new Error(`Unable to load sections: ${String(error && error.message ? error.message : 'request_failed')}`);
+    }
+
+    const taskTitle = String(item && item.title ? item.title : 'task').trim();
+    const rawBoardName = String(section && (section.boardName || section.title) ? (section.boardName || section.title) : '').trim();
+    const boardName = rawBoardName.replace(/^Asana\s*-\s*/i, '').trim() || 'board';
+    const modalApi = openRuntimeModal(`Move to Section · ${taskTitle}`);
+
+    if (!sectionsList.length) {
+      const empty = document.createElement('p');
+      empty.className = 'text-muted';
+      empty.textContent = `No sections found in "${boardName}".`;
+      modalApi.body.appendChild(empty);
+    } else {
+      const label = document.createElement('label');
+      const labelText = document.createElement('span');
+      labelText.textContent = 'Choose a section';
+      const select = document.createElement('select');
+      select.className = 'modal-select';
+      sectionsList.forEach((sec) => {
+        const option = document.createElement('option');
+        option.value = String(sec && sec.gid ? sec.gid : '').trim();
+        option.textContent = String(sec && sec.name ? sec.name : '').trim() || option.value;
+        select.appendChild(option);
+      });
+      label.appendChild(labelText);
+      label.appendChild(select);
+      modalApi.body.appendChild(label);
+
+      const moveBtn = document.createElement('button');
+      moveBtn.type = 'button';
+      moveBtn.className = 'primary-btn';
+      moveBtn.textContent = 'Move';
+      moveBtn.addEventListener('click', async () => {
+        const selectedSectionGid = String(select.value || '').trim();
+        if (!selectedSectionGid) return;
+        const moveUrl = asanaSectionAddTaskUrlForSection(selectedSectionGid);
+        if (!moveUrl) {
+          window.alert('Move endpoint not available.');
+          return;
+        }
+        moveBtn.disabled = true;
+        try {
+          await postJson(moveUrl, { task_gid: taskGid });
+          modalApi.close();
+        } catch (error) {
+          window.alert(`Unable to move task: ${String(error && error.message ? error.message : 'request_failed')}`);
+        } finally {
+          moveBtn.disabled = false;
+        }
+      });
+      modalApi.actions.appendChild(moveBtn);
+    }
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'ghost-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', modalApi.close);
+    modalApi.actions.appendChild(cancelBtn);
+  };
+
   const openAsanaAgendaSections = (context) => {
     const view = String(context && context.view ? context.view : '').trim().toLowerCase();
     if (view !== 'agenda') return [];
@@ -1267,6 +1357,19 @@
       const sortTime = completed ? '99:99' : (dueTime || '99:99');
       const sortPrefix = completed ? '1' : '0';
       const sortDirection = completed ? `${9999999999999 - toEpoch(sortDate)}` : `${sortDate} ${sortTime}`;
+
+      const itemBadges = [
+        { id: 'attach-resources', label: 'Resources', title: 'Attach resources' },
+      ];
+      const assigneeName = String(row.assignee_name || '').trim();
+      if (assigneeName) {
+        itemBadges.push({ id: 'assignee', label: assigneeName, title: `Assigned to ${assigneeName}` });
+      }
+      const subtaskCount = Number(row.subtask_count || 0);
+      if (subtaskCount > 0) {
+        itemBadges.push({ id: 'subtasks', label: `${subtaskCount} subtask${subtaskCount !== 1 ? 's' : ''}`, title: `${subtaskCount} subtask${subtaskCount !== 1 ? 's' : ''}` });
+      }
+
       const item = {
         id: agendaItemId,
         title: String(row.name || '').trim() || `Asana task ${gid}`,
@@ -1280,11 +1383,10 @@
         done: completed,
         canToggle: true,
         isExternal: true,
-        badges: [
-          { id: 'attach-resources', label: 'Resources', title: 'Attach resources' },
-        ],
+        badges: itemBadges,
         actions: [
           { id: 'comments', label: 'Comments' },
+          { id: 'move-section', label: 'Move to section' },
           { id: 'delete', label: 'Delete' },
         ],
         sortKey: `${sortPrefix}-${sortDirection}-${String(row.name || '').trim().toLowerCase()}`,
@@ -1495,6 +1597,10 @@
         }
         if (normalizedAction === 'attach-resources') {
           await openAgendaResourceMappingModal(item);
+          return;
+        }
+        if (normalizedAction === 'move-section') {
+          await openAsanaMoveToSectionModal(item, section || {});
         }
       },
       onToggleError: handleAsanaToggleError,

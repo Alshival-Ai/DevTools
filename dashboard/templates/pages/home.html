@@ -16,6 +16,8 @@
   data-asana-comment-add-url-template="{% url 'add_asana_task_comment' task_gid='__TASK_GID__' %}"
   data-asana-board-map-url-template="{% url 'update_asana_board_resource_mapping' board_gid='__BOARD_GID__' %}"
   data-asana-task-map-url-template="{% url 'update_asana_task_resource_mapping' task_gid='__TASK_GID__' %}"
+  data-asana-board-sections-url-template="{% url 'list_asana_project_sections' board_gid='__BOARD_GID__' %}"
+  data-asana-section-add-task-url-template="{% url 'move_asana_task_to_section' section_gid='__SECTION_GID__' %}"
   data-agenda-item-map-url="{% url 'update_overview_agenda_item_resource_mapping' %}"
   data-asana-completed-window-days="{{ asana_completed_window_days }}"
   data-notifications-url="{% url 'notifications_feed' %}"
