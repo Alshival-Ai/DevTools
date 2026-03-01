@@ -4,36 +4,93 @@
 
 {% block page_content %}
 <section class="resources-layout">
-  <aside class="team-folder-panel card">
-    <div class="team-folder-title">Folders</div>
-    <div class="team-folder-subtitle">Browse by team scope</div>
-    <div class="team-folder-tree">
-      <button class="team-folder-btn is-active" type="button" data-team-folder="all" data-team-label="All Resources">
-        <span class="folder-icon" aria-hidden="true">📁</span>
-        <span>All Resources</span>
-      </button>
-      <button class="team-folder-btn" type="button" data-team-folder="mine" data-team-label="My Resources">
-        <span class="folder-icon" aria-hidden="true">📂</span>
-        <span>My Resources</span>
-      </button>
-      <div class="team-folder-group">
-        <div class="team-folder-group-label">Teams</div>
-        {% if member_teams %}
-          {% for team_name in member_teams %}
-          <button
-            class="team-folder-btn"
-            type="button"
-            data-team-folder="{{ team_name|lower|slugify }}"
-            data-team-label="{{ team_name }}">
-            <span class="folder-icon" aria-hidden="true">🗂</span>
-            <span>{{ team_name }}</span>
-          </button>
-          {% endfor %}
-        {% else %}
-          <div class="text-muted small">No team memberships yet.</div>
-        {% endif %}
+  <aside class="team-folder-panel card wiki-sidebar">
+    <div class="wiki-sidebar-head">
+      <div class="wiki-sidebar-head-copy">
+        <div class="team-folder-title">Folders</div>
+        <div class="team-folder-subtitle">Browse by scope and jump straight to resource details</div>
       </div>
     </div>
+    <section class="wiki-sidebar-pages">
+      <div class="directory-users-toolbar wiki-sidebar-pages-head">
+        <h3>Resource Navigation</h3>
+        <span class="text-muted small">By scope</span>
+      </div>
+      <div class="wiki-sidebar-tree">
+        <details class="wiki-tree-node wiki-tree-node--top wiki-tree-node--folder" open>
+          <summary class="wiki-tree-node__summary">
+            <span class="folder-icon" aria-hidden="true">DIR</span>
+            <span class="wiki-tree-node__label">Scopes</span>
+            <span class="wiki-tree-node__count">3</span>
+          </summary>
+          <div class="wiki-tree-node__children">
+            <details class="wiki-tree-node wiki-tree-node--folder" open>
+              <summary class="wiki-tree-node__summary">
+                <span class="folder-icon" aria-hidden="true">DIR</span>
+                <span class="wiki-tree-node__label">Account</span>
+              </summary>
+              <div class="wiki-tree-node__children">
+                {% for item in resources %}
+                {% if item.access_scope == 'account' %}
+                <a class="wiki-tree-page" href="{{ item.detail_url }}">
+                  <span class="folder-icon" aria-hidden="true">PG</span>
+                  <span class="wiki-sidebar-page-copy">
+                    <strong>{{ item.name }}</strong>
+                    <small>{{ item.resource_type|title }}</small>
+                  </span>
+                </a>
+                {% endif %}
+                {% endfor %}
+              </div>
+            </details>
+
+            <details class="wiki-tree-node wiki-tree-node--folder" open>
+              <summary class="wiki-tree-node__summary">
+                <span class="folder-icon" aria-hidden="true">DIR</span>
+                <span class="wiki-tree-node__label">Team</span>
+              </summary>
+              <div class="wiki-tree-node__children">
+                {% for item in resources %}
+                {% if item.access_scope == 'team' %}
+                <a class="wiki-tree-page" href="{{ item.detail_url }}">
+                  <span class="folder-icon" aria-hidden="true">PG</span>
+                  <span class="wiki-sidebar-page-copy">
+                    <strong>{{ item.name }}</strong>
+                    <small>{{ item.team_names|join:', '|default:'Team resource' }}</small>
+                  </span>
+                </a>
+                {% endif %}
+                {% endfor %}
+              </div>
+            </details>
+
+            <details class="wiki-tree-node wiki-tree-node--folder" open>
+              <summary class="wiki-tree-node__summary">
+                <span class="folder-icon" aria-hidden="true">DIR</span>
+                <span class="wiki-tree-node__label">Global</span>
+              </summary>
+              <div class="wiki-tree-node__children">
+                {% for item in resources %}
+                {% if item.access_scope == 'global' %}
+                <a class="wiki-tree-page" href="{{ item.detail_url }}">
+                  <span class="folder-icon" aria-hidden="true">PG</span>
+                  <span class="wiki-sidebar-page-copy">
+                    <strong>{{ item.name }}</strong>
+                    <small>{{ item.resource_type|title }}</small>
+                  </span>
+                </a>
+                {% endif %}
+                {% endfor %}
+              </div>
+            </details>
+
+            {% if not resources %}
+            <div class="text-muted small">No resources available.</div>
+            {% endif %}
+          </div>
+        </details>
+      </div>
+    </section>
   </aside>
 
   <div class="resources-main">

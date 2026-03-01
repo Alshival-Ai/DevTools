@@ -1,4 +1,5 @@
 import io
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -36,6 +37,35 @@ class MigrateUserHomeDataCommandTests(TestCase):
             password="pass1234",
             email=f"{username}@example.com",
         )
+
+    def _create_asana_cache_db(self, path: Path, rows: list[tuple[str, str]]):
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS asana_task_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    fetched_at_epoch INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            for cache_key, payload_json in rows:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO asana_task_cache (
+                        cache_key,
+                        payload_json,
+                        fetched_at_epoch,
+                        updated_at
+                    ) VALUES (?, ?, 0, datetime('now'))
+                    """,
+                    (cache_key, payload_json),
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
     def test_command_migrates_legacy_files_and_prunes_empty_dirs(self):
         user = self._create_user("migrate_target")
@@ -158,3 +188,59 @@ class MigrateUserHomeDataCommandTests(TestCase):
 
         self.assertTrue(legacy_member.exists())
         self.assertTrue(target_member.exists())
+
+    def test_finalize_merges_member_db_rows_and_removes_legacy(self):
+        user = self._create_user("finalize_member_merge")
+        owner_dir = _user_owner_dir(user)
+        app_data_dir = owner_dir / "home" / ".alshival"
+        app_data_dir.mkdir(parents=True, exist_ok=True)
+
+        legacy_member = owner_dir / "member.db"
+        target_member = app_data_dir / "member.db"
+        self._create_asana_cache_db(target_member, [("task-a", '{"x":1}')])
+        self._create_asana_cache_db(legacy_member, [("task-b", '{"x":2}')])
+
+        out = io.StringIO()
+        call_command("migrate_user_home_data", "--finalize", "--username", "finalize_member_merge", stdout=out)
+        output = out.getvalue()
+        self.assertIn("finalize=True", output)
+        self.assertIn("merged_member_rows=1", output)
+        self.assertIn("finalize_conflicts=0", output)
+
+        self.assertFalse(legacy_member.exists())
+        conn = sqlite3.connect(target_member)
+        try:
+            rows = conn.execute(
+                "SELECT cache_key FROM asana_task_cache ORDER BY cache_key"
+            ).fetchall()
+            self.assertEqual([row[0] for row in rows], ["task-a", "task-b"])
+        finally:
+            conn.close()
+
+    def test_finalize_keeps_member_db_when_rows_conflict_on_primary_key(self):
+        user = self._create_user("finalize_member_pk_conflict")
+        owner_dir = _user_owner_dir(user)
+        app_data_dir = owner_dir / "home" / ".alshival"
+        app_data_dir.mkdir(parents=True, exist_ok=True)
+
+        legacy_member = owner_dir / "member.db"
+        target_member = app_data_dir / "member.db"
+        self._create_asana_cache_db(target_member, [("task-a", '{"x":"target"}')])
+        self._create_asana_cache_db(legacy_member, [("task-a", '{"x":"legacy"}')])
+
+        out = io.StringIO()
+        call_command("migrate_user_home_data", "--finalize", "--username", "finalize_member_pk_conflict", stdout=out)
+        output = out.getvalue()
+        self.assertIn("finalize=True", output)
+        self.assertIn("finalize_conflicts=1", output)
+
+        self.assertTrue(legacy_member.exists())
+        conn = sqlite3.connect(target_member)
+        try:
+            payload = conn.execute(
+                "SELECT payload_json FROM asana_task_cache WHERE cache_key = ?",
+                ("task-a",),
+            ).fetchone()[0]
+            self.assertEqual(payload, '{"x":"target"}')
+        finally:
+            conn.close()

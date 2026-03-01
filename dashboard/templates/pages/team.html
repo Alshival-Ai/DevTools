@@ -40,34 +40,48 @@
     class="{% if team_membership_count > 1 %}resources-layout team-page-shell{% else %}team-page-shell team-page-shell--single{% endif %}"
     data-team-page>
     {% if team_membership_count > 1 %}
-    <aside class="team-folder-panel card team-page-nav" data-team-nav>
-      <div class="team-folder-title">Team Folders</div>
-      <div class="team-folder-subtitle">Switch context across chat and resources.</div>
-      <div class="team-folder-tree">
-        {% for item in team_memberships %}
-        <button
-          class="team-folder-btn{% if forloop.first %} is-active{% endif %}"
-          type="button"
-          data-team-nav-btn
-          data-team-id="{{ item.id }}"
-          data-team-slug="{{ item.name|lower|slugify }}"
-          data-team-name="{{ item.name }}">
-          <span class="folder-icon" aria-hidden="true">TM</span>
-          <span>{{ item.name }}</span>
-        </button>
-        {% endfor %}
+    <aside class="team-folder-panel team-folder-panel--chat-docked card team-page-nav wiki-sidebar" data-team-nav>
+      <div class="wiki-sidebar-head">
+        <div class="wiki-sidebar-head-copy">
+          <div class="team-folder-title">Team Folders</div>
+          <div class="team-folder-subtitle">Switch context across chat and resources.</div>
+        </div>
       </div>
-      <div class="team-folder-group team-page-nav-sections">
-        <div class="team-folder-group-label">Sections</div>
-        <button class="team-folder-btn is-active" type="button" data-team-section-link="chat">
-          <span class="folder-icon" aria-hidden="true">CH</span>
-          <span>Team Chat</span>
-        </button>
-        <button class="team-folder-btn" type="button" data-team-section-link="resources">
-          <span class="folder-icon" aria-hidden="true">RS</span>
-          <span>Team Resources</span>
-        </button>
-      </div>
+      <section class="wiki-sidebar-pages team-page-nav-pages">
+        <div class="directory-users-toolbar wiki-sidebar-pages-head">
+          <h3>Team Navigation</h3>
+          <span class="text-muted small">{{ team_membership_count }} folders</span>
+        </div>
+        <div class="wiki-sidebar-tree team-folder-tree">
+          <details class="wiki-tree-node wiki-tree-node--top wiki-tree-node--folder" open>
+            <summary class="wiki-tree-node__summary">
+              <span class="folder-icon" aria-hidden="true">DIR</span>
+              <span class="wiki-tree-node__label">All Teams</span>
+              <span class="wiki-tree-node__count">{{ team_membership_count }}</span>
+            </summary>
+            <div class="wiki-tree-node__children">
+              {% for item in team_memberships %}
+              <button
+                class="wiki-tree-page{% if forloop.first %} is-active{% endif %}"
+                type="button"
+                data-team-nav-btn
+                data-team-id="{{ item.id }}"
+                data-team-slug="{{ item.name|lower|slugify }}"
+                data-team-name="{{ item.name }}">
+                <span class="folder-icon" aria-hidden="true">DIR</span>
+                <span class="wiki-sidebar-page-copy">
+                  <strong>{{ item.name }}</strong>
+                  <small>Team space</small>
+                </span>
+              </button>
+              {% endfor %}
+            </div>
+          </details>
+        </div>
+      </section>
+      <section class="team-page-chat-slot" data-team-section="chat" id="team-chat-section">
+        {% include 'partials/team_chat_panel.html' %}
+      </section>
     </aside>
     {% endif %}
 
@@ -77,105 +91,12 @@
         <strong data-team-view-label>{{ team_memberships.0.name }}</strong>
       </div>
 
-      <section class="team-workbench" data-team-section="chat" id="team-chat-section">
-        <article
-          class="table-wrap team-chat-panel"
-          data-team-chat
-          data-chat-post-url="{% url 'ask_alshival_team_chat' %}"
-          data-chat-list-url="{% url 'team_chat_messages' %}"
-          data-team-chat-alert-settings-url="{% url 'update_team_chat_notification_settings' %}">
-          <div class="table-header">
-            <h3>Team Chat</h3>
-            <div class="team-chat-active-team">
-              <span class="text-muted small">Active team</span>
-              <strong data-team-active-label>{{ team_memberships.0.name }}</strong>
-            </div>
-            <button
-              class="icon-btn detail-alert-btn"
-              type="button"
-              aria-label="Open team chat notifications"
-              data-team-chat-alert-open>
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-                <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.4-1.4a2 2 0 0 1-.6-1.4V11a6 6 0 1 0-12 0v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0a3 3 0 0 1-6 0" />
-              </svg>
-            </button>
-            <select class="d-none" data-team-chat-team aria-hidden="true" tabindex="-1">
-              {% for item in team_memberships %}
-              <option value="{{ item.id }}" data-team-slug="{{ item.name|lower|slugify }}" data-team-name="{{ item.name }}">{{ item.name }}</option>
-              {% endfor %}
-            </select>
-          </div>
-          <p class="text-muted small">Shared messages between team members. This is not an assistant.</p>
-          <div class="team-chat-feed" data-team-chat-messages aria-live="polite"></div>
-          <form class="team-chat-compose" data-team-chat-form enctype="multipart/form-data">
-            <div class="resource-note-chat" data-team-chat-composer>
-              <textarea
-                rows="1"
-                maxlength="8000"
-                class="resource-note-input-text"
-                data-team-chat-input
-                placeholder="Write a message to your team..."></textarea>
-              <div class="resource-note-upload-hints" aria-hidden="true">
-                <svg
-                  class="resource-note-upload-icon"
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="24"
-                  height="24"
-                  viewBox="0 0 24 24">
-                  <g fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="13" r="3"></circle>
-                    <path d="M9.778 21h4.444c3.121 0 4.682 0 5.803-.735a4.4 4.4 0 0 0 1.226-1.204c.749-1.1.749-2.633.749-5.697s0-4.597-.749-5.697a4.4 4.4 0 0 0-1.226-1.204c-.72-.473-1.622-.642-3.003-.702c-.659 0-1.226-.49-1.355-1.125A2.064 2.064 0 0 0 13.634 3h-3.268c-.988 0-1.839.685-2.033 1.636c-.129.635-.696 1.125-1.355 1.125c-1.38.06-2.282.23-3.003.702A4.4 4.4 0 0 0 2.75 7.667C2 8.767 2 10.299 2 13.364s0 4.596.749 5.697c.324.476.74.885 1.226 1.204C5.096 21 6.657 21 9.778 21Z"></path>
-                  </g>
-                </svg>
-                <svg
-                  class="resource-note-upload-icon"
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="24"
-                  height="24"
-                  viewBox="0 0 24 24">
-                  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
-                    <rect width="18" height="18" x="3" y="3" rx="2" ry="2"></rect>
-                    <circle cx="9" cy="9" r="2"></circle>
-                    <path d="m21 15l-3.086-3.086a2 2 0 0 0-2.828 0L6 21"></path>
-                  </g>
-                </svg>
-                <svg
-                  class="resource-note-upload-icon"
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="24"
-                  height="24"
-                  viewBox="0 0 24 24">
-                  <path
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="m6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"></path>
-                </svg>
-              </div>
-              <label class="resource-note-label-files" title="Attach image or document" aria-label="Attach image or document">
-                <input
-                  type="file"
-                  name="attachment"
-                  accept="image/*,.txt,.md,.markdown,.csv,.tsv,.json,.xml,.yaml,.yml,.log,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.rtf"
-                  data-team-chat-file>
-                <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">
-                  <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14m-7-7v14"></path>
-                </svg>
-              </label>
-              <button class="resource-note-label-send" type="submit" aria-label="Send message" data-team-chat-send>
-                <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">
-                  <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 12l7-7l7 7m-7 7V5"></path>
-                </svg>
-              </button>
-            </div>
-            <div class="team-chat-compose-actions">
-              <span class="text-muted small" data-team-chat-status></span>
-              <span class="text-muted small team-chat-file-meta" data-team-chat-file-name hidden></span>
-            </div>
-          </form>
-        </article>
+      <section
+        class="team-workbench{% if team_membership_count > 1 %} team-workbench--planner-only{% endif %}"
+        {% if team_membership_count <= 1 %}data-team-section="chat" id="team-chat-section"{% endif %}>
+        {% if team_membership_count <= 1 %}
+        {% include 'partials/team_chat_panel.html' %}
+        {% endif %}
 
         <article class="table-wrap team-planner-panel planner-panel" data-team-planner>
           <header class="planner-head">

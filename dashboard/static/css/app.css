@@ -2150,6 +2150,10 @@ p {
   align-items: start;
 }
 
+.resources-layout.team-page-shell {
+  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+}
+
 .team-page-shell--single {
   display: block;
 }
@@ -2165,17 +2169,15 @@ p {
   gap: 0.75rem;
 }
 
-.team-page-nav-sections {
-  border-top: 1px dashed var(--border);
-  margin-top: 0.25rem;
-  padding-top: 0.65rem;
-}
-
 .team-workbench {
   display: grid;
   grid-template-columns: minmax(280px, 0.78fr) minmax(0, 1.52fr);
   gap: 1rem;
   align-items: start;
+}
+
+.team-workbench--planner-only {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .team-chat-panel,
@@ -3285,6 +3287,15 @@ p {
   top: 1rem;
 }
 
+.team-folder-panel--chat-docked {
+  position: static;
+}
+
+.team-page-chat-slot {
+  display: grid;
+  gap: 0.75rem;
+}
+
 .wiki-scope-form {
   display: grid;
   gap: 0.65rem;
@@ -3541,6 +3552,14 @@ p {
   border-radius: 10px;
   text-decoration: none;
   color: inherit;
+}
+
+button.wiki-tree-page {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
 }
 
 .wiki-tree-page:hover,
