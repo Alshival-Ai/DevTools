@@ -2349,17 +2349,6 @@
     });
   }
 
-  const askWidgetSlot = dashboard.querySelector('[data-overview-ask-widget]');
-  if (askWidgetSlot && typeof window.mountAskAlshivalWidget === 'function') {
-    document.body.classList.add('overview-ask-embedded');
-    window.mountAskAlshivalWidget({
-      container: askWidgetSlot,
-      title: 'Ask Alshival',
-      autoFocus: false,
-      inlineShell: true,
-    }).catch(() => {});
-  }
-
   const calendarAlertOpenButton = dashboard.querySelector('[data-calendar-alert-open]');
   const calendarAlertModal = document.querySelector('[data-calendar-alert-modal]');
 

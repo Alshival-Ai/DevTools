@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -8103,6 +8104,7 @@ def app_settings(request):
         "github_connector_configured": False,
         "github_login_enabled": False,
         "ask_github_mcp_enabled": False,
+        "ask_asana_mcp_enabled": False,
     }
     if request.user.is_superuser:
         setup = get_or_create_setup_state()
@@ -8120,6 +8122,7 @@ def app_settings(request):
                     "github_connector_configured": github_connector_configured,
                     "github_login_enabled": bool(getattr(setup, "github_login_enabled", False)),
                     "ask_github_mcp_enabled": bool(getattr(setup, "ask_github_mcp_enabled", False)),
+                    "ask_asana_mcp_enabled": bool(getattr(setup, "ask_asana_mcp_enabled", False)),
                 }
             )
 
@@ -8155,9 +8158,11 @@ def app_settings(request):
         github_connector_configured = is_github_connector_configured()
         github_login_enabled = bool(getattr(setup, "github_login_enabled", False))
         ask_github_mcp_enabled = bool(getattr(setup, "ask_github_mcp_enabled", False))
+        ask_asana_mcp_enabled = bool(getattr(setup, "ask_asana_mcp_enabled", False))
         if github_connector_configured:
             github_login_enabled = _post_flag(request.POST, "github_login_enabled")
             ask_github_mcp_enabled = _post_flag(request.POST, "ask_github_mcp_enabled")
+        ask_asana_mcp_enabled = _post_flag(request.POST, "ask_asana_mcp_enabled")
         if len(maintenance_message) > 255:
             maintenance_message = maintenance_message[:255].strip()
         if len(default_model) > 120:
@@ -8173,6 +8178,7 @@ def app_settings(request):
         setup.microsoft_login_enabled = microsoft_login_enabled
         setup.github_login_enabled = github_login_enabled
         setup.ask_github_mcp_enabled = ask_github_mcp_enabled
+        setup.ask_asana_mcp_enabled = ask_asana_mcp_enabled
         setup.save(
             update_fields=[
                 "monitoring_enabled",
@@ -8183,6 +8189,7 @@ def app_settings(request):
                 "microsoft_login_enabled",
                 "github_login_enabled",
                 "ask_github_mcp_enabled",
+                "ask_asana_mcp_enabled",
                 "updated_at",
             ]
         )
@@ -13726,15 +13733,86 @@ def _resolve_github_mcp_upstream_url() -> str:
     return configured or "http://github-mcp:8082/"
 
 
-def _normalize_openai_tool_name(raw_name: str, *, used_names: set[str]) -> str:
+_ASANA_MCP_TOKEN_CACHE: dict[str, object] = {"access_token": "", "expires_at": 0.0}
+_ASANA_MCP_TOKEN_LOCK = threading.Lock()
+
+
+def _resolve_asana_mcp_upstream_url() -> str:
+    configured = str(
+        os.getenv("ASK_ASANA_MCP_UPSTREAM_URL")
+        or os.getenv("MCP_ASANA_UPSTREAM_URL")
+        or ""
+    ).strip()
+    return configured or "https://mcp.asana.com/v2/mcp"
+
+
+def _resolve_asana_mcp_token_endpoint() -> str:
+    configured = str(os.getenv("ASK_ASANA_MCP_TOKEN_ENDPOINT") or "").strip()
+    return configured or "https://app.asana.com/-/oauth_token"
+
+
+def _get_asana_mcp_access_token() -> str:
+    direct = str(os.getenv("ASK_ASANA_MCP_ACCESS_TOKEN") or "").strip()
+    if direct:
+        return direct
+
+    refresh_token = str(os.getenv("ASK_ASANA_MCP_REFRESH_TOKEN") or "").strip()
+    client_id = str(os.getenv("ASK_ASANA_MCP_CLIENT_ID") or "").strip()
+    client_secret = str(os.getenv("ASK_ASANA_MCP_CLIENT_SECRET") or "").strip()
+    if not (refresh_token and client_id and client_secret):
+        return ""
+
+    now_epoch = time.time()
+    with _ASANA_MCP_TOKEN_LOCK:
+        cached_access_token = str(_ASANA_MCP_TOKEN_CACHE.get("access_token") or "").strip()
+        cached_expires_at = float(_ASANA_MCP_TOKEN_CACHE.get("expires_at") or 0.0)
+        if cached_access_token and cached_expires_at - now_epoch > 45:
+            return cached_access_token
+
+        response = requests.post(
+            _resolve_asana_mcp_token_endpoint(),
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout=20,
+        )
+        body_text = str(response.text or "").strip()
+        if response.status_code >= 400:
+            detail = body_text[:400] if body_text else f"status {response.status_code}"
+            raise RuntimeError(f"asana mcp oauth refresh failed: {detail}")
+        try:
+            payload = response.json() if response.content else {}
+        except Exception as exc:
+            snippet = body_text[:400] if body_text else "no body"
+            raise RuntimeError(f"asana mcp oauth refresh returned invalid json ({exc}): {snippet}") from exc
+
+        access_token = str(payload.get("access_token") or "").strip() if isinstance(payload, dict) else ""
+        if not access_token:
+            raise RuntimeError("asana mcp oauth refresh did not return access_token")
+        expires_in_raw = payload.get("expires_in") if isinstance(payload, dict) else 3600
+        try:
+            expires_in = int(expires_in_raw or 3600)
+        except Exception:
+            expires_in = 3600
+        expires_in = max(60, expires_in)
+        _ASANA_MCP_TOKEN_CACHE["access_token"] = access_token
+        _ASANA_MCP_TOKEN_CACHE["expires_at"] = time.time() + float(expires_in)
+        return access_token
+
+
+def _normalize_openai_tool_name(raw_name: str, *, used_names: set[str], fallback_base: str = "mcp_tool") -> str:
     candidate = re.sub(r"[^A-Za-z0-9_]", "_", str(raw_name or "").strip().lower())
     candidate = re.sub(r"_+", "_", candidate).strip("_")
     if not candidate:
-        candidate = "github_mcp_tool"
+        candidate = str(fallback_base or "mcp_tool").strip().lower() or "mcp_tool"
     if len(candidate) > 64:
         candidate = candidate[:64].rstrip("_")
     if not candidate:
-        candidate = "github_mcp_tool"
+        candidate = str(fallback_base or "mcp_tool").strip().lower() or "mcp_tool"
     if candidate not in used_names:
         used_names.add(candidate)
         return candidate
@@ -13843,6 +13921,7 @@ def _github_mcp_list_tools() -> tuple[list[dict], dict[str, str], str]:
         exposed_name = _normalize_openai_tool_name(
             f"github_mcp_{source_name}",
             used_names=used_tool_names,
+            fallback_base="github_mcp_tool",
         )
         specs.append(
             {
@@ -13887,6 +13966,160 @@ def _github_mcp_call_tool(*, tool_name: str, args: dict) -> dict:
     return {
         "ok": not bool(result.get("isError", False)) if isinstance(result, dict) else True,
         "source": "github_mcp",
+        "tool_name": resolved_tool_name,
+        "text": "\n".join(text_parts).strip(),
+        "result": result if isinstance(result, dict) else {},
+    }
+
+
+def _asana_mcp_jsonrpc_request(*, method: str, params: dict | None = None, timeout: int = 30) -> dict:
+    access_token = _get_asana_mcp_access_token()
+    if not access_token:
+        raise RuntimeError(
+            "asana mcp access token is not configured (set ASK_ASANA_MCP_ACCESS_TOKEN or ASK_ASANA_MCP_REFRESH_TOKEN+ASK_ASANA_MCP_CLIENT_ID+ASK_ASANA_MCP_CLIENT_SECRET)"
+        )
+    request_id = f"ask-{get_random_string(10)}"
+    payload: dict[str, object] = {"jsonrpc": "2.0", "id": request_id, "method": str(method or "").strip()}
+    if isinstance(params, dict):
+        payload["params"] = params
+
+    response = requests.post(
+        _resolve_asana_mcp_upstream_url(),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json=payload,
+        timeout=max(5, int(timeout or 30)),
+    )
+    body_text = str(response.text or "").strip()
+    if response.status_code >= 400:
+        detail = body_text[:400] if body_text else f"status {response.status_code}"
+        raise RuntimeError(f"asana mcp http error: {detail}")
+    try:
+        decoded = response.json()
+    except Exception as exc:
+        snippet = body_text[:400] if body_text else "no body"
+        raise RuntimeError(f"asana mcp non-json response ({exc}): {snippet}") from exc
+
+    candidate = decoded
+    if isinstance(decoded, list):
+        matching = [
+            item
+            for item in decoded
+            if isinstance(item, dict) and str(item.get("id") or "") == request_id
+        ]
+        candidate = matching[0] if matching else (decoded[0] if decoded else {})
+    if not isinstance(candidate, dict):
+        raise RuntimeError("asana mcp invalid json-rpc payload")
+
+    rpc_error = candidate.get("error")
+    if isinstance(rpc_error, dict):
+        message = str(rpc_error.get("message") or "unknown error").strip() or "unknown error"
+        raise RuntimeError(f"asana mcp rpc error: {message}")
+    return candidate
+
+
+def _asana_mcp_list_tools() -> tuple[list[dict], dict[str, str], str]:
+    try:
+        payload = _asana_mcp_jsonrpc_request(method="tools/list", params={})
+    except Exception:
+        try:
+            _asana_mcp_jsonrpc_request(
+                method="initialize",
+                params={
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "alshival-ask", "version": "1.0"},
+                },
+            )
+            payload = _asana_mcp_jsonrpc_request(method="tools/list", params={})
+        except Exception as exc:
+            return [], {}, str(exc)
+
+    result = payload.get("result") if isinstance(payload, dict) else {}
+    tools = result.get("tools") if isinstance(result, dict) else []
+    if not isinstance(tools, list):
+        return [], {}, "asana mcp tools/list returned invalid tool payload"
+
+    specs: list[dict] = []
+    name_map: dict[str, str] = {}
+    used_tool_names = {
+        "search_kb",
+        "alert_filter_prompt",
+        "search_users",
+        "directory",
+        "sms",
+        "resource_health_check",
+        "resource_logs",
+        "resource_kb",
+        "resource_ssh_exec",
+        "outlook_mail",
+        "outlook_calendar",
+        "set_reminder",
+        "edit_reminder",
+        "delete_reminder",
+        "list_reminders",
+    }
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        source_name = str(tool.get("name") or "").strip()
+        if not source_name:
+            continue
+        description = str(tool.get("description") or "").strip() or f"Asana MCP tool: {source_name}"
+        input_schema = tool.get("inputSchema")
+        if not isinstance(input_schema, dict) or str(input_schema.get("type") or "").strip().lower() != "object":
+            input_schema = {"type": "object", "properties": {}, "required": []}
+        exposed_name = _normalize_openai_tool_name(
+            f"asana_mcp_{source_name}",
+            used_names=used_tool_names,
+            fallback_base="asana_mcp_tool",
+        )
+        specs.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": exposed_name,
+                    "description": description,
+                    "parameters": input_schema,
+                },
+            }
+        )
+        name_map[exposed_name] = source_name
+    return specs, name_map, ""
+
+
+def _asana_mcp_call_tool(*, tool_name: str, args: dict) -> dict:
+    resolved_tool_name = str(tool_name or "").strip()
+    if not resolved_tool_name:
+        return {"ok": False, "error": "asana mcp tool name is required"}
+    try:
+        payload = _asana_mcp_jsonrpc_request(
+            method="tools/call",
+            params={
+                "name": resolved_tool_name,
+                "arguments": args if isinstance(args, dict) else {},
+            },
+            timeout=60,
+        )
+    except Exception as exc:
+        return {"ok": False, "source": "asana_mcp", "tool_name": resolved_tool_name, "error": str(exc)}
+    result = payload.get("result") if isinstance(payload, dict) else {}
+    content = result.get("content") if isinstance(result, dict) else []
+    text_parts: list[str] = []
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").strip().lower() == "text":
+                text_value = str(item.get("text") or "").strip()
+                if text_value:
+                    text_parts.append(text_value)
+    return {
+        "ok": not bool(result.get("isError", False)) if isinstance(result, dict) else True,
+        "source": "asana_mcp",
         "tool_name": resolved_tool_name,
         "text": "\n".join(text_parts).strip(),
         "result": result if isinstance(result, dict) else {},
@@ -14614,6 +14847,15 @@ def _ask_alshival_generate_reply_for_user(
     github_mcp_error = ""
     if github_mcp_enabled:
         github_tool_specs, github_tool_name_map, github_mcp_error = _github_mcp_list_tools()
+    asana_tool_specs: list[dict] = []
+    asana_tool_name_map: dict[str, str] = {}
+    asana_mcp_enabled = bool(
+        setup
+        and bool(getattr(setup, "ask_asana_mcp_enabled", False))
+    )
+    asana_mcp_error = ""
+    if asana_mcp_enabled:
+        asana_tool_specs, asana_tool_name_map, asana_mcp_error = _asana_mcp_list_tools()
 
     mcp_tool_lines = _default_ask_mcp_tool_lines()
     if github_mcp_enabled and github_tool_name_map:
@@ -14626,6 +14868,16 @@ def _ask_alshival_generate_reply_for_user(
         )
     elif github_mcp_enabled and github_mcp_error:
         mcp_tool_lines.append(f"- GitHub MCP requested but unavailable: {github_mcp_error}")
+    if asana_mcp_enabled and asana_tool_name_map:
+        exposed_names = list(asana_tool_name_map.keys())
+        preview_names = ", ".join(exposed_names[:12])
+        if len(exposed_names) > 12:
+            preview_names += ", ..."
+        mcp_tool_lines.append(
+            f"- Asana MCP tools enabled ({len(exposed_names)}): {preview_names}"
+        )
+    elif asana_mcp_enabled and asana_mcp_error:
+        mcp_tool_lines.append(f"- Asana MCP requested but unavailable: {asana_mcp_error}")
 
     system_prompt = _build_ask_system_prompt_for_user(
         user=user,
@@ -14655,7 +14907,7 @@ def _ask_alshival_generate_reply_for_user(
     except Exception:
         pass
 
-    tools_spec = _ask_alshival_tools_spec(extra_tools=github_tool_specs)
+    tools_spec = _ask_alshival_tools_spec(extra_tools=[*github_tool_specs, *asana_tool_specs])
     max_tool_rounds = 6
     messages = list(chat_input)
 
@@ -14715,13 +14967,17 @@ def _ask_alshival_generate_reply_for_user(
                 if github_tool_name:
                     result = _github_mcp_call_tool(tool_name=github_tool_name, args=parsed_args)
                 else:
-                    result = _run_ask_tool_for_actor(
-                        actor=user,
-                        tool_name=tool_name,
-                        args=parsed_args,
-                        conversation_id=resolved_conversation_id,
-                        channel=channel,
-                    )
+                    asana_tool_name = asana_tool_name_map.get(tool_name, "")
+                    if asana_tool_name:
+                        result = _asana_mcp_call_tool(tool_name=asana_tool_name, args=parsed_args)
+                    else:
+                        result = _run_ask_tool_for_actor(
+                            actor=user,
+                            tool_name=tool_name,
+                            args=parsed_args,
+                            conversation_id=resolved_conversation_id,
+                            channel=channel,
+                        )
                 return call_id, tool_name, raw_args, json.dumps(result), result
 
             results_by_call_id: dict[str, tuple[str, str, str, dict]] = {}

@@ -452,6 +452,18 @@
     document.body.classList.remove('ask-widget-open');
   };
 
+  const clearEmbeddedAskWidget = (container) => {
+    if (!container || container.nodeType !== 1) return;
+    const cleanup = embeddedAskMounts.get(container);
+    if (typeof cleanup === 'function') {
+      try {
+        cleanup();
+      } catch (err) {}
+    }
+    embeddedAskMounts.delete(container);
+    container.innerHTML = '';
+  };
+
   const setupDraggableAskWidget = (widget) => {
     if (window.matchMedia('(max-width: 767px)').matches) return () => {};
     const header = widget.querySelector('.ask-terminal-widget__head');
@@ -1042,7 +1054,12 @@
           hintText: 'Staff local login shell',
         });
       },
-      onPopout: () => openAskPopoutWindow(),
+      onPopout: () => {
+        const opened = openAskPopoutWindow();
+        if (opened) {
+          removeAskWidget();
+        }
+      },
     });
   };
 
@@ -1092,13 +1109,9 @@
     }
   };
 
-  const mountEmbeddedShellWidget = async ({ container, showPopout }) => {
+  const mountEmbeddedShellWidget = async ({ container, showPopout, showClose }) => {
     if (!container || container.nodeType !== 1) return false;
-    const existingCleanup = embeddedAskMounts.get(container);
-    if (typeof existingCleanup === 'function') {
-      existingCleanup();
-      embeddedAskMounts.delete(container);
-    }
+    clearEmbeddedAskWidget(container);
 
     const restoreChat = () => {
       window.mountAskAlshivalWidget({
@@ -1106,6 +1119,7 @@
         title: 'Ask Alshival',
         autoFocus: false,
         showPopout,
+        showClose,
         inlineShell: true,
       }).catch(() => {});
     };
@@ -1132,7 +1146,10 @@
     if (popoutButton) {
       popoutButton.addEventListener('click', (event) => {
         event.preventDefault();
-        openAskPopoutWindow();
+        const opened = openAskPopoutWindow();
+        if (opened) {
+          clearEmbeddedAskWidget(container);
+        }
       });
     }
 
@@ -1174,7 +1191,13 @@
     await openAskChatWidget({ title });
     return true;
   };
-  window.openAskAlshivalWidgetPopout = () => openAskPopoutWindow();
+  window.openAskAlshivalWidgetPopout = () => {
+    const opened = openAskPopoutWindow();
+    if (opened) {
+      removeAskWidget();
+    }
+    return opened;
+  };
 
   window.mountAskAlshivalWidget = async (options = {}) => {
     const target = options && options.container;
@@ -1183,19 +1206,16 @@
       : (target && target.nodeType === 1 ? target : null);
     if (!container) return false;
 
-    const existingCleanup = embeddedAskMounts.get(container);
-    if (typeof existingCleanup === 'function') {
-      existingCleanup();
-      embeddedAskMounts.delete(container);
-    }
+    clearEmbeddedAskWidget(container);
 
     const title = String((options && options.title) || 'Ask Alshival');
     const showPopout = !(options && options.showPopout === false);
+    const showClose = !(options && options.showClose === false);
     const inlineShell = Boolean(options && options.inlineShell);
     container.innerHTML = '';
     const embeddedWidget = document.createElement('section');
     embeddedWidget.className = 'ask-terminal-widget ask-terminal-widget--embedded';
-    embeddedWidget.innerHTML = buildAskChatWidgetMarkup({ title, includeClose: true, includePopout: showPopout });
+    embeddedWidget.innerHTML = buildAskChatWidgetMarkup({ title, includeClose: showClose, includePopout: showPopout });
     container.appendChild(embeddedWidget);
 
     const client = initAskChatWidget({
@@ -1207,6 +1227,7 @@
           title,
           autoFocus: false,
           showPopout,
+          showClose,
         }).catch(() => {});
       },
       onSudo: async () => {
@@ -1215,6 +1236,7 @@
           await mountEmbeddedShellWidget({
             container,
             showPopout,
+            showClose,
           });
           return;
         }
@@ -1224,7 +1246,12 @@
           hintText: 'Staff local login shell',
         });
       },
-      onPopout: () => openAskPopoutWindow(),
+      onPopout: () => {
+        const opened = openAskPopoutWindow();
+        if (opened) {
+          clearEmbeddedAskWidget(container);
+        }
+      },
     });
     embeddedAskMounts.set(container, () => {
       if (client && typeof client.close === 'function') {

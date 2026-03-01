@@ -1,4 +1,5 @@
 # Env and secrets
+image*.png
 .env
 .env.*
 !.env.template

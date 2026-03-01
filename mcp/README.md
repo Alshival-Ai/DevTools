@@ -11,6 +11,7 @@ Endpoints:
 - `GET /health` (no auth)
 - `POST /mcp/` (MCP streamable HTTP, requires global API key)
 - `GET|POST /github/` (proxied to internal GitHub MCP upstream, requires global API key)
+- `GET|POST /asana/` (proxied to Asana MCP upstream, requires global API key)
 
 Auth:
 
@@ -35,6 +36,12 @@ GitHub proxy:
 
 - Configure `MCP_GITHUB_UPSTREAM_URL` (example: `http://github-mcp:8082/`)
 - The `/github/*` route forwards method/body/query/headers to that upstream.
+
+Asana proxy:
+
+- Configure `MCP_ASANA_UPSTREAM_URL` (example: `https://mcp.asana.com/v2/mcp`)
+- The `/asana/*` route forwards method/body/query/headers to that upstream.
+- Include Asana MCP bearer auth in `Authorization` header when calling the proxy.
 
 Tools:
 

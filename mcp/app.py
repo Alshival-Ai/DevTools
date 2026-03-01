@@ -77,6 +77,7 @@ EMAIL_HEADER = (os.getenv("MCP_EMAIL_HEADER") or "x-user-email").strip() or "x-u
 PHONE_HEADER = (os.getenv("MCP_PHONE_HEADER") or "x-user-phone").strip() or "x-user-phone"
 RESOURCE_UUID_HEADER = (os.getenv("MCP_RESOURCE_HEADER") or "x-resource-uuid").strip() or "x-resource-uuid"
 GITHUB_MCP_UPSTREAM_URL = (os.getenv("MCP_GITHUB_UPSTREAM_URL") or "").strip()
+ASANA_MCP_UPSTREAM_URL = (os.getenv("MCP_ASANA_UPSTREAM_URL") or "").strip()
 TWILIO_SIGNATURE_HEADER = (os.getenv("MCP_TWILIO_SIGNATURE_HEADER") or "x-twilio-signature").strip() or "x-twilio-signature"
 _REQUEST_AUTH = ContextVar("mcp_request_auth", default=None)
 
@@ -2569,6 +2570,18 @@ async def github_proxy(request: Request, path: str = ""):
     return _proxy_mcp_request(
         request=request,
         upstream_url=GITHUB_MCP_UPSTREAM_URL,
+        body=body,
+        suffix=path,
+    )
+
+
+@app.api_route("/asana/", methods=["GET", "POST"])
+@app.api_route("/asana/{path:path}", methods=["GET", "POST"])
+async def asana_proxy(request: Request, path: str = ""):
+    body = await request.body() if request.method in {"POST", "PUT", "PATCH"} else b""
+    return _proxy_mcp_request(
+        request=request,
+        upstream_url=ASANA_MCP_UPSTREAM_URL,
         body=body,
         suffix=path,
     )

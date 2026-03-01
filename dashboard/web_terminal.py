@@ -74,6 +74,58 @@ def _interactive_shell_exec_command(shell: str) -> str:
     return f"exec {shlex.quote(shell)} -i"
 
 
+def _is_truthy_env(value: str | None, *, default: bool = False) -> bool:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _codex_mcp_enabled() -> bool:
+    return _is_truthy_env(os.getenv("WEB_TERMINAL_CODEX_MCP_ENABLED"), default=True)
+
+
+def _codex_mcp_server_name() -> str:
+    raw = str(os.getenv("WEB_TERMINAL_CODEX_MCP_SERVER_NAME", "") or "").strip().lower()
+    normalized = re.sub(r"[^a-z0-9_-]", "-", raw).strip("-_")
+    return normalized or "alshival"
+
+
+def _codex_mcp_url() -> str:
+    configured = str(os.getenv("WEB_TERMINAL_CODEX_MCP_URL", "") or "").strip()
+    if configured:
+        return configured
+    if os.path.exists("/.dockerenv"):
+        return "http://mcp:8080/mcp/"
+    return "http://127.0.0.1:8080/mcp/"
+
+
+def _codex_mcp_api_key_header() -> str:
+    configured = str(os.getenv("WEB_TERMINAL_CODEX_MCP_API_KEY_HEADER", "") or "").strip()
+    if configured:
+        return configured
+    default_header = str(os.getenv("MCP_API_KEY_HEADER", "") or "").strip()
+    return default_header or "x-api-key"
+
+
+def _codex_mcp_api_key_env_name() -> str:
+    configured = str(os.getenv("WEB_TERMINAL_CODEX_MCP_API_KEY_ENV", "") or "").strip()
+    if configured:
+        return configured
+    return "MCP_API_KEY"
+
+
+def _codex_mcp_api_key_value() -> str:
+    explicit = str(os.getenv("WEB_TERMINAL_CODEX_MCP_API_KEY", "") or "").strip()
+    if explicit:
+        return explicit
+    inherited = str(os.getenv(_codex_mcp_api_key_env_name(), "") or "").strip()
+    if inherited:
+        return inherited
+    fallback = str(os.getenv("MCP_API_KEY", "") or "").strip()
+    return fallback
+
+
 class TerminalWebSocketApp:
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "websocket":
@@ -647,6 +699,20 @@ class HostShellSession(PTYProcessSession):
         python_bin = shutil.which("python3") or "/usr/bin/python3"
         if not os.path.exists(python_bin):
             raise RuntimeError("Unable to configure codex profile: missing python3.")
+        profile_header = "[profiles.pro]"
+        mcp_header = f"[mcp_servers.{_codex_mcp_server_name()}]"
+        mcp_enabled = _codex_mcp_enabled()
+        profile_lines = [
+            'approval_policy = "never"',
+            'sandbox_mode = "danger-full-access"',
+        ]
+        mcp_lines = [
+            f'url = "{_codex_mcp_url()}"',
+            "startup_timeout_sec = 20",
+            "tool_timeout_sec = 90",
+            "enabled = true",
+            f'env_http_headers = {{ "{_codex_mcp_api_key_header()}" = "{_codex_mcp_api_key_env_name()}" }}',
+        ]
         script = """
 import os
 from pathlib import Path
@@ -656,46 +722,55 @@ path.parent.mkdir(parents=True, exist_ok=True)
 text = path.read_text(encoding="utf-8") if path.exists() else ""
 lines = text.splitlines()
 
-header = "[profiles.pro]"
-ap_line = 'approval_policy = "never"'
-sb_line = 'sandbox_mode = "danger-full-access"'
+def upsert_section(lines, header, section_lines):
+    idx = -1
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            idx = i
+            break
+    if idx == -1:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(header)
+        lines.extend(section_lines)
+        return lines
 
-idx = -1
-for i, line in enumerate(lines):
-    if line.strip() == header:
-        idx = i
-        break
-
-if idx == -1:
-    if lines and lines[-1].strip():
-        lines.append("")
-    lines.extend([header, ap_line, sb_line])
-else:
     end = len(lines)
     for j in range(idx + 1, len(lines)):
         if lines[j].lstrip().startswith("["):
             end = j
             break
-    ap_idx = -1
-    sb_idx = -1
-    for j in range(idx + 1, end):
-        stripped = lines[j].strip()
-        if stripped.startswith("approval_policy"):
-            ap_idx = j
-        elif stripped.startswith("sandbox_mode"):
-            sb_idx = j
-    if ap_idx != -1:
-        lines[ap_idx] = ap_line
-    else:
-        lines.insert(end, ap_line)
-        end += 1
-    if sb_idx != -1:
-        lines[sb_idx] = sb_line
-    else:
-        lines.insert(end, sb_line)
+
+    for target_line in section_lines:
+        key = target_line.split("=", 1)[0].strip()
+        match_idx = -1
+        for j in range(idx + 1, end):
+            stripped = lines[j].strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith(f"{key} ") or stripped.startswith(f"{key}="):
+                match_idx = j
+                break
+        if match_idx != -1:
+            lines[match_idx] = target_line
+        else:
+            lines.insert(end, target_line)
+            end += 1
+    return lines
+
+lines = upsert_section(lines, __PROFILE_HEADER__, __PROFILE_LINES__)
+if __MCP_ENABLED__:
+    lines = upsert_section(lines, __MCP_HEADER__, __MCP_LINES__)
 
 path.write_text("\\n".join(lines).rstrip() + "\\n", encoding="utf-8")
 """
+        script = (
+            script.replace("__PROFILE_HEADER__", json.dumps(profile_header))
+            .replace("__PROFILE_LINES__", json.dumps(profile_lines))
+            .replace("__MCP_ENABLED__", "True" if mcp_enabled else "False")
+            .replace("__MCP_HEADER__", json.dumps(mcp_header))
+            .replace("__MCP_LINES__", json.dumps(mcp_lines))
+        )
         cmd = self._run_as_user_command(username, [python_bin, "-c", script])
         result = subprocess.run(
             cmd,
@@ -773,6 +848,11 @@ path.write_text("\\n".join(lines).rstrip() + "\\n", encoding="utf-8")
             env["HOME"] = home_dir
         if self._openai_api_key:
             env["OPENAI_API_KEY"] = self._openai_api_key
+        if _codex_mcp_enabled():
+            mcp_key_name = _codex_mcp_api_key_env_name()
+            mcp_key_value = _codex_mcp_api_key_value()
+            if mcp_key_name and mcp_key_value:
+                env[mcp_key_name] = mcp_key_value
         return env
 
     def _build_cwd(self) -> str | None:
@@ -849,6 +929,11 @@ class LocalShellSession(PTYProcessSession):
             env["VIRTUAL_ENV"] = venv_dir
         if self._openai_api_key:
             env["OPENAI_API_KEY"] = self._openai_api_key
+        if _codex_mcp_enabled():
+            mcp_key_name = _codex_mcp_api_key_env_name()
+            mcp_key_value = _codex_mcp_api_key_value()
+            if mcp_key_name and mcp_key_value:
+                env[mcp_key_name] = mcp_key_value
         return env
 
     def _build_cwd(self) -> str | None:
@@ -988,46 +1073,65 @@ class LocalShellSession(PTYProcessSession):
                     raw = handle.read()
             lines = raw.splitlines()
 
-            header = "[profiles.pro]"
-            approval_line = 'approval_policy = "never"'
-            sandbox_line = 'sandbox_mode = "danger-full-access"'
+            def upsert_section(source_lines: list[str], header: str, section_lines: list[str]) -> list[str]:
+                idx = -1
+                for i, line in enumerate(source_lines):
+                    if line.strip() == header:
+                        idx = i
+                        break
 
-            idx = -1
-            for i, line in enumerate(lines):
-                if line.strip() == header:
-                    idx = i
-                    break
+                if idx == -1:
+                    if source_lines and source_lines[-1].strip():
+                        source_lines.append("")
+                    source_lines.append(header)
+                    source_lines.extend(section_lines)
+                    return source_lines
 
-            if idx == -1:
-                if lines and lines[-1].strip():
-                    lines.append("")
-                lines.extend([header, approval_line, sandbox_line])
-            else:
-                end = len(lines)
-                for j in range(idx + 1, len(lines)):
-                    if lines[j].lstrip().startswith("["):
+                end = len(source_lines)
+                for j in range(idx + 1, len(source_lines)):
+                    if source_lines[j].lstrip().startswith("["):
                         end = j
                         break
 
-                approval_idx = -1
-                sandbox_idx = -1
-                for j in range(idx + 1, end):
-                    stripped = lines[j].strip()
-                    if stripped.startswith("approval_policy"):
-                        approval_idx = j
-                    elif stripped.startswith("sandbox_mode"):
-                        sandbox_idx = j
+                for target_line in section_lines:
+                    key = target_line.split("=", 1)[0].strip()
+                    match_idx = -1
+                    for j in range(idx + 1, end):
+                        stripped = source_lines[j].strip()
+                        if not stripped or stripped.startswith("#"):
+                            continue
+                        if stripped.startswith(f"{key} ") or stripped.startswith(f"{key}="):
+                            match_idx = j
+                            break
 
-                if approval_idx != -1:
-                    lines[approval_idx] = approval_line
-                else:
-                    lines.insert(end, approval_line)
-                    end += 1
+                    if match_idx != -1:
+                        source_lines[match_idx] = target_line
+                    else:
+                        source_lines.insert(end, target_line)
+                        end += 1
+                return source_lines
 
-                if sandbox_idx != -1:
-                    lines[sandbox_idx] = sandbox_line
-                else:
-                    lines.insert(end, sandbox_line)
+            lines = upsert_section(
+                lines,
+                "[profiles.pro]",
+                [
+                    'approval_policy = "never"',
+                    'sandbox_mode = "danger-full-access"',
+                ],
+            )
+
+            if _codex_mcp_enabled():
+                lines = upsert_section(
+                    lines,
+                    f"[mcp_servers.{_codex_mcp_server_name()}]",
+                    [
+                        f'url = "{_codex_mcp_url()}"',
+                        "startup_timeout_sec = 20",
+                        "tool_timeout_sec = 90",
+                        "enabled = true",
+                        f'env_http_headers = {{ "{_codex_mcp_api_key_header()}" = "{_codex_mcp_api_key_env_name()}" }}',
+                    ],
+                )
 
             with open(config_path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(lines).rstrip() + "\n")

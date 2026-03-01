@@ -20,6 +20,7 @@ class SystemSetup(models.Model):
     microsoft_login_enabled = models.BooleanField(default=False)
     github_login_enabled = models.BooleanField(default=False)
     ask_github_mcp_enabled = models.BooleanField(default=False)
+    ask_asana_mcp_enabled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
