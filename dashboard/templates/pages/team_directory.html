@@ -56,39 +56,64 @@
       <input type="search" placeholder="Username, email, team" data-directory-search />
     </label>
     <div class="directory-users-list" data-directory-users-list>
-      {% for user_item in user_rows %}
-      <button
-        class="directory-user-row{% if selected_user_id == user_item.id %} is-active{% endif %}"
-        type="button"
-        data-directory-user-row
-        data-user-id="{{ user_item.id }}"
-        data-user-username="{{ user_item.username|escape }}"
-        data-user-email="{{ user_item.email|escape }}"
-        data-user-active="{% if user_item.is_active %}1{% else %}0{% endif %}"
-        data-user-staff="{% if user_item.is_staff %}1{% else %}0{% endif %}"
-        data-user-super="{% if user_item.is_superuser %}1{% else %}0{% endif %}"
-        data-user-role-label="{{ user_item.role_label|escape }}"
-        data-user-role-tone="{{ user_item.role_tone|escape }}"
-        data-user-teams="{{ user_item.team_names|join:'|'|escape }}"
-        data-user-joined="{{ user_item.joined_display|escape }}"
-        data-user-last-login="{{ user_item.last_login_display|escape }}"
-      >
-        <div class="directory-user-row-top">
-          <strong>{{ user_item.username }}</strong>
-          {% if user_item.is_active %}
-          <span class="status success">Active</span>
-          {% else %}
-          <span class="status warning">Inactive</span>
-          {% endif %}
+      {% if user_rows or pending_invite_rows %}
+        {% for user_item in user_rows %}
+        <button
+          class="directory-user-row{% if selected_user_id == user_item.id %} is-active{% endif %}"
+          type="button"
+          data-directory-user-row
+          data-user-id="{{ user_item.id }}"
+          data-user-username="{{ user_item.username|escape }}"
+          data-user-email="{{ user_item.email|escape }}"
+          data-user-active="{% if user_item.is_active %}1{% else %}0{% endif %}"
+          data-user-staff="{% if user_item.is_staff %}1{% else %}0{% endif %}"
+          data-user-super="{% if user_item.is_superuser %}1{% else %}0{% endif %}"
+          data-user-role-label="{{ user_item.role_label|escape }}"
+          data-user-role-tone="{{ user_item.role_tone|escape }}"
+          data-user-teams="{{ user_item.team_names|join:'|'|escape }}"
+          data-user-joined="{{ user_item.joined_display|escape }}"
+          data-user-last-login="{{ user_item.last_login_display|escape }}"
+        >
+          <div class="directory-user-row-top">
+            <strong>{{ user_item.username }}</strong>
+            {% if user_item.is_active %}
+            <span class="status success">Active</span>
+            {% else %}
+            <span class="status warning">Inactive</span>
+            {% endif %}
+          </div>
+          <div class="text-muted small">{{ user_item.email|default:'No email' }}</div>
+          <div class="directory-mini-tags">
+            <span class="status {{ user_item.role_tone }}">{{ user_item.role_label }}</span>
+          </div>
+        </button>
+        {% endfor %}
+
+        {% for invite_item in pending_invite_rows %}
+        <div
+          class="directory-user-row directory-user-row--pending"
+          data-directory-pending-row
+          data-pending-search="{{ invite_item.target_label }} {{ invite_item.sent_to }} {{ invite_item.team_names|join:' ' }}"
+        >
+          <div class="directory-user-row-top">
+            <strong>{{ invite_item.target_label }}</strong>
+            <span class="status info">Pending Invite</span>
+          </div>
+          <div class="text-muted small">
+            {% if invite_item.sent_to %}{{ invite_item.sent_to }}{% else %}{{ invite_item.channel_label }}{% endif %}
+          </div>
+          <div class="directory-mini-tags">
+            <span class="status info">{{ invite_item.channel_label }}</span>
+            <span class="status warning">Expires {{ invite_item.expires_display }}</span>
+            {% for team_name in invite_item.team_names %}
+            <span class="status success">{{ team_name }}</span>
+            {% endfor %}
+          </div>
         </div>
-        <div class="text-muted small">{{ user_item.email|default:'No email' }}</div>
-        <div class="directory-mini-tags">
-          <span class="status {{ user_item.role_tone }}">{{ user_item.role_label }}</span>
-        </div>
-      </button>
-      {% empty %}
+        {% endfor %}
+      {% else %}
       <div class="directory-empty">No users found.</div>
-      {% endfor %}
+      {% endif %}
       <div class="directory-empty d-none" data-directory-no-results>No users match your search.</div>
     </div>
   </aside>
@@ -521,11 +546,14 @@
       </label>
       <div class="text-muted small">An invite link is sent by email or SMS. The recipient chooses their sign-in method and gets these permissions.</div>
       <div class="modal-fieldset">
-        <div class="text-muted small"><strong>Invite preview</strong></div>
+        <div class="invite-preview-header">
+          <div class="text-muted small"><strong>Invite preview</strong></div>
+          <button class="icon-btn icon-btn-small" type="button" data-invite-preview-refresh aria-label="Regenerate preview" title="Regenerate preview">↻</button>
+        </div>
         <div class="invite-preview mt-1">
-          <div class="text-muted small" data-invite-preview-meta>Preview will load when the modal opens.</div>
+          <div class="text-muted small" data-invite-preview-meta>Click ↻ to generate a preview.</div>
           <iframe class="invite-preview-frame d-none" data-invite-preview-frame title="Invite recipient preview" sandbox=""></iframe>
-          <pre class="invite-preview-text d-none" data-invite-preview-text></pre>
+          <pre class="invite-preview-text" data-invite-preview-text>Click ↻ to generate a preview.</pre>
         </div>
       </div>
       <div class="modal-actions">
@@ -576,6 +604,7 @@
     };
 
     const userRows = Array.from(document.querySelectorAll('[data-directory-user-row]'));
+    const pendingInviteRows = Array.from(document.querySelectorAll('[data-directory-pending-row]'));
     const userSearch = document.querySelector('[data-directory-search]');
     const userNoResults = document.querySelector('[data-directory-no-results]');
     const detailName = document.querySelector('[data-detail-username]');
@@ -682,6 +711,12 @@
             row.getAttribute('data-user-email') || '',
             (row.getAttribute('data-user-teams') || '').split('|').join(' '),
           ].join(' ').toLowerCase();
+          const show = !term || haystack.includes(term);
+          row.classList.toggle('d-none', !show);
+          if (show) visible += 1;
+        });
+        pendingInviteRows.forEach((row) => {
+          const haystack = (row.getAttribute('data-pending-search') || '').toLowerCase();
           const show = !term || haystack.includes(term);
           row.classList.toggle('d-none', !show);
           if (show) visible += 1;
@@ -797,8 +832,8 @@
     const invitePreviewMeta = inviteForm ? inviteForm.querySelector('[data-invite-preview-meta]') : null;
     const invitePreviewFrame = inviteForm ? inviteForm.querySelector('[data-invite-preview-frame]') : null;
     const invitePreviewText = inviteForm ? inviteForm.querySelector('[data-invite-preview-text]') : null;
+    const invitePreviewRefreshBtn = inviteForm ? inviteForm.querySelector('[data-invite-preview-refresh]') : null;
     const createForm = document.querySelector('[data-user-create-form]');
-    let invitePreviewTimer = null;
 
     const invitePreviewPayload = (form) => {
       const payload = new URLSearchParams();
@@ -876,6 +911,9 @@
       if (!previewUrl) return;
       const csrfTokenInput = inviteForm.querySelector('input[name="csrfmiddlewaretoken"]');
       const csrfToken = csrfTokenInput ? String(csrfTokenInput.value || '').trim() : '';
+      if (invitePreviewRefreshBtn) {
+        invitePreviewRefreshBtn.disabled = true;
+      }
       setInvitePreviewState('Generating preview...', false);
       try {
         const response = await fetch(previewUrl, {
@@ -896,24 +934,17 @@
         renderInvitePreview(payload || {});
       } catch (error) {
         setInvitePreviewState('Preview unavailable right now.', true);
+      } finally {
+        if (invitePreviewRefreshBtn) {
+          invitePreviewRefreshBtn.disabled = false;
+        }
       }
     };
 
-    const scheduleInvitePreview = () => {
-      if (!inviteForm) return;
-      const inviteModal = inviteForm.closest('[data-modal="user-invite"]');
-      if (inviteModal && !inviteModal.classList.contains('is-active')) return;
-      if (invitePreviewTimer) {
-        window.clearTimeout(invitePreviewTimer);
-      }
-      invitePreviewTimer = window.setTimeout(() => {
+    if (invitePreviewRefreshBtn) {
+      invitePreviewRefreshBtn.addEventListener('click', () => {
         loadInvitePreview();
-      }, 250);
-    };
-
-    if (inviteForm) {
-      inviteForm.addEventListener('input', scheduleInvitePreview);
-      inviteForm.addEventListener('change', scheduleInvitePreview);
+      });
     }
 
     document.querySelectorAll('[data-modal-open]').forEach((button) => {
@@ -941,9 +972,7 @@
           inviteForm.reset();
           const isActiveInput = inviteForm.querySelector('input[name="is_active"]');
           if (isActiveInput) isActiveInput.checked = true;
-          window.setTimeout(() => {
-            loadInvitePreview();
-          }, 0);
+          setInvitePreviewState('Click ↻ to generate a preview.', true);
         }
 
         openModal(modalName);

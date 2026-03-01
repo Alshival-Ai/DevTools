@@ -28,6 +28,8 @@ class LoginRequiredMiddleware:
                 return self.get_response(request)
             if path.startswith('/u/') and path.endswith('/logs/'):
                 return self.get_response(request)
+            if path.startswith('/twilio/sms') or path.startswith('/twilio/sms-group'):
+                return self.get_response(request)
 
             if not is_setup_complete():
                 if path.startswith(setup_url):

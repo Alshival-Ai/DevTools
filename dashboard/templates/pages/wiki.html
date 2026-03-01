@@ -51,7 +51,7 @@
       {% else %}
       <label class="settings-field">
         <span>Scope</span>
-        <select name="scope" data-wiki-scope-select>
+        <select class="wiki-scope-select" name="scope" data-wiki-scope-select>
           <option value="workspace"{% if wiki_scope == 'workspace' %} selected{% endif %}>Workspace Wiki</option>
           <option value="team"{% if wiki_scope == 'team' %} selected{% endif %}>Team Wiki</option>
           <option value="resource"{% if wiki_scope == 'resource' %} selected{% endif %}>Resource Wiki</option>
@@ -60,7 +60,7 @@
 
       <label class="settings-field wiki-scope-team-field{% if not wiki_is_team_scope %} d-none{% endif %}" data-wiki-scope-team-field>
         <span>Team</span>
-        <select name="team_id" data-wiki-scope-team{% if not wiki_is_team_scope %} disabled{% endif %}>
+        <select class="wiki-scope-select" name="team_id" data-wiki-scope-team{% if not wiki_is_team_scope %} disabled{% endif %}>
           <option value="">All teams</option>
           {% for item in wiki_team_options %}
           <option
@@ -72,7 +72,7 @@
 
       <label class="settings-field wiki-scope-resource-field{% if not wiki_is_resource_scope %} d-none{% endif %}" data-wiki-scope-resource-field>
         <span>Resource</span>
-        <select name="resource_uuid" data-wiki-scope-resource>
+        <select class="wiki-scope-select" name="resource_uuid" data-wiki-scope-resource>
           <option value="">Select a resource</option>
           {% for item in wiki_resource_options %}
           <option

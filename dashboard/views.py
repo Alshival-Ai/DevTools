@@ -433,6 +433,125 @@ def _invite_absolute_url(request, token: str) -> str:
     return request.build_absolute_uri(reverse("accept_user_invite", kwargs={"token": token}))
 
 
+def _invite_absolute_url_for_tool(token: str) -> str:
+    resolved_token = str(token or "").strip()
+    if not resolved_token:
+        return ""
+    base_url = str(getattr(settings, "APP_BASE_URL", "") or "").strip().rstrip("/")
+    if not base_url:
+        current_site = Site.objects.get_current()
+        domain = str(getattr(current_site, "domain", "") or "").strip()
+        if domain:
+            if domain.startswith("http://") or domain.startswith("https://"):
+                base_url = domain.rstrip("/")
+            else:
+                base_url = f"https://{domain}"
+    if not base_url:
+        base_url = "http://127.0.0.1:8000"
+    return f"{base_url}{reverse('accept_user_invite', kwargs={'token': resolved_token})}"
+
+
+def _invite_identity_target_for_actor(*, actor, args: dict) -> tuple[str, str]:
+    actor_email = str(getattr(actor, "email", "") or "").strip().lower()
+    actor_phone = _normalize_phone(_invite_phone_for_user(actor))
+
+    requested_email = str(args.get("email") or "").strip().lower()
+    requested_phone = _normalize_phone(str(args.get("phone_number") or args.get("phone") or ""))
+
+    if bool(getattr(actor, "is_superuser", False)):
+        return requested_email or actor_email, requested_phone or actor_phone
+
+    if requested_email and actor_email and requested_email != actor_email:
+        return "", ""
+    if requested_phone and actor_phone and requested_phone != actor_phone:
+        return "", ""
+    return requested_email or actor_email, requested_phone or actor_phone
+
+
+def _tool_invite_recover_for_actor(actor, args: dict) -> dict:
+    if actor is None:
+        return {"ok": False, "error": "authenticated user identity is required"}
+
+    mode = str(args.get("mode") or "auto").strip().lower()
+    if mode not in {"auto", "refresh", "new"}:
+        return {"ok": False, "error": "mode must be one of: auto, refresh, new"}
+
+    token = str(args.get("token") or "").strip()
+    identity_email, identity_phone = _invite_identity_target_for_actor(actor=actor, args=args)
+    if not bool(getattr(actor, "is_superuser", False)) and not (identity_email or identity_phone or token):
+        return {"ok": False, "error": "no recoverable invite target for actor"}
+    if not bool(getattr(actor, "is_superuser", False)) and (
+        (str(args.get("email") or "").strip() and not identity_email)
+        or (str(args.get("phone_number") or args.get("phone") or "").strip() and not identity_phone)
+    ):
+        return {"ok": False, "error": "invite recovery can only target your own email/phone unless superuser"}
+
+    invite_qs = UserInvite.objects.filter(accepted_at__isnull=True).order_by("-created_at", "-id")
+    invite: UserInvite | None = None
+    if token:
+        invite = invite_qs.filter(token=token).first()
+    else:
+        identity_query = Q()
+        if identity_email:
+            identity_query |= Q(invited_email__iexact=identity_email) | Q(sent_to__iexact=identity_email)
+        if identity_phone:
+            identity_query |= Q(invited_phone=identity_phone) | Q(sent_to=identity_phone)
+        if identity_query:
+            invite = invite_qs.filter(identity_query).first()
+
+    if invite is None:
+        return {"ok": False, "error": "no matching pending invite found"}
+
+    invite_expired = _invite_expired(invite)
+    previous_expires_at = invite.expires_at
+    if mode == "auto":
+        mode = "refresh" if invite_expired else "new"
+
+    if mode == "refresh":
+        invite.expires_at = _invite_expiry_datetime()
+        invite.save(update_fields=["expires_at", "updated_at"])
+        result_invite = invite
+        operation = "refreshed"
+    else:
+        result_invite = UserInvite.objects.create(
+            token=_invite_token(),
+            invited_username=str(invite.invited_username or "").strip(),
+            invited_email=str(invite.invited_email or "").strip().lower(),
+            invited_phone=str(invite.invited_phone or "").strip(),
+            delivery_channel=str(invite.delivery_channel or UserInvite.CHANNEL_EMAIL).strip().lower() or UserInvite.CHANNEL_EMAIL,
+            sent_to=str(invite.sent_to or "").strip(),
+            allowed_signup_methods=list(invite.allowed_signup_methods or []),
+            team_names=list(invite.team_names or []),
+            feature_keys=list(invite.feature_keys or []),
+            is_staff=bool(invite.is_staff),
+            is_superuser=bool(invite.is_superuser),
+            is_active=bool(invite.is_active),
+            created_by=invite.created_by if invite.created_by_id else actor,
+            expires_at=_invite_expiry_datetime(),
+        )
+        operation = "reissued"
+
+    invite_url = _invite_absolute_url_for_tool(result_invite.token)
+    return {
+        "ok": True,
+        "tool": "invite_recover",
+        "operation": operation,
+        "requested_mode": str(args.get("mode") or "auto").strip().lower() or "auto",
+        "applied_mode": mode,
+        "invite_id": int(result_invite.id),
+        "invite_token": str(result_invite.token or ""),
+        "invite_url": invite_url,
+        "invited_email": str(result_invite.invited_email or "").strip().lower(),
+        "invited_phone": str(result_invite.invited_phone or "").strip(),
+        "delivery_channel": str(result_invite.delivery_channel or "").strip().lower(),
+        "expires_at": _format_invite_datetime_long(result_invite.expires_at),
+        "previous_invite_id": int(invite.id),
+        "previous_invite_token": str(invite.token or ""),
+        "previous_invite_expired": bool(invite_expired),
+        "previous_expires_at": _format_invite_datetime_long(previous_expires_at),
+    }
+
+
 def _twilio_sms_credentials() -> tuple[str, str, str]:
     setup = get_setup_state()
     account_sid = str(getattr(setup, "twilio_account_sid", "") or "").strip() if setup else ""
@@ -4613,9 +4732,15 @@ def _team_planner_external_items_by_team(
         )
         if int(user_id or 0) > 0
     }
-    # Legacy users may have cached Asana tasks/mappings without a SocialAccount row.
-    # Prefer connected users for performance, but gracefully fall back to all team members.
-    planner_user_ids = sorted(connected_asana_user_ids) if connected_asana_user_ids else candidate_user_ids
+    # Team planner should include mapped tasks from any active team member source,
+    # even when a member lacks a current Asana SocialAccount row.
+    planner_user_ids = sorted(
+        {
+            int(user_id)
+            for user_id in [*candidate_user_ids, *connected_asana_user_ids]
+            if int(user_id or 0) > 0
+        }
+    )
     member_users = (
         User.objects.filter(is_active=True, id__in=planner_user_ids)
         .only("id", "username")
@@ -8444,6 +8569,14 @@ def team_directory(request):
     User = get_user_model()
     teams = Group.objects.all().order_by('name').prefetch_related('user_set')
     users = User.objects.all().order_by('username', 'email').prefetch_related('groups')
+    now_utc = datetime.now(timezone.utc)
+    pending_invites = (
+        UserInvite.objects.filter(
+            accepted_at__isnull=True,
+            expires_at__gte=now_utc,
+        )
+        .order_by("-created_at", "-id")
+    )
 
     user_rows: list[dict[str, object]] = []
     for item in users:
@@ -8476,6 +8609,35 @@ def team_directory(request):
                 ),
                 "last_login_display": _format_display_time(
                     item.last_login.isoformat() if getattr(item, "last_login", None) else ""
+                ),
+            }
+        )
+
+    pending_invite_rows: list[dict[str, object]] = []
+    for invite in pending_invites:
+        invited_username = str(invite.invited_username or "").strip()
+        invited_email = str(invite.invited_email or "").strip().lower()
+        invited_phone = str(invite.invited_phone or "").strip()
+        sent_to = str(invite.sent_to or "").strip()
+        delivery_channel = str(invite.delivery_channel or "").strip().lower()
+        team_names = sorted(
+            [str(item or "").strip() for item in (invite.team_names if isinstance(invite.team_names, list) else []) if str(item or "").strip()],
+            key=lambda value: value.lower(),
+        )
+        target_label = invited_email or invited_phone or invited_username or sent_to or "Pending invite"
+        channel_label = "Email invite" if delivery_channel == UserInvite.CHANNEL_EMAIL else "SMS invite"
+        pending_invite_rows.append(
+            {
+                "token": str(invite.token or "").strip(),
+                "target_label": target_label,
+                "sent_to": sent_to,
+                "invited_username": invited_username,
+                "invited_email": invited_email,
+                "invited_phone": invited_phone,
+                "channel_label": channel_label,
+                "team_names": team_names,
+                "expires_display": _format_display_time(
+                    invite.expires_at.isoformat() if getattr(invite, "expires_at", None) else ""
                 ),
             }
         )
@@ -8533,6 +8695,7 @@ def team_directory(request):
         'user_rows': user_rows,
         'selected_user_id': selected_user_id,
         'selected_user': selected_user,
+        'pending_invite_rows': pending_invite_rows,
         'team_rows': team_rows,
         'selected_team_id': selected_team_id,
         'selected_team': selected_team,
@@ -14892,6 +15055,38 @@ def _ask_alshival_tools_spec(*, extra_tools: list[dict] | None = None) -> list[d
         {
             "type": "function",
             "function": {
+                "name": "invite_recover",
+                "description": (
+                    "Recover a pending user invite by extending expiry (+14 days) or issuing a new token/link. "
+                    "For non-superusers, this only works for your own email/phone-targeted invites."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "description": "One of: auto, refresh, new. auto refreshes expired invites, otherwise issues new link.",
+                        },
+                        "token": {
+                            "type": "string",
+                            "description": "Optional specific invite token to recover.",
+                        },
+                        "email": {
+                            "type": "string",
+                            "description": "Optional invite target email (defaults to actor email).",
+                        },
+                        "phone_number": {
+                            "type": "string",
+                            "description": "Optional invite target phone (defaults to actor phone).",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "resource_health_check",
                 "description": "Run a health check for a resource the actor can access.",
                 "parameters": {
@@ -15193,6 +15388,18 @@ def _run_ask_tool_for_actor(
     conversation_id: str = "",
     channel: str = "web_chat",
 ) -> dict:
+    resolved_channel = str(channel or "").strip().lower()
+    if resolved_channel in {"support_inbox_email", "email_auto_reply"} and tool_name in {
+        "sms",
+        "support_inbox_send_mail",
+        "microsoft_send_mail",
+    }:
+        return {"ok": False, "error": f"tool disabled for channel: {tool_name}"}
+    if resolved_channel in {"support_inbox_email", "email_auto_reply"} and tool_name == "outlook_mail":
+        action = str((args or {}).get("action") or "search").strip().lower()
+        if action in {"send", "compose"}:
+            return {"ok": False, "error": "outlook_mail send is disabled for channel: support_inbox_email"}
+
     if tool_name == "search_kb":
         return _tool_search_kb_for_actor(actor, args)
     if tool_name == "alert_filter_prompt":
@@ -15201,6 +15408,8 @@ def _run_ask_tool_for_actor(
         return _tool_search_users_for_actor(actor, args)
     if tool_name == "directory":
         return _tool_directory_for_actor(actor, args)
+    if tool_name == "invite_recover":
+        return _tool_invite_recover_for_actor(actor, args)
     if tool_name == "resource_health_check":
         return _tool_resource_health_check_for_actor(actor, args)
     if tool_name == "resource_logs":
@@ -15262,6 +15471,10 @@ def _default_ask_mcp_tool_lines() -> list[str]:
         "- directory(query?, username?, email?, phone?, limit?): lookup users you can contact (team-scoped unless superuser).",
         "  Example: directory(username='jane').",
         "  Example: directory(query='Miami Dade on-call').",
+        "- invite_recover(mode?, token?, email?, phone_number?): recover pending invite links by extending expiry or issuing a new token.",
+        "  Use when user says an invite link expired or is not working.",
+        "  Example: invite_recover(mode='refresh', email='<recipient_email>').",
+        "  Example: invite_recover(mode='new', token='<invite_token>').",
         "- resource_health_check(resource_uuid): runs a health check on an accessible resource.",
         "- resource_logs(resource_uuid, limit?, level?, contains?, since_minutes?): queries resource logs with optional recency filter.",
         "  Example: resource_logs(resource_uuid='<uuid>', since_minutes=10, level='error').",
@@ -15364,6 +15577,22 @@ def _ask_channel_playbook_lines(
         )
         return base_lines
 
+    if resolved_channel in {"support_inbox_email", "email_auto_reply"}:
+        base_lines.extend(
+            [
+                "Support inbox email auto-reply playbook:",
+                "- This run is composing one reply to an inbound support inbox email.",
+                "- Use tools to gather facts and context, then provide a polished HTML email fragment.",
+                "- Style with email-safe inline CSS only; no <style> blocks or scripts.",
+                "- Creative decorative motifs are welcome (for example flowers, bumble bees, stars, moon) when appropriate.",
+                "- Keep visuals tasteful and readable on mobile email clients.",
+                "- If user reports invite link expired/broken, call invite_recover(...) and include the returned invite_url.",
+                "- Do not call email/sms sending tools in this channel.",
+                "- Do not ask for immediate back-and-forth chat; provide the best actionable answer now.",
+            ]
+        )
+        return base_lines
+
     if resolved_channel == "email":
         base_lines.extend(
             [
@@ -15457,6 +15686,9 @@ def _build_ask_system_prompt_for_user(
                 user_email=user_email,
                 user_phone=user_phone,
             ),
+            "",
+            "Escalation Contacts:",
+            "- If additional human help is needed, message Samuel at samuel@alshival.ai or Salvador at salvador@alshival.ai.",
             "",
             "MCP Tools:",
             *(mcp_tool_lines or _default_ask_mcp_tool_lines()),

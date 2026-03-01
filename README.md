@@ -146,7 +146,7 @@ Or use the helper:
 ```
 
 Certbot (auto TLS):
-- `./tools/prod.sh` will auto-fetch a cert for `dev.alshival.dev` using `support@alshival.ai` if none exists.
+- `./tools/prod.sh` will auto-fetch a cert for `dev.alshival.dev` using `dev@alshival.dev` if none exists.
 - Override defaults with environment variables:
   - `CERTBOT_DOMAIN=your.domain`
   - `CERTBOT_EMAIL=you@example.com`

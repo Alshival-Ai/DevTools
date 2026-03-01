@@ -205,5 +205,11 @@ def is_support_inbox_email_alerts_enabled() -> bool:
         return False
     mailbox = str(getattr(setup, "microsoft_mailbox_email", "") or "").strip().lower()
     if not mailbox:
+        mailbox = str(
+            os.getenv("MICROSOFT_MAILBOX_EMAIL")
+            or os.getenv("SUPPORT_EMAIL")
+            or ""
+        ).strip().lower()
+    if not mailbox:
         return False
     return is_microsoft_connector_configured()

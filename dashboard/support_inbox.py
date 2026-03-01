@@ -3,16 +3,18 @@ from __future__ import annotations
 import html
 import hashlib
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
 from allauth.socialaccount.models import SocialApp
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone as django_timezone
 
-from .email_branding import build_alshival_branded_email
+from .email_branding import build_alshival_branded_email, build_alshival_branded_email_from_html
 from .models import SupportInboxMessage
 from .resources_store import _global_owner_dir
 from .setup_state import get_or_create_setup_state, get_setup_state
@@ -50,6 +52,12 @@ def _strip_html(value: str) -> str:
 def _graph_app_credentials() -> tuple[str, str, str, str]:
     setup = get_or_create_setup_state()
     mailbox = str(getattr(setup, "microsoft_mailbox_email", "") or "").strip().lower() if setup else ""
+    if not mailbox:
+        mailbox = str(
+            os.getenv("MICROSOFT_MAILBOX_EMAIL")
+            or os.getenv("SUPPORT_EMAIL")
+            or ""
+        ).strip().lower()
     if not mailbox:
         raise RuntimeError("Microsoft Email Agent mailbox is not configured.")
     app = (
@@ -254,6 +262,7 @@ def send_support_inbox_email(
     recipient_email: str,
     subject: str,
     body_text: str,
+    body_html: str = "",
     initiated_by_user_id: int | None = None,
     initiated_by_username: str = "",
     initiated_by_email: str = "",
@@ -276,7 +285,15 @@ def send_support_inbox_email(
     except Exception as exc:
         return False, f"support_inbox_config_error:{exc}"
 
-    resolved_subject, _resolved_text_body, resolved_html_body = build_alshival_branded_email(subject, body_text)
+    resolved_html_input = str(body_html or "").strip()
+    if resolved_html_input:
+        resolved_subject, _resolved_text_body, resolved_html_body = build_alshival_branded_email_from_html(
+            subject,
+            body_text,
+            resolved_html_input,
+        )
+    else:
+        resolved_subject, _resolved_text_body, resolved_html_body = build_alshival_branded_email(subject, body_text)
     payload = {
         "message": {
             "subject": str(resolved_subject or "").strip()[:255] or "Alshival notification",
@@ -411,4 +428,209 @@ def poll_support_inbox_once(*, initial_lookback_minutes: int = 60, max_pages: in
         "ingested_messages": int(created_or_updated),
         "knowledge_upserted": int(knowledge_upserted),
         "since": _to_graph_iso(since),
+    }
+
+
+def _resolve_verified_user_for_sender_email(sender_email: str):
+    resolved_email = str(sender_email or "").strip().lower()
+    if not resolved_email:
+        return None, "missing_sender_email"
+    try:
+        from allauth.account.models import EmailAddress
+    except Exception:
+        return None, "email_verification_model_unavailable"
+
+    try:
+        match = (
+            EmailAddress.objects.select_related("user")
+            .filter(
+                email__iexact=resolved_email,
+                verified=True,
+                user__is_active=True,
+            )
+            .order_by("-primary", "id")
+            .first()
+        )
+    except Exception as exc:
+        return None, f"user_lookup_failed:{exc}"
+    if match is None:
+        email_verification_mode = str(getattr(settings, "ACCOUNT_EMAIL_VERIFICATION", "") or "").strip().lower()
+        if email_verification_mode == "none":
+            try:
+                from django.contrib.auth import get_user_model
+
+                User = get_user_model()
+                user = (
+                    User.objects.filter(
+                        email__iexact=resolved_email,
+                        is_active=True,
+                    )
+                    .order_by("id")
+                    .first()
+                )
+            except Exception as exc:
+                return None, f"user_lookup_failed:{exc}"
+            if user is not None:
+                return user, ""
+        return None, "sender_email_not_verified"
+    return getattr(match, "user", None), ""
+
+
+def _support_inbox_reply_subject(subject: str) -> str:
+    resolved_subject = str(subject or "").strip()
+    if not resolved_subject:
+        return "Re: Your message to Alshival"
+    if resolved_subject.lower().startswith("re:"):
+        return resolved_subject[:255]
+    return f"Re: {resolved_subject}"[:255]
+
+
+def _support_inbox_agent_email_prompt(message: SupportInboxMessage) -> str:
+    lines = [
+        "You received an email through the shared support inbox.",
+        f"From: {str(message.sender_email or '').strip().lower()}",
+        f"Subject: {str(message.subject or '').strip()}",
+        f"Received (UTC): {message.received_at.astimezone(timezone.utc).isoformat()}",
+        "",
+        "Email body:",
+        str(message.body_text or message.body_preview or "").strip()[:12000],
+    ]
+    return "\n".join(lines).strip()
+
+
+def _looks_like_html_fragment(value: str) -> bool:
+    content = str(value or "").strip()
+    if not content:
+        return False
+    return bool(re.search(r"<[a-zA-Z][^>]*>", content))
+
+
+def _process_support_inbox_email_with_agent(message: SupportInboxMessage, *, mailbox: str) -> tuple[str, str]:
+    sender_email = str(message.sender_email or "").strip().lower()
+    if not sender_email:
+        return "skipped_missing_sender", "sender email is missing"
+    if sender_email == str(mailbox or "").strip().lower():
+        return "skipped_mailbox_sender", "sender email is the support mailbox"
+
+    user, resolve_error = _resolve_verified_user_for_sender_email(sender_email)
+    if user is None:
+        return "skipped_unverified_sender", resolve_error or "sender is not a verified user"
+
+    try:
+        from .views import _ask_alshival_generate_reply_for_user
+    except Exception as exc:
+        return "error_agent_unavailable", f"ask agent import failed: {exc}"
+
+    conversation_id = f"support-inbox:{str(message.message_id or '').strip()[:120]}"
+    raw_message = _support_inbox_agent_email_prompt(message)
+    extra_context_lines = [
+        "- support_inbox_email_mode: true",
+        f"- support_inbox_mailbox: {mailbox}",
+        f"- support_inbox_message_id: {str(message.message_id or '').strip()}",
+        f"- support_inbox_conversation_id: {str(message.conversation_id or '').strip()}",
+        f"- support_inbox_sender_email: {sender_email}",
+        "Email response policy:",
+        "- Assume this sender is verified for this account.",
+        "- Return an email-safe HTML fragment (no <html>, <head>, or <body> tag).",
+        "- Use only inline CSS; avoid <style> and external assets.",
+        "- Creative direction: tasteful decorative motifs like flowers, bumble bees, moon, and stars are encouraged.",
+        "- Keep content useful first, with concise actionable guidance.",
+        "- Do not include markdown code fences.",
+        "- Do not ask the tool to send email; your final reply will be sent automatically.",
+    ]
+    try:
+        reply_text, meta = _ask_alshival_generate_reply_for_user(
+            user=user,
+            raw_message=raw_message,
+            conversation_id=conversation_id,
+            channel="support_inbox_email",
+            extra_context_lines=extra_context_lines,
+        )
+    except Exception as exc:
+        return "error_agent_execution", f"ask agent execution failed: {exc}"
+    if not reply_text:
+        return "error_agent_empty", str((meta or {}).get("error") or "empty_reply")
+
+    resolved_reply = str(reply_text or "").strip()
+    reply_subject = _support_inbox_reply_subject(message.subject)
+    reply_html_fragment = resolved_reply if _looks_like_html_fragment(resolved_reply) else ""
+    reply_text_fallback = _strip_html(reply_html_fragment) if reply_html_fragment else resolved_reply
+    sent, send_error = send_support_inbox_email(
+        recipient_email=sender_email,
+        subject=reply_subject,
+        body_text=str(reply_text_fallback or "").strip()[:12000],
+        body_html=reply_html_fragment[:24000],
+        initiated_by_user_id=int(getattr(user, "id", 0) or 0),
+        initiated_by_username=str(getattr(user, "username", "") or "").strip(),
+        initiated_by_email=str(getattr(user, "email", "") or "").strip().lower(),
+        initiated_by_channel="support_inbox_email",
+        initiated_by_conversation_id=conversation_id,
+    )
+    if not sent:
+        return "error_reply_send_failed", send_error or "support inbox send failed"
+
+    message.agent_reply_subject = reply_subject[:500]
+    message.agent_reply_preview = str(resolved_reply or "").strip()[:4000]
+    message.agent_reply_sent_at = django_timezone.now()
+    return "replied", ""
+
+
+def run_support_inbox_email_agent_once(*, limit: int = 10) -> dict[str, int | str]:
+    setup = get_setup_state()
+    if setup is None:
+        return {"status": "setup_missing", "processed": 0, "replied": 0, "skipped": 0, "errors": 0}
+    if not bool(getattr(setup, "support_inbox_monitoring_enabled", False)):
+        return {"status": "monitoring_disabled", "processed": 0, "replied": 0, "skipped": 0, "errors": 0}
+
+    try:
+        _tenant_id, _client_id, _client_secret, mailbox = _graph_app_credentials()
+    except Exception as exc:
+        return {
+            "status": "config_error",
+            "mailbox": "",
+            "processed": 0,
+            "replied": 0,
+            "skipped": 0,
+            "errors": 0,
+            "error": str(exc),
+        }
+
+    resolved_limit = max(1, min(int(limit or 10), 100))
+    rows = list(
+        SupportInboxMessage.objects.filter(
+            mailbox=str(mailbox or "").strip().lower(),
+            agent_processed_at__isnull=True,
+        )
+        .order_by("received_at", "id")[:resolved_limit]
+    )
+
+    processed = 0
+    replied = 0
+    skipped = 0
+    errors = 0
+    for row in rows:
+        processed += 1
+        status, error = _process_support_inbox_email_with_agent(row, mailbox=mailbox)
+        row.agent_status = str(status or "").strip()[:32]
+        row.agent_last_error = str(error or "").strip()
+        row.agent_processed_at = django_timezone.now()
+        update_fields = ["agent_status", "agent_last_error", "agent_processed_at", "updated_at"]
+        if row.agent_reply_sent_at is not None:
+            update_fields.extend(["agent_reply_sent_at", "agent_reply_subject", "agent_reply_preview"])
+        row.save(update_fields=update_fields)
+
+        if status == "replied":
+            replied += 1
+        elif status.startswith("skipped_"):
+            skipped += 1
+        else:
+            errors += 1
+
+    return {
+        "status": "ok",
+        "mailbox": str(mailbox or "").strip().lower(),
+        "processed": int(processed),
+        "replied": int(replied),
+        "skipped": int(skipped),
+        "errors": int(errors),
     }

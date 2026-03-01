@@ -38,7 +38,7 @@ DOCKER="$(find_docker)" || {
 export LOCAL_UID="$(id -u)"
 export LOCAL_GID="$(id -g)"
 export CERTBOT_DOMAIN="${CERTBOT_DOMAIN:-dev.alshival.dev}"
-export CERTBOT_EMAIL="${CERTBOT_EMAIL:-support@alshival.ai}"
+export CERTBOT_EMAIL="${CERTBOT_EMAIL:-dev@alshival.dev}"
 export CERTBOT_CERT_NAME="${CERTBOT_CERT_NAME:-$CERTBOT_DOMAIN}"
 
 PRUNE=false

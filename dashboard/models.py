@@ -360,6 +360,12 @@ class SupportInboxMessage(models.Model):
     has_attachments = models.BooleanField(default=False)
     web_link = models.TextField(blank=True, default="")
     raw_payload = models.JSONField(blank=True, default=dict)
+    agent_status = models.CharField(max_length=32, blank=True, default="")
+    agent_last_error = models.TextField(blank=True, default="")
+    agent_processed_at = models.DateTimeField(null=True, blank=True, default=None)
+    agent_reply_sent_at = models.DateTimeField(null=True, blank=True, default=None)
+    agent_reply_subject = models.CharField(max_length=500, blank=True, default="")
+    agent_reply_preview = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -373,6 +379,7 @@ class SupportInboxMessage(models.Model):
         ]
         indexes = [
             models.Index(fields=["mailbox", "received_at"], name="dash_sup_inbox_mail_recv_idx"),
+            models.Index(fields=["mailbox", "agent_processed_at"], name="dash_sup_inbox_agent_proc_idx"),
         ]
 
     def __str__(self) -> str:

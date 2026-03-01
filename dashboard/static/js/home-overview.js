@@ -900,6 +900,143 @@
     return members;
   };
 
+  const asanaWorkspaceGidForTask = (taskRow, section) => {
+    const rowWorkspace = String(
+      (taskRow && (taskRow.workspace_gid || taskRow.workspaceGid)) || ''
+    ).trim();
+    if (rowWorkspace) return rowWorkspace;
+
+    const taskBoards = asanaBoardRowsForTask(taskRow);
+    for (let index = 0; index < taskBoards.length; index += 1) {
+      const board = taskBoards[index];
+      const boardWorkspace = String(
+        (board && (board.workspace_gid || board.workspaceGid))
+        || ((asanaBoardRowByGid(board && board.gid) || {}).workspace_gid)
+        || ''
+      ).trim();
+      if (boardWorkspace) return boardWorkspace;
+    }
+
+    const sectionBoardGid = String(
+      (section && (section.boardGid || section.board_gid)) || ''
+    ).trim();
+    if (!sectionBoardGid) return '';
+    return String(((asanaBoardRowByGid(sectionBoardGid) || {}).workspace_gid) || '').trim();
+  };
+
+  const openAsanaAssignAssigneeModal = async (item, section) => {
+    if (!canAssignAsana) {
+      throw new Error('assign_not_available');
+    }
+    const taskGid = asanaTaskGidForItem(item);
+    if (!taskGid) {
+      throw new Error('missing_asana_task');
+    }
+
+    const taskRow = asanaTaskRowByGid(taskGid) || {};
+    const taskName = String(taskRow.name || (item && item.title) || `Task ${taskGid}`).trim();
+    const workspaceGid = asanaWorkspaceGidForTask(taskRow, section);
+    if (!workspaceGid) {
+      throw new Error('workspace_unavailable');
+    }
+
+    const members = await loadWorkspaceMembers(workspaceGid);
+    const assignUrl = asanaAssignUrlForTask(taskGid);
+    if (!assignUrl) {
+      throw new Error('missing_assign_endpoint');
+    }
+
+    const modalApi = openRuntimeModal(`Assign task · ${taskName}`);
+    const label = document.createElement('label');
+    const labelText = document.createElement('span');
+    labelText.textContent = 'Assignee';
+    const select = document.createElement('select');
+    select.className = 'modal-select';
+
+    const currentAssigneeGid = String(taskRow.assignee_gid || '').trim();
+    const currentAssigneeName = String(taskRow.assignee_name || '').trim();
+
+    const unassignedOption = document.createElement('option');
+    unassignedOption.value = '';
+    unassignedOption.textContent = '— Unassigned —';
+    if (!currentAssigneeGid) {
+      unassignedOption.selected = true;
+    }
+    select.appendChild(unassignedOption);
+
+    let hasSelectedAssignee = false;
+    members.forEach((member) => {
+      const memberGid = String(member && member.gid ? member.gid : '').trim();
+      if (!memberGid) return;
+      const option = document.createElement('option');
+      option.value = memberGid;
+      option.textContent = String(member.name || member.email || memberGid).trim();
+      if (memberGid === currentAssigneeGid) {
+        option.selected = true;
+        hasSelectedAssignee = true;
+      }
+      select.appendChild(option);
+    });
+
+    if (currentAssigneeGid && !hasSelectedAssignee) {
+      const staleOption = document.createElement('option');
+      staleOption.value = currentAssigneeGid;
+      staleOption.selected = true;
+      staleOption.textContent = currentAssigneeName || currentAssigneeGid;
+      select.appendChild(staleOption);
+    }
+
+    label.appendChild(labelText);
+    label.appendChild(select);
+    modalApi.body.appendChild(label);
+
+    if (currentAssigneeName) {
+      const current = document.createElement('div');
+      current.className = 'text-muted small';
+      current.textContent = `Current: ${currentAssigneeName}`;
+      modalApi.body.appendChild(current);
+    }
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'primary-btn';
+    saveBtn.textContent = 'Save';
+    saveBtn.addEventListener('click', async () => {
+      const selectedGid = String(select.value || '').trim();
+      saveBtn.disabled = true;
+      select.disabled = true;
+      try {
+        await postJson(assignUrl, { assignee_gid: selectedGid || null });
+        const selectedMember = members.find((member) => String(member && member.gid ? member.gid : '').trim() === selectedGid);
+        const nextAssigneeName = selectedMember
+          ? String(selectedMember.name || selectedMember.email || '').trim()
+          : '';
+        const latestTaskRow = asanaTaskRowByGid(taskGid) || taskRow;
+        upsertAsanaTaskRow({
+          ...latestTaskRow,
+          assignee_gid: selectedGid,
+          assignee_name: nextAssigneeName,
+        });
+        if (plannerController && typeof plannerController.refresh === 'function') {
+          plannerController.refresh();
+        }
+        modalApi.close();
+      } catch (error) {
+        window.alert(`Unable to update assignee: ${String(error && error.message ? error.message : 'request_failed')}`);
+        saveBtn.disabled = false;
+        select.disabled = false;
+      }
+    });
+    modalApi.actions.appendChild(saveBtn);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'ghost-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', modalApi.close);
+    modalApi.actions.appendChild(cancelBtn);
+  };
+
   const updateAsanaTaskCompletion = async (item, completed) => {
     const gid = asanaTaskGidForItem(item);
     const url = asanaCompleteUrlForTask(gid);
@@ -2279,9 +2416,13 @@
         { id: 'attach-resources', label: 'Resources', title: 'Attach resources' },
       ];
       const assigneeName = String(row.assignee_name || '').trim();
-      if (assigneeName) {
-        itemBadges.push({ id: 'assignee', label: assigneeName, title: `Assigned to ${assigneeName}` });
-      }
+      itemBadges.push({
+        id: 'assignee',
+        label: assigneeName || 'Unassigned',
+        title: assigneeName
+          ? `Assigned to ${assigneeName}. Click to reassign`
+          : 'Unassigned. Click to assign',
+      });
       const subtaskCount = Number(row.subtask_count || 0);
       if (subtaskCount > 0) {
         itemBadges.push({ id: 'subtasks', label: `${subtaskCount} subtask${subtaskCount !== 1 ? 's' : ''}`, title: `${subtaskCount} subtask${subtaskCount !== 1 ? 's' : ''}` });
@@ -2502,6 +2643,10 @@
         }
         if (normalizedAction === 'attach-resources') {
           await openAgendaResourceMappingModal(item);
+          return;
+        }
+        if (normalizedAction === 'assignee') {
+          await openAsanaAssignAssigneeModal(item, section || {});
           return;
         }
         if (normalizedAction === 'move-section') {
