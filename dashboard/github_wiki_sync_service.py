@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -22,6 +23,17 @@ _GITHUB_API_BASE_URL = "https://api.github.com"
 _GITHUB_API_TIMEOUT_SECONDS = 20
 _WIKI_SCOPE_RESOURCE = WikiPage.SCOPE_RESOURCE
 _GITHUB_REPO_PART_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _allow_anonymous_github_wiki_sync() -> bool:
+    return _env_bool("ALSHIVAL_GITHUB_WIKI_ALLOW_ANON", True)
 
 
 def _normalize_resource_uuid(raw_value: str) -> str:
@@ -188,6 +200,14 @@ def _resolve_access_token_from_users(token_users: Iterable[object]) -> tuple[obj
             return user, access_token, ""
         if token_error not in {"github_not_connected", "missing_github_oauth_token"}:
             return user, "", token_error
+    for env_name in (
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ALSHIVAL_GITHUB_ACCESS_TOKEN",
+        "ASK_GITHUB_MCP_ACCESS_TOKEN",
+    ):
+        env_token = str(os.getenv(env_name, "") or "").strip()
+        if env_token:
+            return None, env_token, ""
     return None, "", "missing_github_token"
 
 
@@ -199,15 +219,18 @@ def _github_request_json(
     params: dict[str, Any] | None = None,
 ) -> tuple[Any, int, str]:
     url = f"{_GITHUB_API_BASE_URL}{path}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    resolved_token = str(access_token or "").strip()
+    if resolved_token:
+        headers["Authorization"] = f"Bearer {resolved_token}"
     try:
         response = requests.request(
             method.upper(),
             url,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=headers,
             params=params or {},
             timeout=_GITHUB_API_TIMEOUT_SECONDS,
         )
@@ -263,7 +286,23 @@ def _wiki_worktree_dir(*, actor, resource_uuid: str, repository_full_name: str) 
         owner_root = Path(owner_context.get("owner_root") or ".")
         resource_dir = owner_root / "resources" / (resource_uuid or "unknown-resource")
     safe_repo = re.sub(r"[^a-zA-Z0-9_.-]+", "_", repository_full_name.strip().lower())
-    return resource_dir / ".wiki-sync" / safe_repo
+    # Include process uid so existing clones created by a different uid do not
+    # block syncs with permission/config lock errors.
+    safe_repo = f"{safe_repo}-{os.getuid()}"
+    preferred_root = resource_dir / ".wiki-sync"
+    if resource_dir.exists() and os.access(str(resource_dir), os.W_OK | os.X_OK):
+        preferred_root_writable = (
+            os.access(str(preferred_root), os.W_OK | os.X_OK)
+            if preferred_root.exists()
+            else True
+        )
+        if preferred_root_writable:
+            return preferred_root / safe_repo
+
+    fallback_root = Path(os.environ.get("ALSHIVAL_WIKI_SYNC_ROOT", "/tmp/alshival-wiki-sync"))
+    owner_slug = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(owner_context.get("owner_slug") or "owner").strip().lower())
+    safe_resource = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(resource_uuid or "unknown-resource").strip().lower())
+    return fallback_root / owner_slug / safe_resource / safe_repo
 
 
 def _git_binary_available() -> bool:
@@ -326,6 +365,10 @@ def _run_git(
     timeout: int = 90,
 ) -> tuple[int, str, str]:
     command = ["git"]
+    if cwd is not None:
+        # Some deployments mount repo dirs with uid/gid mismatches; mark the
+        # current worktree as safe for this invocation to avoid hard failures.
+        command.extend(["-c", f"safe.directory={str(cwd)}"])
     if access_token:
         command.extend(["-c", f"http.https://github.com/.extraheader={_git_extraheader(access_token)}"])
     command.extend(args)
@@ -775,6 +818,42 @@ def _push_local_wiki_to_remote(
     return result
 
 
+def _reindex_resource_kb_after_sync(
+    *,
+    actor,
+    resource,
+    check_method: str,
+) -> tuple[bool, str]:
+    try:
+        from .knowledge_store import upsert_resource_health_knowledge
+    except Exception as exc:
+        return False, f"kb_reindex_import_failed:{exc}"
+
+    checked_at = str(getattr(resource, "last_checked_at", "") or "").strip()
+    if not checked_at:
+        checked_at = datetime.now(timezone.utc).isoformat()
+
+    status = str(getattr(resource, "last_status", "") or "").strip().lower() or "unknown"
+    error = str(getattr(resource, "last_error", "") or "").strip()
+    resolved_check_method = str(check_method or "").strip() or "wiki_sync"
+
+    try:
+        upsert_resource_health_knowledge(
+            user=actor,
+            resource=resource,
+            status=status,
+            checked_at=checked_at,
+            error=error,
+            check_method=resolved_check_method,
+            latency_ms=None,
+            packet_loss_pct=None,
+        )
+    except Exception as exc:
+        return False, f"kb_reindex_failed:{exc}"
+
+    return True, ""
+
+
 def sync_resource_wiki_with_github(
     *,
     actor,
@@ -784,6 +863,8 @@ def sync_resource_wiki_with_github(
     push_changes: bool = False,
     changed_page_ids: Iterable[int] | None = None,
     deleted_paths: Iterable[str] | None = None,
+    reindex_resource_kb: bool = False,
+    reindex_check_method: str = "wiki_sync",
 ) -> dict[str, Any]:
     resource_uuid = _normalize_resource_uuid(getattr(resource, "resource_uuid", ""))
     resource_name = str(getattr(resource, "name", "") or "").strip() or resource_uuid
@@ -812,6 +893,8 @@ def sync_resource_wiki_with_github(
             "errors": 0,
             "error": "",
         },
+        "kb_reindexed": False,
+        "kb_reindex_error": "",
         "errors": [],
     }
 
@@ -835,8 +918,10 @@ def sync_resource_wiki_with_github(
 
     token_user, access_token, token_error = _resolve_access_token_from_users(sync_users)
     if not access_token:
-        result["code"] = token_error or "missing_github_token"
-        return result
+        if not _allow_anonymous_github_wiki_sync():
+            result["code"] = token_error or "missing_github_token"
+            return result
+        token_error = ""
 
     repo_context, repo_error = _github_repo_context(
         repository_full_name=primary_repository,
@@ -889,8 +974,21 @@ def sync_resource_wiki_with_github(
                 result["errors"].append(f"push:{push_error_reason}")
             result["errors"].append(f"push_errors:{push_errors}")
         result["ok"] = True
-        return result
+    else:
+        result["ok"] = True
+        result["code"] = "ok"
 
-    result["ok"] = True
-    result["code"] = "ok"
+    if reindex_resource_kb and result["ok"]:
+        reindex_ok, reindex_error = _reindex_resource_kb_after_sync(
+            actor=resolved_actor,
+            resource=resource,
+            check_method=reindex_check_method,
+        )
+        result["kb_reindexed"] = bool(reindex_ok)
+        if not reindex_ok:
+            result["kb_reindex_error"] = str(reindex_error or "kb_reindex_failed")
+            result["errors"].append(f"kb:{result['kb_reindex_error']}")
+            if str(result.get("code") or "").strip().lower() == "ok":
+                result["code"] = "partial_error"
+
     return result

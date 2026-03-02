@@ -6,6 +6,7 @@ import html
 import hashlib
 import hmac
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -137,6 +138,10 @@ from .resources_store import (
 from .calendar_sync_service import refresh_calendar_cache_for_user
 from .github_wiki_sync_service import sync_resource_wiki_with_github
 from .support_inbox import send_support_inbox_email
+
+logger = logging.getLogger(__name__)
+
+_UNIFIED_KB_COLLECTION_NAME = "knowledge"
 
 
 def _ensure_runtime_cache_dirs() -> None:
@@ -1783,19 +1788,14 @@ def _global_workspace_wiki_record_id(page_id: int) -> str:
     return f"workspace_wiki:{resolved_id}"
 
 
-def _is_global_workspace_wiki_page(page: WikiPage) -> bool:
+def _is_indexable_workspace_wiki_page(page: WikiPage) -> bool:
     if page is None:
         return False
     if _normalize_wiki_scope(getattr(page, "scope", "")) != _WIKI_SCOPE_WORKSPACE:
         return False
     if _normalize_resource_uuid(getattr(page, "resource_uuid", "") or ""):
         return False
-    if bool(getattr(page, "is_draft", False)):
-        return False
-    try:
-        return not page.team_access.exists()
-    except Exception:
-        return False
+    return not bool(getattr(page, "is_draft", False))
 
 
 def _stable_json_hash(value: object) -> str:
@@ -1886,17 +1886,29 @@ def _sync_global_workspace_wiki_kb_page(*, page: WikiPage, force_delete: bool = 
     global_kb_path = _global_owner_dir() / "knowledge.db"
     try:
         client = chromadb.PersistentClient(path=str(global_kb_path))
-        collection = client.get_or_create_collection(name="resources")
+        collection = client.get_or_create_collection(name=_UNIFIED_KB_COLLECTION_NAME)
     except Exception:
         return
 
-    should_upsert = (not force_delete) and _is_global_workspace_wiki_page(page)
+    should_upsert = (not force_delete) and _is_indexable_workspace_wiki_page(page)
     if not should_upsert:
         try:
             collection.delete(ids=[record_id])
         except Exception:
             pass
         return
+
+    try:
+        access_team_ids = sorted(
+            {
+                int(team_id or 0)
+                for team_id in page.team_access.values_list("id", flat=True)
+                if int(team_id or 0) > 0
+            }
+        )
+    except Exception:
+        access_team_ids = []
+    access_visibility = "team" if access_team_ids else "global"
 
     title = str(getattr(page, "title", "") or "").strip()
     path = str(getattr(page, "path", "") or "").strip()
@@ -1915,11 +1927,16 @@ def _sync_global_workspace_wiki_kb_page(*, page: WikiPage, force_delete: bool = 
 
     metadata = {
         "source": "workspace_wiki",
-        "collection_name": "resources",
+        "collection_name": _UNIFIED_KB_COLLECTION_NAME,
         "owner_scope": "global",
         "owner_user_id": 0,
         "owner_team_id": 0,
         "resource_uuid": "",
+        "access_visibility": access_visibility,
+        "access_user_id": 0,
+        "access_team_ids": ",".join(str(team_id) for team_id in access_team_ids),
+        "scope": _WIKI_SCOPE_WORKSPACE,
+        "wiki_scope": _WIKI_SCOPE_WORKSPACE,
         "wiki_page_id": int(getattr(page, "id", 0) or 0),
         "title": title,
         "path": path,
@@ -1945,451 +1962,38 @@ def _sync_global_workspace_wiki_kb_page(*, page: WikiPage, force_delete: bool = 
         pass
 
 
-_DEFAULT_SDK_WIKI_MARKDOWN = """# Alshival SDK / Cloud Logs / MCP Servers
-
-Use this page as a quick start for integrating the Alshival Python SDK with this self-deployed instance.
-
-## Common Use Cases
-- Send structured cloud logs from your apps and workers into Alshival resource timelines.
-- Route error and alert events to app/SMS/email notifications.
-- Reuse Alshival MCP tools in other agents via SDK tool specs.
-
-## 1) Install the SDK
-```bash
-pip install git+https://github.com/Alshival-Ai/alshival.git@main
-```
-
-## 2) Configure for this self-hosted deployment
-```bash
-export ALSHIVAL_USERNAME="<your-username>"
-export ALSHIVAL_API_KEY="<account-api-key>"
-export ALSHIVAL_RESOURCE="https://<your-domain>/u/<resource-owner>/resources/<resource-uuid>/"
-```
-
-`ALSHIVAL_RESOURCE` is preferred because it auto-derives the correct base URL and path prefix for your deployment.
-
-## 3) Send Cloud Logs
-```python
-import alshival
-
-alshival.log.info("service started")
-alshival.log.warning("cache miss", extra={"key": "user:42"})
-alshival.log.error("db connection failed")
-alshival.log.alert("incident detected", extra={"service": "payments"})
-```
-
-## 4) MCP Servers in Other Agents
-```python
-import alshival
-
-tools = [
-    alshival.mcp,
-    alshival.mcp.github,
-]
-```
-
-Example (OpenAI Responses):
-```python
-from openai import OpenAI
-import alshival
-
-client = OpenAI()
-response = client.responses.create(
-    model="gpt-4.1",
-    input="Summarize incidents and suggest runbook updates.",
-    tools=[alshival.mcp, alshival.mcp.github],
-)
-print(response.output_text)
-```
-
-## Notes
-- For shared resources, keep your own `ALSHIVAL_USERNAME` and API key, but target the owner resource URL in `ALSHIVAL_RESOURCE`.
-- If logs do not appear, verify:
-  1. Resource URL owner/UUID match an existing resource
-  2. API key and username identity are valid
-  3. Outbound network/TLS settings allow access to this deployment
-"""
-
-_DEFAULT_SDK_WIKI_ALERTS_MARKDOWN = """# Cloud Logs Alerts and Notifications
-
-Use this page to configure how cloud log errors and alerts notify your team.
-
-## What Triggers Alerts
-- Log entries with level `error`
-- Log entries with level `alert`
-
-These can be generated from:
-- `alshival.log.error(...)`
-- `alshival.log.alert(...)`
-
-## Notification Channels
-Per resource, users can choose:
-- App notifications
-- SMS notifications (Twilio required)
-- Email notifications (Microsoft support inbox + monitoring enabled)
-
-## Example
-```python
-import alshival
-
-alshival.log.error(
-    "payment webhook timeout",
-    extra={"service": "billing", "request_id": "req_12345"},
-)
-```
-
-## Recommended Team Workflow
-1. Set production services to at least `ALSHIVAL_CLOUD_LEVEL=INFO`
-2. Add actionable metadata (`service`, `request_id`, `tenant`, `region`)
-3. Route `error` and `alert` to app + one external channel (SMS or email)
-4. Keep runbook links in resource wiki pages and reference them in alerts
-
-## UI + SDK
-- SDK sends cloud logs from remote code/services.
-- UI receives and displays those logs per resource timeline.
-- UI notification settings control how `error`/`alert` events reach your team.
-- For full end-to-end setup, see: `/alshival-sdk/cloud-logs/ui-and-sdk-monitoring-workflow`
-"""
-
-_DEFAULT_SDK_WIKI_UI_WORKFLOW_MARKDOWN = """# UI + SDK Monitoring Workflow
-
-This workflow combines SDK instrumentation in your remote code with Alshival UI operations.
-
-## 1) Instrument Remote Services with the SDK
-Set environment:
-```bash
-export ALSHIVAL_USERNAME="<your-username>"
-export ALSHIVAL_API_KEY="<account-api-key>"
-export ALSHIVAL_RESOURCE="https://<your-domain>/u/<resource-owner>/resources/<resource-uuid>/"
-```
-
-Add logs:
-```python
-import alshival
-
-alshival.log.info("worker online", extra={"service": "jobs"})
-alshival.log.error("queue timeout", extra={"service": "jobs", "queue": "payments"})
-```
-
-## 2) Use the UI for Resource Visibility
-In the UI:
-- Open **Resources** and select the target resource.
-- Review **Cloud Logs** for timeline and error context.
-- Run **Health Check** to compare telemetry vs. live status.
-- Add wiki/runbook notes under the same resource.
-
-## 3) Configure Notifications in UI
-Per resource alert settings:
-- `Cloud log errors` to App/SMS/Email
-- `Health status transitions` to App/SMS/Email
-
-Requirements:
-- SMS: Twilio connector configured
-- Email: Microsoft support inbox configured and support inbox monitoring enabled
-
-## 4) Operational Loop (Recommended)
-1. SDK emits rich logs (`service`, `request_id`, `tenant`, `region`)
-2. UI raises alert on `error` / `alert` levels
-3. On-call opens resource details, reviews logs, runs health check
-4. Team updates wiki runbook and closes the incident
-
-## 5) MCP with Other Agents
-If you use other agents, expose Alshival MCP tools via SDK:
-```python
-import alshival
-
-tools = [alshival.mcp, alshival.mcp.github]
-```
-
-This lets agents query context and act with the same monitored resource data.
-"""
-
-_DEFAULT_SDK_WIKI_UI_OVERVIEW_MARKDOWN = """# UI Overview
-
-This page explains where to operate day-to-day in the Alshival UI.
-
-## Core Areas
-- **Overview**: high-level status, alert counts, and trend snapshots.
-- **Resources**: infrastructure/service inventory, health checks, and cloud logs.
-- **Wiki**: runbooks, onboarding notes, architecture references, and incident playbooks.
-- **Team**: shared team chat, team-scoped resource access, and team wiki views.
-- **Directory** (admin): users, teams, permissions, and invites.
-
-## Recommended Daily Routine
-1. Start in **Overview** for current alert pressure.
-2. Open affected items in **Resources** for logs + health checks.
-3. Update **Wiki** pages with new findings/runbook steps.
-4. Use **Team** chat to coordinate action and handoff.
-
-## UI + SDK Together
-- SDK emits structured events from remote code.
-- UI stores and displays those events under the mapped resource.
-- Alerts route based on resource notification settings.
-"""
-
-_DEFAULT_SDK_WIKI_ACCOUNT_SETTINGS_MARKDOWN = """# Account Settings
-
-Account Settings is where each user connects identity providers and personal integrations.
-
-## What Users Can Do
-- Connect/disconnect supported social providers from their own account.
-- Verify identity connection status and linked profile.
-- Control account-level defaults used by integrated workflows.
-
-## What Admins Configure Separately
-- Connector app credentials (client IDs/secrets, keys, webhooks) in Connector Settings.
-- Platform-wide behavior in Alshival Admin.
-
-## Important Distinction
-- **Configured connector**: platform credentials are set by admin.
-- **Connected account**: user has linked their own identity/token.
-
-Many features require both.
-"""
-
-_DEFAULT_SDK_WIKI_CONNECTORS_OVERVIEW_MARKDOWN = """# Connectors Overview
-
-Connectors are split across two layers:
-
-## Layer 1: Platform Connector Configuration (Admin)
-- OpenAI API key/model access
-- Microsoft app credentials + mailbox (for support inbox)
-- GitHub OAuth app
-- Asana OAuth app
-- Twilio SMS credentials/webhooks
-
-## Layer 2: User Account Connection
-- Microsoft/GitHub/Asana are connected per user in Account Settings.
-- Twilio and OpenAI are platform-level and not user OAuth connections.
-
-## Quick Impact Summary
-- **OpenAI**: powers Ask/AI generation features.
-- **Microsoft**: user delegated access (calendar/email) + support inbox app mailbox.
-- **GitHub**: GitHub identity + optional Ask GitHub MCP tools when enabled.
-- **Asana**: Asana identity + planner/task/board flows.
-- **Twilio**: SMS delivery for invites, alerts, and chat notifications.
-"""
-
-_DEFAULT_SDK_WIKI_CONNECTOR_OPENAI_MARKDOWN = """# Connector: OpenAI
-
-## What It Does
-- Enables Ask Alshival chat and other AI-assisted generation flows.
-- Powers invite message generation and related content generation paths.
-
-## Scope
-- Platform-level configuration.
-- Not a per-user OAuth connection.
-
-## If You Configure It
-- AI features can run for users with access to those UI features.
-- If missing, AI-dependent actions fall back or return unavailable errors.
-"""
-
-_DEFAULT_SDK_WIKI_CONNECTOR_MICROSOFT_MARKDOWN = """# Connector: Microsoft
-
-## What It Does
-- Enables Microsoft account connection for users.
-- Supports delegated token workflows (for example, user-scoped mail/calendar operations).
-- Supports support inbox mailbox sending/ingestion using app credentials.
-
-## Scope
-- Admin config: app credentials + tenant + support inbox mailbox.
-- User connection: Microsoft account OAuth link in Account Settings.
-
-## If a User Connects Their Microsoft Account
-- Their delegated identity can be used for user-scoped Microsoft actions.
-- They can use Microsoft-backed personal integration features exposed in UI.
-
-## Support Inbox Notes
-- Email alerts and support mailbox workflows depend on support inbox settings being enabled by admin.
-"""
-
-_DEFAULT_SDK_WIKI_CONNECTOR_GITHUB_MARKDOWN = """# Connector: GitHub
-
-## What It Does
-- Enables GitHub account login/connection.
-- Allows optional GitHub MCP tools in Ask agent flows when enabled by admin.
-
-## Scope
-- Admin config: GitHub OAuth app credentials.
-- User connection: GitHub OAuth in Account Settings.
-
-## If a User Connects GitHub
-- Their account can use GitHub-linked flows.
-- Ask agent attaches GitHub MCP tools only when:
-  1. Connector is configured
-  2. Admin enabled GitHub MCP for Ask
-  3. User has connected GitHub
-"""
-
-_DEFAULT_SDK_WIKI_CONNECTOR_ASANA_MARKDOWN = """# Connector: Asana
-
-## What It Does
-- Connects user Asana identity.
-- Enables Asana task/board/calendar integrations and mapping into resource workflows.
-
-## Scope
-- Admin config: Asana OAuth app credentials.
-- User connection: Asana OAuth link in Account Settings.
-
-## If a User Connects Asana
-- Their Asana tasks can be synced/displayed in planner views.
-- Task/board actions can be mapped to Alshival resources where supported.
-"""
-
-_DEFAULT_SDK_WIKI_CONNECTOR_TWILIO_MARKDOWN = """# Connector: Twilio
-
-## What It Does
-- Enables SMS delivery and webhook handling for messaging workflows.
-
-## Scope
-- Platform-level credentials and webhook config only.
-- No per-user OAuth connection.
-
-## If It Is Configured
-- SMS invites can be delivered.
-- SMS alert channels become available where supported.
-- Team/chat and notification workflows can route via SMS when enabled by users/admin.
-"""
-
-_DEFAULT_SDK_WIKI_PAGES = [
-    {
-        "path": "alshival-sdk/cloud-logs/mcp-servers",
-        "title": "Alshival SDK / Cloud Logs / MCP Servers",
-        "markdown": _DEFAULT_SDK_WIKI_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/cloud-logs/alerts-and-notifications",
-        "title": "Cloud Logs Alerts and Notifications",
-        "markdown": _DEFAULT_SDK_WIKI_ALERTS_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/cloud-logs/ui-and-sdk-monitoring-workflow",
-        "title": "UI + SDK Monitoring Workflow",
-        "markdown": _DEFAULT_SDK_WIKI_UI_WORKFLOW_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/platform/ui-overview",
-        "title": "UI Overview",
-        "markdown": _DEFAULT_SDK_WIKI_UI_OVERVIEW_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/platform/account-settings",
-        "title": "Account Settings",
-        "markdown": _DEFAULT_SDK_WIKI_ACCOUNT_SETTINGS_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/platform/connectors/overview",
-        "title": "Connectors Overview",
-        "markdown": _DEFAULT_SDK_WIKI_CONNECTORS_OVERVIEW_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/platform/connectors/openai",
-        "title": "Connector: OpenAI",
-        "markdown": _DEFAULT_SDK_WIKI_CONNECTOR_OPENAI_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/platform/connectors/microsoft",
-        "title": "Connector: Microsoft",
-        "markdown": _DEFAULT_SDK_WIKI_CONNECTOR_MICROSOFT_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/platform/connectors/github",
-        "title": "Connector: GitHub",
-        "markdown": _DEFAULT_SDK_WIKI_CONNECTOR_GITHUB_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/platform/connectors/asana",
-        "title": "Connector: Asana",
-        "markdown": _DEFAULT_SDK_WIKI_CONNECTOR_ASANA_MARKDOWN,
-    },
-    {
-        "path": "alshival-sdk/platform/connectors/twilio",
-        "title": "Connector: Twilio",
-        "markdown": _DEFAULT_SDK_WIKI_CONNECTOR_TWILIO_MARKDOWN,
-    },
-]
-
-
 def _ensure_default_sdk_workspace_wiki_page(*, actor) -> None:
     if actor is None or not bool(getattr(actor, "is_authenticated", False)):
         return
 
-    for item in _DEFAULT_SDK_WIKI_PAGES:
-        path = str(item.get("path") or "").strip().lower()
-        title = str(item.get("title") or "").strip()
-        markdown = str(item.get("markdown") or "").strip()
-        if not path or not title or not markdown:
-            continue
+    try:
+        legacy_pages = list(
+            WikiPage.objects.filter(
+                scope=_WIKI_SCOPE_WORKSPACE,
+                resource_uuid="",
+                path__icontains="alshival-sdk",
+            ).order_by("id")
+        )
+    except (OperationalError, ProgrammingError):
+        return
+    except Exception:
+        return
+    if not legacy_pages:
+        return
 
+    legacy_ids: list[int] = []
+    for page in legacy_pages:
+        page_id = int(getattr(page, "id", 0) or 0)
+        if page_id > 0:
+            legacy_ids.append(page_id)
         try:
-            existing = (
-                WikiPage.objects.filter(
-                    scope=_WIKI_SCOPE_WORKSPACE,
-                    resource_uuid="",
-                    path__iexact=path,
-                )
-                .order_by("id")
-                .first()
-            )
-        except (OperationalError, ProgrammingError):
-            return
+            _sync_global_workspace_wiki_kb_page(page=page, force_delete=True)
         except Exception:
-            continue
+            pass
 
-        if existing is not None:
-            page_updated = False
-            try:
-                # One-time upgrade for previously seeded alerts doc to include
-                # the newer UI + SDK guidance.
-                if (
-                    path == "alshival-sdk/cloud-logs/alerts-and-notifications"
-                    and str(existing.title or "").strip() == title
-                ):
-                    existing_body = str(existing.body_markdown or "")
-                    legacy_seed_phrase = "Use this page to configure how cloud log errors and alerts notify your team."
-                    if legacy_seed_phrase in existing_body and "## UI + SDK" not in existing_body:
-                        existing.body_markdown = markdown
-                        existing.body_html_fallback = render_markdown_fallback(markdown)
-                        existing.updated_by = actor
-                        existing.save(
-                            update_fields=[
-                                "body_markdown",
-                                "body_html_fallback",
-                                "updated_by",
-                                "updated_at",
-                            ]
-                        )
-                        page_updated = True
-            except Exception:
-                pass
-            if page_updated:
-                try:
-                    if _is_global_workspace_wiki_page(existing):
-                        _sync_global_workspace_wiki_kb_page(page=existing)
-                except Exception:
-                    pass
-            continue
-
+    if legacy_ids:
         try:
-            with transaction.atomic():
-                page = WikiPage.objects.create(
-                    scope=_WIKI_SCOPE_WORKSPACE,
-                    resource_uuid="",
-                    resource_name="",
-                    path=path,
-                    title=title,
-                    is_draft=False,
-                    body_markdown=markdown,
-                    body_html_fallback=render_markdown_fallback(markdown),
-                    created_by=actor,
-                    updated_by=actor,
-                )
-        except Exception:
-            continue
-
-        try:
-            _sync_global_workspace_wiki_kb_page(page=page)
+            WikiPage.objects.filter(id__in=legacy_ids).delete()
         except Exception:
             pass
 
@@ -3765,6 +3369,33 @@ def _asana_project_url(project_gid: str) -> str:
     return f"https://app.asana.com/0/{resolved_gid}/list"
 
 
+def _asana_assignee_fields_from_row(task_row: dict[str, object]) -> tuple[str, str]:
+    assignee_obj = task_row.get("assignee")
+    assignee_gid = str(task_row.get("assignee_gid") or "").strip()
+    assignee_name = str(task_row.get("assignee_name") or "").strip()
+    if isinstance(assignee_obj, dict):
+        if not assignee_gid:
+            assignee_gid = str(assignee_obj.get("gid") or "").strip()
+        if not assignee_name:
+            assignee_name = str(assignee_obj.get("name") or "").strip()
+    elif assignee_obj is not None and not assignee_name:
+        assignee_name = str(assignee_obj or "").strip()
+    return assignee_gid, assignee_name
+
+
+def _asana_task_rows_with_assignee_fields(task_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    normalized_rows: list[dict[str, object]] = []
+    for row in task_rows:
+        if not isinstance(row, dict):
+            continue
+        assignee_gid, assignee_name = _asana_assignee_fields_from_row(row)
+        next_row = dict(row)
+        next_row["assignee_gid"] = assignee_gid
+        next_row["assignee_name"] = assignee_name
+        normalized_rows.append(next_row)
+    return normalized_rows
+
+
 def _asana_task_row_from_api_task(
     task: dict[str, object],
     *,
@@ -3823,12 +3454,7 @@ def _asana_task_row_from_api_task(
     if len(notes) > 8000:
         notes = notes[:8000]
 
-    assignee_obj = task.get("assignee")
-    assignee_gid = ""
-    assignee_name = ""
-    if isinstance(assignee_obj, dict):
-        assignee_gid = str(assignee_obj.get("gid") or "").strip()
-        assignee_name = str(assignee_obj.get("name") or "").strip()
+    assignee_gid, assignee_name = _asana_assignee_fields_from_row(task)
 
     subtask_count = int(task.get("num_subtasks") or 0)
 
@@ -4149,6 +3775,56 @@ def _asana_overview_payload_from_api(
     )
 
 
+def _asana_board_rows_from_api(access_token: str) -> tuple[list[dict[str, str]], str | None]:
+    workspaces, _workspaces_truncated, workspace_error = _asana_api_list(
+        access_token=access_token,
+        path="/users/me/workspaces",
+        params={
+            "opt_fields": "gid,name",
+            "limit": _ASANA_OVERVIEW_PER_REQUEST_LIMIT,
+        },
+        max_items=250,
+    )
+    if workspace_error:
+        return [], workspace_error
+
+    workspace_name_by_gid: dict[str, str] = {}
+    workspace_gids: list[str] = []
+    for workspace in workspaces:
+        workspace_gid = str(workspace.get("gid") or "").strip()
+        if not workspace_gid or workspace_gid in workspace_name_by_gid:
+            continue
+        workspace_name_by_gid[workspace_gid] = str(workspace.get("name") or "").strip()
+        workspace_gids.append(workspace_gid)
+
+    board_rows: list[dict[str, str]] = []
+    for workspace_gid in workspace_gids:
+        projects, _project_truncated, project_error = _asana_api_list(
+            access_token=access_token,
+            path="/projects",
+            params={
+                "workspace": workspace_gid,
+                "opt_fields": "gid,name,permalink_url,archived,workspace.gid,workspace.name",
+                "limit": _ASANA_OVERVIEW_PER_REQUEST_LIMIT,
+            },
+            max_items=1000,
+        )
+        if project_error:
+            continue
+        for project in projects:
+            if not isinstance(project, dict):
+                continue
+            board_row = _asana_board_row_from_project(
+                project,
+                workspace_name_by_gid=workspace_name_by_gid,
+            )
+            if board_row is None:
+                continue
+            board_rows.append(board_row)
+
+    return _asana_merge_board_rows(board_rows), None
+
+
 def _asana_access_token_for_user(user, *, force_refresh: bool = False) -> tuple[str, str | None]:
     try:
         account = (
@@ -4341,7 +4017,9 @@ def _asana_overview_context_for_user(
         and bool(cache_has_project_tasks)
     )
     if bool(cached_payload) and not force_refresh and (cache_is_fresh or not allow_refresh):
-        context["tasks"] = cached_payload.get("tasks") if isinstance(cached_payload.get("tasks"), list) else []
+        context["tasks"] = _asana_task_rows_with_assignee_fields(
+            [row for row in (cached_payload.get("tasks") or []) if isinstance(row, dict)]
+        )
         context["task_count"] = int(cached_payload.get("task_count") or len(context["tasks"]))
         context["boards"] = cached_payload.get("boards") if isinstance(cached_payload.get("boards"), list) else []
         context["board_count"] = int(cached_payload.get("board_count") or len(context["boards"]))
@@ -4453,7 +4131,9 @@ def _asana_overview_context_for_user(
             payload=fresh_payload,
             fetched_at_epoch=now_epoch,
         )
-        context["tasks"] = fresh_payload.get("tasks") if isinstance(fresh_payload.get("tasks"), list) else []
+        context["tasks"] = _asana_task_rows_with_assignee_fields(
+            [row for row in (fresh_payload.get("tasks") or []) if isinstance(row, dict)]
+        )
         context["task_count"] = int(fresh_payload.get("task_count") or len(context["tasks"]))
         context["boards"] = fresh_payload.get("boards") if isinstance(fresh_payload.get("boards"), list) else []
         context["board_count"] = int(fresh_payload.get("board_count") or len(context["boards"]))
@@ -4471,7 +4151,9 @@ def _asana_overview_context_for_user(
         return context
 
     if cached_payload:
-        context["tasks"] = cached_payload.get("tasks") if isinstance(cached_payload.get("tasks"), list) else []
+        context["tasks"] = _asana_task_rows_with_assignee_fields(
+            [row for row in (cached_payload.get("tasks") or []) if isinstance(row, dict)]
+        )
         context["task_count"] = int(cached_payload.get("task_count") or len(context["tasks"]))
         context["boards"] = cached_payload.get("boards") if isinstance(cached_payload.get("boards"), list) else []
         context["board_count"] = int(cached_payload.get("board_count") or len(context["boards"]))
@@ -4785,7 +4467,7 @@ def _team_planner_external_items_by_team(
 
             task_gid = str(task_row.get("gid") or asana_row.get("event_id") or "").strip()
             due_date = str(task_row.get("due_date") or asana_row.get("due_date") or "").strip()
-            if not task_gid or not due_date:
+            if not task_gid:
                 continue
 
             mapped_resource_uuids = _asana_task_resource_uuids(
@@ -4861,6 +4543,10 @@ def _team_planner_external_items_by_team(
                     "resource_names": team_mapped_resource_names,
                     "project_links": resolved_project_links,
                     "section_name": str(task_row.get("section_name") or "").strip(),
+                    "assignee_gid": str(task_row.get("assignee_gid") or "").strip(),
+                    "assignee_name": str(task_row.get("assignee_name") or "").strip(),
+                    "workspace_gid": str(task_row.get("workspace_gid") or "").strip(),
+                    "workspace_name": str(task_row.get("workspace_name") or "").strip(),
                     "can_toggle": False,
                     "_sort_updated_marker": updated_marker,
                 }
@@ -6456,6 +6142,311 @@ def refresh_calendar_cache(request):
             "ok": True,
             "provider": provider,
             "result": result,
+        }
+    )
+
+
+@login_required
+@require_GET
+def team_list_asana_boards(request):
+    normalized_team_id = _normalize_team_id(str(request.GET.get("team_id") or ""))
+    if not normalized_team_id:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "missing_team_id",
+            },
+            status=400,
+        )
+
+    team = Group.objects.filter(id=int(normalized_team_id)).first()
+    if team is None:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "team_not_found",
+            },
+            status=404,
+        )
+    if not request.user.is_superuser and not request.user.groups.filter(id=team.id).exists():
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "team_access_denied",
+            },
+            status=403,
+        )
+    if not is_asana_connector_configured():
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "asana_connector_not_configured",
+            },
+            status=400,
+        )
+
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": str(token_error or "asana_not_connected"),
+            },
+            status=403,
+        )
+
+    board_rows, board_error = _asana_board_rows_from_api(access_token)
+    if _asana_error_requires_refresh(board_error):
+        refreshed_token, refresh_error = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed_token:
+            board_rows, board_error = _asana_board_rows_from_api(refreshed_token)
+        elif refresh_error:
+            board_error = refresh_error
+    if board_error:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": str(board_error or "asana_board_fetch_failed"),
+            },
+            status=502,
+        )
+
+    return JsonResponse(
+        {
+            "ok": True,
+            "team_id": int(team.id),
+            "team_name": str(team.name or "").strip(),
+            "boards": board_rows,
+            "board_count": len(board_rows),
+        }
+    )
+
+
+@login_required
+@require_GET
+def team_import_asana_board_tasks(request, board_gid: str):
+    normalized_team_id = _normalize_team_id(str(request.GET.get("team_id") or ""))
+    if not normalized_team_id:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "missing_team_id",
+            },
+            status=400,
+        )
+
+    team = Group.objects.filter(id=int(normalized_team_id)).first()
+    if team is None:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "team_not_found",
+            },
+            status=404,
+        )
+    if not request.user.is_superuser and not request.user.groups.filter(id=team.id).exists():
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "team_access_denied",
+            },
+            status=403,
+        )
+
+    resolved_board_gid = str(board_gid or "").strip()
+    if not resolved_board_gid:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "missing_board_gid",
+            },
+            status=400,
+        )
+    if not is_asana_connector_configured():
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "asana_connector_not_configured",
+            },
+            status=400,
+        )
+
+    access_token, token_error = _asana_access_token_for_user(request.user)
+    if not access_token:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": str(token_error or "asana_not_connected"),
+            },
+            status=403,
+        )
+
+    project_payload, project_error = _asana_api_get_json(
+        access_token=access_token,
+        path=f"/projects/{resolved_board_gid}",
+        params={"opt_fields": "gid,name,permalink_url,workspace.gid,workspace.name"},
+    )
+    if _asana_error_requires_refresh(project_error):
+        refreshed_token, refresh_error = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed_token:
+            project_payload, project_error = _asana_api_get_json(
+                access_token=refreshed_token,
+                path=f"/projects/{resolved_board_gid}",
+                params={"opt_fields": "gid,name,permalink_url,workspace.gid,workspace.name"},
+            )
+            access_token = refreshed_token
+        elif refresh_error:
+            project_error = refresh_error
+    if project_error:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": str(project_error or "asana_board_lookup_failed"),
+            },
+            status=502,
+        )
+
+    project_data = project_payload.get("data") if isinstance(project_payload, dict) else {}
+    if not isinstance(project_data, dict):
+        project_data = {}
+    board_name = str(project_data.get("name") or "").strip() or f"Asana board {resolved_board_gid}"
+    board_url = str(project_data.get("permalink_url") or "").strip() or _asana_project_url(resolved_board_gid)
+    workspace_data = project_data.get("workspace") if isinstance(project_data.get("workspace"), dict) else {}
+    workspace_gid = str(workspace_data.get("gid") or "").strip()
+    workspace_name = str(workspace_data.get("name") or "").strip()
+
+    completed_since = (
+        datetime.now(timezone.utc) - timedelta(days=_ASANA_AGENDA_COMPLETED_WINDOW_DAYS)
+    ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    tasks_payload, tasks_truncated, tasks_error = _asana_api_list(
+        access_token=access_token,
+        path=f"/projects/{resolved_board_gid}/tasks",
+        params={
+            "completed_since": completed_since,
+            "limit": _ASANA_OVERVIEW_PER_REQUEST_LIMIT,
+            "opt_fields": _ASANA_TASK_OPT_FIELDS,
+        },
+        max_items=_ASANA_FULL_IMPORT_TASK_FETCH_LIMIT,
+    )
+    if _asana_error_requires_refresh(tasks_error):
+        refreshed_token, refresh_error = _asana_access_token_for_user(request.user, force_refresh=True)
+        if refreshed_token:
+            tasks_payload, tasks_truncated, tasks_error = _asana_api_list(
+                access_token=refreshed_token,
+                path=f"/projects/{resolved_board_gid}/tasks",
+                params={
+                    "completed_since": completed_since,
+                    "limit": _ASANA_OVERVIEW_PER_REQUEST_LIMIT,
+                    "opt_fields": _ASANA_TASK_OPT_FIELDS,
+                },
+                max_items=_ASANA_FULL_IMPORT_TASK_FETCH_LIMIT,
+            )
+        elif refresh_error:
+            tasks_error = refresh_error
+    if tasks_error:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": str(tasks_error or "asana_board_tasks_fetch_failed"),
+            },
+            status=502,
+        )
+
+    task_rows: list[dict[str, object]] = []
+    for task in tasks_payload:
+        if not isinstance(task, dict):
+            continue
+        task_data = dict(task)
+        if workspace_gid:
+            task_data["_workspace_gid"] = workspace_gid
+        task_row = _asana_task_row_from_api_task(
+            task_data,
+            default_workspace_name=workspace_name,
+        )
+        if task_row is None:
+            continue
+        project_links = task_row.get("project_links")
+        if not isinstance(project_links, list) or not project_links:
+            task_row["project_links"] = [
+                {
+                    "gid": resolved_board_gid,
+                    "name": board_name,
+                    "url": board_url,
+                }
+            ]
+        task_rows.append(task_row)
+    task_rows.sort(key=_asana_task_row_sort_key)
+
+    items: list[dict[str, object]] = []
+    board_resource_mappings = list_user_asana_board_resource_mappings(request.user)
+    task_resource_mappings = list_user_asana_task_resource_mappings(request.user)
+    resource_name_lookup = {
+        str(option.get("resource_uuid") or "").strip().lower(): str(option.get("resource_name") or "").strip()
+        for option in _asana_resource_options_for_user(request.user)
+        if isinstance(option, dict) and str(option.get("resource_uuid") or "").strip()
+    }
+    for task_row in task_rows:
+        task_gid = str(task_row.get("gid") or "").strip()
+        if not task_gid:
+            continue
+        mapped_resource_uuids = _asana_task_resource_uuids(
+            task_row=task_row,
+            board_resource_mappings=board_resource_mappings,
+            task_resource_mappings=task_resource_mappings,
+        )
+        mapped_resource_names = [
+            str(resource_name_lookup.get(str(resource_uuid or "").strip().lower()) or "").strip()
+            for resource_uuid in mapped_resource_uuids
+            if str(resource_name_lookup.get(str(resource_uuid or "").strip().lower()) or "").strip()
+        ]
+        items.append(
+            {
+                "id": f"asana-task-{task_gid}",
+                "title": str(task_row.get("name") or "").strip() or f"Asana task {task_gid}",
+                "date": str(task_row.get("due_date") or "").strip(),
+                "time": str(task_row.get("due_time") or "").strip(),
+                "kind": _asana_task_kind_for_planner(task_row),
+                "done": bool(task_row.get("completed")),
+                "completed_at": str(task_row.get("completed_at") or "").strip(),
+                "source": "asana",
+                "task_gid": task_gid,
+                "url": str(task_row.get("task_url") or "").strip(),
+                "resource_uuids": mapped_resource_uuids,
+                "resource_names": mapped_resource_names,
+                "project_links": [
+                    {
+                        "gid": str(project.get("gid") or "").strip(),
+                        "name": str(project.get("name") or "").strip(),
+                        "url": str(project.get("url") or "").strip(),
+                    }
+                    for project in (task_row.get("project_links") or [])
+                    if isinstance(project, dict)
+                ],
+                "section_name": str(task_row.get("section_name") or "").strip(),
+                "assignee_gid": str(task_row.get("assignee_gid") or "").strip(),
+                "assignee_name": str(task_row.get("assignee_name") or "").strip(),
+                "workspace_gid": str(task_row.get("workspace_gid") or workspace_gid or "").strip(),
+                "workspace_name": str(task_row.get("workspace_name") or workspace_name or "").strip(),
+                "can_toggle": False,
+            }
+        )
+
+    return JsonResponse(
+        {
+            "ok": True,
+            "team_id": int(team.id),
+            "team_name": str(team.name or "").strip(),
+            "board": {
+                "gid": resolved_board_gid,
+                "name": board_name,
+                "url": board_url,
+                "workspace_gid": workspace_gid,
+                "workspace_name": workspace_name,
+            },
+            "task_count": len(task_rows),
+            "result_count": len(items),
+            "truncated": bool(tasks_truncated),
+            "items": items,
         }
     )
 
@@ -10414,11 +10405,49 @@ def team_page(request):
         for item in team_resources
         if str(item.get("resource_uuid") or "").strip()
     }
-    team_planner_external_items_by_team = _team_planner_external_items_by_team(
-        memberships=memberships,
-        resource_index=resource_index,
-        resource_name_lookup=team_resource_name_lookup,
-    )
+    membership_id_by_name = {
+        str(item.get("name") or "").strip().lower(): int(item.get("id") or 0)
+        for item in memberships
+        if int(item.get("id") or 0) > 0 and str(item.get("name") or "").strip()
+    }
+    team_resource_options_by_team: dict[str, list[dict[str, str]]] = {
+        str(int(item.get("id") or 0)): []
+        for item in memberships
+        if int(item.get("id") or 0) > 0
+    }
+    team_resource_seen_by_team: dict[str, set[str]] = {team_id: set() for team_id in team_resource_options_by_team}
+    for resource_row in team_resources:
+        resource_uuid = str(resource_row.get("resource_uuid") or "").strip().lower()
+        resource_name = str(resource_row.get("name") or "").strip()
+        if not resource_uuid or not resource_name:
+            continue
+        for raw_team_name in resource_row.get("team_names") or []:
+            normalized_team_name = str(raw_team_name or "").strip().lower()
+            team_id = membership_id_by_name.get(normalized_team_name, 0)
+            if team_id <= 0:
+                continue
+            team_key = str(team_id)
+            seen = team_resource_seen_by_team.setdefault(team_key, set())
+            if resource_uuid in seen:
+                continue
+            seen.add(resource_uuid)
+            team_resource_options_by_team.setdefault(team_key, []).append(
+                {
+                    "resource_uuid": resource_uuid,
+                    "resource_name": resource_name,
+                }
+            )
+    for team_key, options in team_resource_options_by_team.items():
+        options.sort(key=lambda item: str(item.get("resource_name") or "").lower())
+    try:
+        team_planner_external_items_by_team = _team_planner_external_items_by_team(
+            memberships=memberships,
+            resource_index=resource_index,
+            resource_name_lookup=team_resource_name_lookup,
+        )
+    except Exception:
+        logger.exception("team_page: failed to build planner external items")
+        team_planner_external_items_by_team = {}
     member_teams = _ssh_team_choices_for_user(request.user)
     github_repo_options, github_repo_error = _github_repository_options_for_user(request.user)
     local_ssh_credentials = list_ssh_credentials(request.user)
@@ -10453,6 +10482,7 @@ def team_page(request):
 
     twilio_sms_available = is_twilio_configured()
     email_notifications_available = is_support_inbox_email_alerts_enabled()
+    asana_connector_configured = is_asana_connector_configured()
     team_chat_notification_settings_by_team: dict[int, dict[str, bool]] = {}
     for item in memberships:
         team_id = int(item.get("id") or 0)
@@ -10460,10 +10490,22 @@ def team_page(request):
         if team_id <= 0:
             continue
         team_obj = Group(id=team_id, name=team_name)
-        team_chat_notification_settings_by_team[team_id] = get_team_chat_notification_settings(
-            team_obj,
-            user_id=int(request.user.id or 0),
-        )
+        try:
+            team_chat_notification_settings_by_team[team_id] = get_team_chat_notification_settings(
+                team_obj,
+                user_id=int(request.user.id or 0),
+            )
+        except Exception:
+            logger.exception(
+                "team_page: failed to load team chat notification settings for team_id=%s user_id=%s",
+                team_id,
+                int(request.user.id or 0),
+            )
+            team_chat_notification_settings_by_team[team_id] = {
+                "team_chat_app_enabled": True,
+                "team_chat_sms_enabled": False,
+                "team_chat_email_enabled": False,
+            }
 
     return render(
         request,
@@ -10474,12 +10516,14 @@ def team_page(request):
             "team_membership_count": len(memberships),
             "team_resource_count": len(team_resources),
             "team_planner_external_items_by_team": team_planner_external_items_by_team,
+            "team_resource_options_by_team": team_resource_options_by_team,
             "member_teams": member_teams,
             "github_repo_options": github_repo_options,
             "github_repo_error": github_repo_error,
             "ssh_credential_choices": ssh_credentials,
             "twilio_sms_available": twilio_sms_available,
             "email_notifications_available": email_notifications_available,
+            "asana_connector_configured": asana_connector_configured,
             "team_chat_notification_settings_by_team": team_chat_notification_settings_by_team,
         },
     )
@@ -11196,6 +11240,8 @@ def resource_wiki_sync(request, username: str, resource_uuid, route_kind: str = 
         pull_remote=True,
         push_changes=True,
         changed_page_ids=None,
+        reindex_resource_kb=True,
+        reindex_check_method="wiki_sync",
     )
 
     status_code = "wiki_sync_failed"
@@ -11216,12 +11262,6 @@ def resource_wiki_sync(request, username: str, resource_uuid, route_kind: str = 
     else:
         detail = "; ".join(str(item) for item in sync_errors[:3]) if sync_errors else sync_code
         messages.error(request, f"{sync_summary}{f' ({detail})' if detail else ''}")
-
-    if sync_code in {"ok", "partial_error"}:
-        _upsert_resource_kb_after_wiki_mutation(
-            actor=request.user,
-            resource_uuid=_normalize_resource_uuid(resource.resource_uuid),
-        )
 
     if _post_flag(request.POST, "return_to_scope_wiki"):
         return _redirect_wiki(
@@ -11987,7 +12027,14 @@ def _extract_chat_completion_text(payload: dict) -> str:
     return ""
 
 
-def _query_kb_resources(*, knowledge_path: Path, query: str, limit: int) -> tuple[list[dict], str]:
+def _query_kb_resources(
+    *,
+    knowledge_path: Path,
+    query: str,
+    limit: int,
+    collection_name: str = _UNIFIED_KB_COLLECTION_NAME,
+    where_filter: dict[str, object] | None = None,
+) -> tuple[list[dict], str]:
     _ensure_runtime_cache_dirs()
     try:
         import chromadb
@@ -11998,12 +12045,11 @@ def _query_kb_resources(*, knowledge_path: Path, query: str, limit: int) -> tupl
 
     client = chromadb.PersistentClient(path=str(knowledge_path))
     try:
-        collection = client.get_collection(name="resources")
+        collection = client.get_collection(name=collection_name)
     except Exception:
         return [], ""
 
     n_results = max(1, min(int(limit or 5), 50))
-    where_filter = None
     resolved_query = str(query or "").strip()
     rows: list[dict] = []
     if resolved_query:
@@ -12130,8 +12176,11 @@ def _kb_result_kind_and_url(*, actor, row: dict[str, object], metadata: dict[str
     is_wiki_result = (
         is_workspace_wiki
         or source == "resource_wiki"
+        or source == "resource_wiki_page"
         or source.endswith("_wiki")
+        or source.endswith("_wiki_page")
         or row_id.startswith("wiki:")
+        or ":wiki_page:" in row_id
         or wiki_scope == "resource"
     )
 
@@ -12264,83 +12313,217 @@ def _build_topbar_kb_suggestions(*, actor, rows: list[dict], limit: int = 8) -> 
     return suggestions
 
 
+def _dedupe_kb_rows(rows: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        row_id = str(row.get("id") or "").strip()
+        resource_uuid = _normalize_resource_uuid(str(metadata.get("resource_uuid") or ""))
+        key = f"{resource_uuid}:{row_id}" if row_id else resource_uuid
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def _kb_actor_team_ids(actor) -> set[int]:
+    if actor is None:
+        return set()
+    if not bool(getattr(actor, "is_authenticated", False)):
+        return set()
+    try:
+        return {
+            int(team_id or 0)
+            for team_id in actor.groups.values_list("id", flat=True)
+            if int(team_id or 0) > 0
+        }
+    except Exception:
+        return set()
+
+
+def _kb_parse_team_ids_csv(value: object) -> set[int]:
+    results: set[int] = set()
+    for chunk in str(value or "").split(","):
+        cleaned = str(chunk or "").strip()
+        if not cleaned:
+            continue
+        try:
+            resolved = int(cleaned)
+        except Exception:
+            continue
+        if resolved > 0:
+            results.add(resolved)
+    return results
+
+
+def _kb_access_category(*, actor, metadata: dict[str, object], actor_team_ids: set[int]) -> str:
+    source = _normalize_kb_result_text(metadata.get("source") or "").lower()
+    if source == "user_record":
+        return "denied"
+
+    if actor is not None and bool(getattr(actor, "is_superuser", False)):
+        return "global"
+    actor_user_id = int(getattr(actor, "id", 0) or 0) if actor is not None else 0
+
+    visibility = _normalize_kb_result_text(metadata.get("access_visibility") or "").lower()
+    owner_scope = _normalize_kb_result_text(metadata.get("owner_scope") or "").lower()
+    access_user_id = int(metadata.get("access_user_id") or 0)
+    owner_user_id = int(metadata.get("owner_user_id") or 0)
+    owner_team_id = int(metadata.get("owner_team_id") or 0)
+    access_team_ids = _kb_parse_team_ids_csv(metadata.get("access_team_ids"))
+
+    if visibility == "global":
+        return "global"
+    if visibility == "user":
+        return "user" if actor_user_id > 0 and actor_user_id == access_user_id else "denied"
+    if visibility == "team":
+        if actor_user_id > 0 and access_user_id > 0 and actor_user_id == access_user_id:
+            return "team"
+        return "team" if bool(actor_team_ids.intersection(access_team_ids)) else "denied"
+
+    # Backward-compat for records written before ACL metadata existed.
+    if owner_scope == "global":
+        return "global"
+    if owner_scope == "user":
+        return "user" if actor_user_id > 0 and actor_user_id == owner_user_id else "denied"
+    if owner_scope == "team":
+        if owner_team_id > 0 and owner_team_id in actor_team_ids:
+            return "team"
+        return "denied"
+    return "denied"
+
+
+def _kb_is_wiki_source(*, row_id: str, metadata: dict[str, object]) -> bool:
+    source = _normalize_kb_result_text(metadata.get("source") or "").lower()
+    wiki_scope = _normalize_kb_result_text(metadata.get("scope") or metadata.get("wiki_scope") or "").lower()
+    return (
+        source in {"workspace_wiki", "resource_wiki", "resource_wiki_page", "team_wiki"}
+        or source.endswith("_wiki")
+        or source.endswith("_wiki_page")
+        or row_id.startswith("wiki:")
+        or ":wiki_page:" in row_id
+        or wiki_scope in {_WIKI_SCOPE_WORKSPACE, _WIKI_SCOPE_RESOURCE, _WIKI_SCOPE_TEAM}
+    )
+
+
+def _kb_source_where_filter(sources: set[str]) -> dict[str, object] | None:
+    resolved = sorted({str(item or "").strip().lower() for item in sources if str(item or "").strip()})
+    if not resolved:
+        return None
+    if len(resolved) == 1:
+        return {"source": resolved[0]}
+    return {"$or": [{"source": source} for source in resolved]}
+
+
+def _filter_kb_rows_for_actor(
+    *,
+    actor,
+    rows: list[dict],
+    allowed_sources: set[str],
+    required_resource_uuid: str = "",
+    limit: int,
+) -> list[dict]:
+    actor_team_ids = _kb_actor_team_ids(actor)
+    resolved_resource_uuid = _normalize_resource_uuid(required_resource_uuid)
+    filtered: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        source = _normalize_kb_result_text(metadata.get("source") or "").lower()
+        if allowed_sources and source not in allowed_sources:
+            continue
+        row_resource_uuid = _normalize_resource_uuid(str(metadata.get("resource_uuid") or ""))
+        if resolved_resource_uuid and row_resource_uuid != resolved_resource_uuid:
+            continue
+        category = _kb_access_category(actor=actor, metadata=metadata, actor_team_ids=actor_team_ids)
+        if category == "denied":
+            continue
+        filtered.append(row)
+        if len(filtered) >= max(1, int(limit or 1)):
+            break
+    return filtered
+
+
 def _tool_search_kb_for_actor(actor, args: dict) -> dict:
     query = str(args.get("query") or "").strip()
-    user_path = _user_knowledge_db_path(actor)
-    global_path = _global_owner_dir() / "knowledge.db"
-
-    user_results, user_error = _query_kb_resources(
-        knowledge_path=user_path,
+    try:
+        requested_limit = int(args.get("limit", 7) or 7)
+    except Exception:
+        requested_limit = 7
+    resolved_limit = max(1, min(requested_limit, 20))
+    unified_path = _global_owner_dir() / "knowledge.db"
+    allowed_sources = {
+        "resource_health",
+        "resource_kb",
+        "resource_wiki_page",
+        "resource_wiki",
+        "workspace_wiki",
+        "team_wiki",
+    }
+    raw_rows, query_error = _query_kb_resources(
+        knowledge_path=unified_path,
         query=query,
-        limit=4,
+        limit=50,
+        collection_name=_UNIFIED_KB_COLLECTION_NAME,
+        where_filter=_kb_source_where_filter(allowed_sources),
     )
-    if user_error:
-        return {"ok": False, "error": user_error, "results": []}
+    if query_error:
+        return {"ok": False, "error": query_error, "results": []}
 
-    global_results, global_error = _query_kb_resources(
-        knowledge_path=global_path,
-        query=query,
-        limit=3,
+    filtered_rows = _filter_kb_rows_for_actor(
+        actor=actor,
+        rows=raw_rows,
+        allowed_sources=allowed_sources,
+        limit=resolved_limit,
     )
-    if global_error:
-        return {"ok": False, "error": global_error, "results": []}
+    filtered_rows = _dedupe_kb_rows(filtered_rows)
 
-    wiki_limit = 4
-    wiki_qs = _wiki_accessible_queryset(
-        actor,
-        scope=_WIKI_SCOPE_WORKSPACE,
-        resource_uuid="",
-    )
-    wiki_qs = wiki_qs.exclude(is_draft=False, team_access__isnull=True).distinct()
-    if query:
-        wiki_qs = wiki_qs.filter(
-            Q(title__icontains=query)
-            | Q(path__icontains=query)
-            | Q(body_markdown__icontains=query)
-        )
-    wiki_pages = list(wiki_qs.order_by("-updated_at")[:wiki_limit])
-    wiki_results: list[dict[str, object]] = []
-    for page in wiki_pages:
-        snippet = _kb_markdown_snippet(
-            str(getattr(page, "body_markdown", "") or ""),
-            query,
-        )
-        wiki_results.append(
-            {
-                "id": f"wiki:{int(getattr(page, 'id', 0) or 0)}",
-                "document": snippet,
-                "metadata": {
-                    "source": "workspace_wiki",
-                    "wiki_page_id": int(getattr(page, "id", 0) or 0),
-                    "title": str(getattr(page, "title", "") or "").strip(),
-                    "path": str(getattr(page, "path", "") or "").strip(),
-                    "is_draft": bool(getattr(page, "is_draft", False)),
-                    "updated_at": str(getattr(page, "updated_at", "") or ""),
-                },
-                "distance": None,
-            }
-        )
+    actor_team_ids = _kb_actor_team_ids(actor)
+    global_results: list[dict] = []
+    user_results: list[dict] = []
+    team_results: list[dict] = []
+    wiki_results: list[dict] = []
+    for row in filtered_rows:
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        row_id = _normalize_kb_result_text(row.get("id") or "").lower()
+        if _kb_is_wiki_source(row_id=row_id, metadata=metadata):
+            wiki_results.append(row)
+            continue
+        category = _kb_access_category(actor=actor, metadata=metadata, actor_team_ids=actor_team_ids)
+        if category == "user":
+            user_results.append(row)
+        elif category == "team":
+            team_results.append(row)
+        else:
+            global_results.append(row)
 
-    merged = list(user_results) + list(global_results) + list(wiki_results)
     return {
         "ok": True,
-        "collection": "resources",
-        "knowledge_paths": {
-            "user": str(user_path),
-            "global": str(global_path),
-        },
+        "collection": _UNIFIED_KB_COLLECTION_NAME,
+        "knowledge_path": str(unified_path),
         "query": query,
-        "user_limit": 4,
-        "global_limit": 3,
-        "wiki_limit": wiki_limit,
-        "user_result_count": len(user_results),
+        "limit": resolved_limit,
         "global_result_count": len(global_results),
+        "user_result_count": len(user_results),
+        "team_result_count": len(team_results),
         "wiki_result_count": len(wiki_results),
-        "result_count": len(merged),
-        "user_results": user_results,
+        "result_count": len(filtered_rows),
         "global_results": global_results,
+        "user_results": user_results,
+        "team_results": team_results,
         "wiki_results": wiki_results,
-        "results": merged,
+        "results": filtered_rows,
     }
 
 
@@ -12483,16 +12666,30 @@ def _tool_resource_kb_for_actor(actor, args: dict) -> dict:
         limit = 8
     resolved_limit = max(1, min(limit, 50))
 
-    owner_context = get_resource_owner_context(owner_user, resource_uuid)
-    resource_dir = Path(owner_context.get("resource_dir") or "")
-    resource_kb_path = resource_dir / "knowledge.db" if resource_dir else Path("")
-    rows, query_error = _query_kb_resources(
-        knowledge_path=resource_kb_path,
+    allowed_sources = {
+        "resource_health",
+        "resource_kb",
+        "resource_wiki_page",
+        "resource_wiki",
+    }
+    unified_path = _global_owner_dir() / "knowledge.db"
+    raw_rows, query_error = _query_kb_resources(
+        knowledge_path=unified_path,
         query=query,
-        limit=resolved_limit,
+        limit=min(50, resolved_limit * 6),
+        collection_name=_UNIFIED_KB_COLLECTION_NAME,
+        where_filter=_kb_source_where_filter(allowed_sources),
     )
     if query_error:
         return {"ok": False, "error": query_error, "results": []}
+    rows = _filter_kb_rows_for_actor(
+        actor=actor,
+        rows=raw_rows,
+        allowed_sources=allowed_sources,
+        required_resource_uuid=resource_uuid,
+        limit=resolved_limit,
+    )
+    rows = _dedupe_kb_rows(rows)
 
     return {
         "ok": True,
@@ -12501,7 +12698,8 @@ def _tool_resource_kb_for_actor(actor, args: dict) -> dict:
         "owner_username": str(getattr(owner_user, "username", "") or ""),
         "query": query,
         "limit": resolved_limit,
-        "knowledge_path": str(resource_kb_path),
+        "collection": _UNIFIED_KB_COLLECTION_NAME,
+        "knowledge_path": str(unified_path),
         "result_count": len(rows),
         "results": rows,
     }
@@ -12567,7 +12765,8 @@ def _tool_search_users_for_actor(actor, args: dict) -> dict:
 
     return {
         "ok": True,
-        "collection": "user_records",
+        "collection": _UNIFIED_KB_COLLECTION_NAME,
+        "source_filter": "user_record",
         "query": query,
         "phone": phone,
         "limit": resolved_limit,
@@ -15463,11 +15662,11 @@ def _run_ask_tool_for_actor(
 
 def _default_ask_mcp_tool_lines() -> list[str]:
     return [
-        "- search_kb(query): searches personal KB (top 4), global KB (top 3), and accessible Workspace Wiki matches (top 4).",
+        "- search_kb(query): searches the unified knowledge collection with ACL scoping (global + your user docs + teams you belong to).",
         "  Note: when asked a question, use search_kb first to pinpoint which specific resources are relevant.",
         "- alert_filter_prompt(action?, prompt?): reads/updates your personal alert filtering prompt used before sending alerts.",
         "  Note: use action=append to add a preference like 'do not notify me about low-priority email alerts'.",
-        "- search_users(query?, phone?, limit?): searches global user_records by semantic similarity and/or exact phone (superuser only).",
+        "- search_users(query?, phone?, limit?): searches source=user_record entries in the unified knowledge collection by semantic similarity and/or exact phone (superuser only).",
         "- directory(query?, username?, email?, phone?, limit?): lookup users you can contact (team-scoped unless superuser).",
         "  Example: directory(username='jane').",
         "  Example: directory(query='Miami Dade on-call').",

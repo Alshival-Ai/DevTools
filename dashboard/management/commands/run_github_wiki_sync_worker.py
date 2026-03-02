@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import os
 import time
-from datetime import datetime, timezone
 
 from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth import get_user_model
@@ -13,7 +13,6 @@ from dashboard.github_wiki_sync_service import (
     resource_github_repository_names,
     sync_resource_wiki_with_github,
 )
-from dashboard.knowledge_store import upsert_resource_health_knowledge
 from dashboard.resources_store import list_resources
 
 
@@ -78,7 +77,22 @@ class Command(BaseCommand):
             if connected_ids:
                 queryset = queryset.filter(id__in=sorted(connected_ids))
             else:
-                queryset = queryset.none()
+                allow_public = str(
+                    os.getenv("ALSHIVAL_GITHUB_WIKI_ALLOW_ANON", "1") or "1"
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                has_fallback_token = any(
+                    str(os.getenv(name, "") or "").strip()
+                    for name in (
+                        "GITHUB_PERSONAL_ACCESS_TOKEN",
+                        "ALSHIVAL_GITHUB_ACCESS_TOKEN",
+                        "ASK_GITHUB_MCP_ACCESS_TOKEN",
+                    )
+                )
+                if allow_public or has_fallback_token:
+                    superusers = queryset.filter(is_superuser=True)
+                    queryset = superusers if superusers.exists() else queryset
+                else:
+                    queryset = queryset.none()
 
         queryset = queryset.order_by("id")
         if max_users > 0:
@@ -144,6 +158,8 @@ class Command(BaseCommand):
                         token_users=[user],
                         pull_remote=True,
                         push_changes=False,
+                        reindex_resource_kb=True,
+                        reindex_check_method="wiki_sync_worker",
                     )
                 except Exception as exc:
                     totals["failed"] += 1
@@ -156,28 +172,6 @@ class Command(BaseCommand):
                     continue
 
                 code = str(result.get("code") or "").strip().lower()
-                if code in {"ok", "partial_error"}:
-                    try:
-                        checked_at = str(getattr(resource, "last_checked_at", "") or "").strip()
-                        if not checked_at:
-                            checked_at = datetime.now(timezone.utc).isoformat()
-                        upsert_resource_health_knowledge(
-                            user=user,
-                            resource=resource,
-                            status=str(getattr(resource, "last_status", "") or "").strip().lower() or "unknown",
-                            checked_at=checked_at,
-                            error=str(getattr(resource, "last_error", "") or "").strip(),
-                            check_method="wiki_sync_worker",
-                            latency_ms=None,
-                            packet_loss_pct=None,
-                        )
-                    except Exception as exc:
-                        self.stderr.write(
-                            self.style.WARNING(
-                                f"[github-wiki-sync-worker] user={user.get_username()} resource={resource_uuid} "
-                                f"kb_reindex_error={exc}"
-                            )
-                        )
                 if code == "ok":
                     totals["synced"] += 1
                     continue
