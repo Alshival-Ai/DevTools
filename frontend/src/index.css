@@ -16,6 +16,11 @@
   --tw-border: 217 33% 25%;
   --tw-input: 217 33% 25%;
   --tw-ring: 217 91% 60%;
+  --react-card-bg: rgba(15, 23, 42, 0.7);
+  --react-card-border: rgba(148, 163, 184, 0.2);
+  --react-pill-bg: rgba(94, 234, 212, 0.2);
+  --react-pill-text: #5eead4;
+  --react-label-text: #9db0d5;
   --tw-radius: 0.875rem;
 }
 
@@ -33,16 +38,21 @@
   --tw-border: 214 32% 84%;
   --tw-input: 214 32% 84%;
   --tw-ring: 217 91% 48%;
+  --react-card-bg: rgba(255, 255, 255, 0.88);
+  --react-card-border: rgba(15, 23, 42, 0.12);
+  --react-pill-bg: rgba(37, 99, 235, 0.12);
+  --react-pill-text: #1d4ed8;
+  --react-label-text: #475569;
 }
 
 .react-card {
-  background: rgba(15, 23, 42, 0.7);
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: var(--react-card-bg);
+  border: 1px solid var(--react-card-border);
   border-radius: 20px;
   padding: 1.6rem;
   display: grid;
   gap: 0.8rem;
-  color: #e8eefc;
+  color: hsl(var(--tw-card-foreground));
 }
 
 .react-card-header {
@@ -52,8 +62,8 @@
 }
 
 .react-pill {
-  background: rgba(94, 234, 212, 0.2);
-  color: #5eead4;
+  background: var(--react-pill-bg);
+  color: var(--react-pill-text);
   padding: 0.2rem 0.6rem;
   border-radius: 999px;
   font-size: 0.75rem;
@@ -73,5 +83,5 @@
 
 .react-label {
   font-size: 0.8rem;
-  color: #9db0d5;
+  color: var(--react-label-text);
 }
