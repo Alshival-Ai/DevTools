@@ -1264,7 +1264,11 @@
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
-          addMessage('assistant', `Chat unavailable (${String(payload.error || 'request_failed')}).`);
+          const errorCode = String(payload.error || 'request_failed');
+          const statusCode = Number(payload.status_code || 0);
+          const detail = String(payload.detail || '').trim();
+          const detailSuffix = detail ? `: ${detail.slice(0, 180)}` : '';
+          addMessage('assistant', `Chat unavailable (${errorCode}${statusCode ? `:${statusCode}` : ''}${detailSuffix}).`);
           return;
         }
         addMessage('assistant', String(payload.reply || '').trim() || 'No response.');

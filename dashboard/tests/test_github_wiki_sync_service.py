@@ -176,3 +176,87 @@ class GithubWikiSyncServiceTests(SimpleTestCase):
             repository_full_name="Alshival-Ai/alshival",
             access_token="",
         )
+
+    def test_sync_indexes_repository_documents_when_enabled(self):
+        actor = self._actor()
+        resource = self._resource()
+        with patch(
+            "dashboard.github_wiki_sync_service.resource_github_repository_names",
+            return_value=["octocat/hello-world"],
+        ), patch(
+            "dashboard.github_wiki_sync_service._resolve_access_token_from_users",
+            return_value=(actor, "ghs_token", ""),
+        ), patch(
+            "dashboard.github_wiki_sync_service._github_repo_context",
+            return_value=({"wiki_enabled": "1"}, ""),
+        ), patch(
+            "dashboard.github_wiki_sync_service._sync_repository_documents_cache",
+            return_value={
+                "repository": "octocat/hello-world",
+                "indexed_files": 2,
+                "scanned_files": 4,
+                "errors": 0,
+                "error": "",
+                "cache_path": "/tmp/repository_docs.json",
+            },
+        ) as repo_docs_mock:
+            result = sync_resource_wiki_with_github(
+                actor=actor,
+                resource=resource,
+                token_users=[actor],
+                pull_remote=False,
+                push_changes=False,
+                reindex_resource_kb=False,
+                sync_repo_documents=True,
+            )
+
+        self.assertTrue(bool(result.get("ok")))
+        self.assertEqual(str(result.get("code") or ""), "ok")
+        repo_docs = result.get("repo_docs") if isinstance(result.get("repo_docs"), dict) else {}
+        self.assertEqual(int(repo_docs.get("indexed_files", 0) or 0), 2)
+        self.assertEqual(int(repo_docs.get("scanned_files", 0) or 0), 4)
+        repo_docs_mock.assert_called_once_with(
+            actor=actor,
+            resource_uuid="123e4567-e89b-12d3-a456-426614174000",
+            repository_full_name="octocat/hello-world",
+            access_token="ghs_token",
+        )
+
+    def test_sync_marks_partial_error_when_repo_doc_sync_fails(self):
+        actor = self._actor()
+        resource = self._resource()
+        with patch(
+            "dashboard.github_wiki_sync_service.resource_github_repository_names",
+            return_value=["octocat/hello-world"],
+        ), patch(
+            "dashboard.github_wiki_sync_service._resolve_access_token_from_users",
+            return_value=(actor, "ghs_token", ""),
+        ), patch(
+            "dashboard.github_wiki_sync_service._github_repo_context",
+            return_value=({"wiki_enabled": "1"}, ""),
+        ), patch(
+            "dashboard.github_wiki_sync_service._sync_repository_documents_cache",
+            return_value={
+                "repository": "octocat/hello-world",
+                "indexed_files": 0,
+                "scanned_files": 0,
+                "errors": 1,
+                "error": "repo_sync_failed",
+                "cache_path": "",
+            },
+        ):
+            result = sync_resource_wiki_with_github(
+                actor=actor,
+                resource=resource,
+                token_users=[actor],
+                pull_remote=False,
+                push_changes=False,
+                reindex_resource_kb=False,
+                sync_repo_documents=True,
+            )
+
+        self.assertTrue(bool(result.get("ok")))
+        self.assertEqual(str(result.get("code") or ""), "partial_error")
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        self.assertIn("repo:repo_sync_failed", errors)
+        self.assertIn("repo_errors:1", errors)

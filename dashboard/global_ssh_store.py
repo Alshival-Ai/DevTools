@@ -5,7 +5,7 @@ from pathlib import Path
 
 from django.conf import settings
 
-from .resources_store import _decrypt_key_text, _encrypt_key_text, _is_encrypted
+from .resources_store import _decrypt_key_text, _encrypt_key_text, _is_encrypted, _normalize_private_key_text
 
 
 @dataclass
@@ -57,6 +57,7 @@ def add_global_ssh_credential(
     team_name: str,
     private_key_text: str,
 ) -> int:
+    normalized_private_key = _normalize_private_key_text(private_key_text)
     conn = _connect_global_ssh_db()
     try:
         _ensure_global_ssh_schema(conn)
@@ -69,7 +70,7 @@ def add_global_ssh_credential(
             (
                 str(name or "").strip(),
                 str(team_name or "").strip(),
-                _encrypt_key_text(private_key_text),
+                _encrypt_key_text(normalized_private_key),
                 int(getattr(user, "id", 0) or 0),
             ),
         )

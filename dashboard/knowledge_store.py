@@ -176,7 +176,7 @@ def _ensure_chroma_path(path: Path) -> Path:
     return path
 
 
-def _get_chroma_collection(knowledge_path: Path):
+def _get_chroma_collection(knowledge_path: Path, *, collection_name: str = "resources"):
     _ensure_runtime_cache_dirs()
     try:
         import chromadb
@@ -184,7 +184,8 @@ def _get_chroma_collection(knowledge_path: Path):
         return None
     resolved_path = _ensure_chroma_path(knowledge_path)
     client = chromadb.PersistentClient(path=str(resolved_path))
-    return client.get_or_create_collection(name="resources")
+    resolved_collection = str(collection_name or "").strip() or "resources"
+    return client.get_or_create_collection(name=resolved_collection)
 
 
 def _build_chroma_metadata(
@@ -202,13 +203,48 @@ def _build_chroma_metadata(
     ssh_configured: bool,
     document_json: str,
     context_hash: str,
+    access_visibility: str = "",
+    access_user_id: int = 0,
+    access_team_ids: str = "",
 ) -> dict[str, Any]:
+    resolved_visibility = str(access_visibility or "").strip().lower()
+    if resolved_visibility not in {"global", "user", "team"}:
+        owner_scope_normalized = str(owner_scope or "").strip().lower()
+        if owner_scope_normalized == "global":
+            resolved_visibility = "global"
+        elif owner_scope_normalized == "team":
+            resolved_visibility = "team"
+        else:
+            resolved_visibility = "user"
+
+    resolved_access_user_id = int(access_user_id or 0)
+    if resolved_visibility in {"user", "team"} and resolved_access_user_id <= 0:
+        resolved_access_user_id = int(owner_user_id or 0)
+
+    access_team_values: set[int] = set()
+    for chunk in str(access_team_ids or "").split(","):
+        cleaned = str(chunk or "").strip()
+        if not cleaned:
+            continue
+        try:
+            team_id = int(cleaned)
+        except Exception:
+            continue
+        if team_id > 0:
+            access_team_values.add(team_id)
+    if resolved_visibility == "team" and int(owner_team_id or 0) > 0:
+        access_team_values.add(int(owner_team_id))
+    resolved_access_team_ids = ",".join(str(team_id) for team_id in sorted(access_team_values))
+
     return {
         "resource_uuid": resource_uuid,
         "collection_name": "resources",
         "owner_scope": owner_scope,
         "owner_user_id": owner_user_id,
         "owner_team_id": owner_team_id,
+        "access_visibility": resolved_visibility,
+        "access_user_id": int(resolved_access_user_id or 0),
+        "access_team_ids": resolved_access_team_ids,
         "status": str(status or "").strip(),
         "check_method": str(check_method or "").strip(),
         "checked_at": str(checked_at or "").strip(),
@@ -260,6 +296,9 @@ def _resource_wiki_page_documents(
     owner_scope: str,
     owner_user_id: int,
     owner_team_id: int,
+    access_visibility: str,
+    access_user_id: int,
+    access_team_ids: str,
     context_hash: str,
     page_payloads: list[dict[str, Any]],
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
@@ -299,12 +338,87 @@ def _resource_wiki_page_documents(
                 "owner_scope": str(owner_scope or "").strip(),
                 "owner_user_id": int(owner_user_id or 0),
                 "owner_team_id": int(owner_team_id or 0),
+                "access_visibility": str(access_visibility or "").strip().lower(),
+                "access_user_id": int(access_user_id or 0),
+                "access_team_ids": str(access_team_ids or "").strip(),
                 "name": resource_name,
                 "wiki_page_id": page_id,
                 "title": page_title,
                 "path": page_path,
                 "is_draft": bool(page.get("is_draft", False)),
                 "updated_at": page_updated_at,
+                "resource_context_hash": str(context_hash or "").strip(),
+            }
+        )
+    return ids, documents, metadatas
+
+
+def _resource_repository_documents(
+    *,
+    resource_uuid: str,
+    resource_name: str,
+    owner_scope: str,
+    owner_user_id: int,
+    owner_team_id: int,
+    access_visibility: str,
+    access_user_id: int,
+    access_team_ids: str,
+    context_hash: str,
+    repository_payload: dict[str, Any],
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    files = repository_payload.get("files") if isinstance(repository_payload.get("files"), list) else []
+    repository = str(repository_payload.get("repository") or "").strip()
+    synced_at = str(repository_payload.get("synced_at") or "").strip()
+
+    ids: list[str] = []
+    documents: list[str] = []
+    metadatas: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if not path or not content:
+            continue
+        dedupe_key = path.lower()
+        if dedupe_key in seen_paths:
+            continue
+        seen_paths.add(dedupe_key)
+
+        doc_hash = hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
+        record_id = f"{resource_uuid}:repo_doc:{doc_hash}"
+        repo_document = "\n".join(
+            part
+            for part in [
+                f"Resource: {resource_name}" if resource_name else "",
+                f"Repository: {repository}" if repository else "",
+                f"Repository Path: {path}",
+                content,
+            ]
+            if part
+        ).strip()
+        if not repo_document:
+            continue
+
+        ids.append(record_id)
+        documents.append(repo_document)
+        metadatas.append(
+            {
+                "source": "resource_repo_file",
+                "collection_name": "resources",
+                "resource_uuid": str(resource_uuid or "").strip(),
+                "owner_scope": str(owner_scope or "").strip(),
+                "owner_user_id": int(owner_user_id or 0),
+                "owner_team_id": int(owner_team_id or 0),
+                "access_visibility": str(access_visibility or "").strip().lower(),
+                "access_user_id": int(access_user_id or 0),
+                "access_team_ids": str(access_team_ids or "").strip(),
+                "name": resource_name,
+                "repository": repository,
+                "path": path,
+                "synced_at": synced_at,
+                "truncated": bool(item.get("truncated", False)),
                 "resource_context_hash": str(context_hash or "").strip(),
             }
         )
@@ -323,6 +437,7 @@ def _upsert_resource_records_to_collection(
     owner_team_id: int,
     context_hash: str,
     page_payloads: list[dict[str, Any]],
+    repository_payload: dict[str, Any],
 ) -> None:
     if collection is None:
         return
@@ -331,22 +446,42 @@ def _upsert_resource_records_to_collection(
     if not normalized_resource_uuid:
         return
 
+    access_visibility = str(resource_metadata.get("access_visibility") or "").strip().lower()
+    access_user_id = int(resource_metadata.get("access_user_id") or 0)
+    access_team_ids = str(resource_metadata.get("access_team_ids") or "").strip()
+
     wiki_ids, wiki_documents, wiki_metadatas = _resource_wiki_page_documents(
         resource_uuid=normalized_resource_uuid,
         resource_name=resource_name,
         owner_scope=owner_scope,
         owner_user_id=owner_user_id,
         owner_team_id=owner_team_id,
+        access_visibility=access_visibility,
+        access_user_id=access_user_id,
+        access_team_ids=access_team_ids,
         context_hash=context_hash,
         page_payloads=page_payloads,
     )
+    repo_ids, repo_documents, repo_metadatas = _resource_repository_documents(
+        resource_uuid=normalized_resource_uuid,
+        resource_name=resource_name,
+        owner_scope=owner_scope,
+        owner_user_id=owner_user_id,
+        owner_team_id=owner_team_id,
+        access_visibility=access_visibility,
+        access_user_id=access_user_id,
+        access_team_ids=access_team_ids,
+        context_hash=context_hash,
+        repository_payload=repository_payload,
+    )
 
-    upsert_ids = [normalized_resource_uuid] + list(wiki_ids)
-    upsert_docs = [document_text or resource_name or normalized_resource_uuid] + list(wiki_documents)
-    upsert_metas = [dict(resource_metadata or {})] + list(wiki_metadatas)
+    upsert_ids = [normalized_resource_uuid] + list(wiki_ids) + list(repo_ids)
+    upsert_docs = [document_text or resource_name or normalized_resource_uuid] + list(wiki_documents) + list(repo_documents)
+    upsert_metas = [dict(resource_metadata or {})] + list(wiki_metadatas) + list(repo_metadatas)
     collection.upsert(ids=upsert_ids, documents=upsert_docs, metadatas=upsert_metas)
 
     expected_wiki_ids = set(wiki_ids)
+    expected_repo_ids = set(repo_ids)
     try:
         existing_rows = collection.get(
             where={"resource_uuid": normalized_resource_uuid},
@@ -361,11 +496,66 @@ def _upsert_resource_records_to_collection(
         if str(item_id or "").startswith(f"{normalized_resource_uuid}:wiki_page:")
         and item_id not in expected_wiki_ids
     ]
-    if stale_wiki_ids:
+    stale_repo_ids = [
+        item_id
+        for item_id in existing_ids
+        if str(item_id or "").startswith(f"{normalized_resource_uuid}:repo_doc:")
+        and item_id not in expected_repo_ids
+    ]
+    stale_ids = list(stale_wiki_ids) + list(stale_repo_ids)
+    if stale_ids:
         try:
-            collection.delete(ids=stale_wiki_ids)
+            collection.delete(ids=stale_ids)
         except Exception:
             pass
+
+
+def _resource_repository_docs_payload(owner_context: dict[str, Any], resource_uuid: str) -> dict[str, Any]:
+    resource_dir_raw = owner_context.get("resource_dir")
+    if resource_dir_raw:
+        resource_dir = Path(resource_dir_raw)
+    else:
+        owner_root = Path(owner_context.get("owner_root") or ".")
+        resource_dir = owner_root / "resources" / str(resource_uuid or "").strip().lower()
+
+    cache_path = resource_dir / "repository_docs.json"
+    if not cache_path.exists():
+        return {"repository": "", "synced_at": "", "files": []}
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"repository": "", "synced_at": "", "files": []}
+
+    if not isinstance(payload, dict):
+        return {"repository": "", "synced_at": "", "files": []}
+
+    files = payload.get("files")
+    if not isinstance(files, list):
+        files = []
+
+    normalized_files: list[dict[str, Any]] = []
+    for item in files[:400]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if not path or not content:
+            continue
+        normalized_files.append(
+            {
+                "path": path,
+                "title": str(item.get("title") or "").strip() or path.rsplit("/", 1)[-1],
+                "content": content,
+                "truncated": bool(item.get("truncated", False)),
+                "size_chars": int(item.get("size_chars", len(content)) or len(content)),
+            }
+        )
+
+    return {
+        "repository": str(payload.get("repository") or "").strip(),
+        "synced_at": str(payload.get("synced_at") or "").strip(),
+        "files": normalized_files,
+    }
 
 
 def _build_document(resource, owner_context: dict[str, Any], check_payload: dict[str, Any]) -> tuple[dict[str, Any], str, bool]:
@@ -447,6 +637,8 @@ def _build_document(resource, owner_context: dict[str, Any], check_payload: dict
                 }
             )
 
+    repository_docs_payload = _resource_repository_docs_payload(owner_context, resource_uuid)
+
     document: dict[str, Any] = {
         "resource": {
             "id": int(getattr(resource, "id", 0) or 0),
@@ -483,6 +675,7 @@ def _build_document(resource, owner_context: dict[str, Any], check_payload: dict
         "notes_thread": notes_payload,
         "assigned_agenda_tasks": agenda_tasks_payload,
         "resource_wiki_pages": wiki_pages_payload,
+        "repository_documents": repository_docs_payload,
         "latest_health": {
             "status": str(check_payload.get("status") or ""),
             "checked_at": str(check_payload.get("checked_at") or ""),
@@ -531,6 +724,16 @@ def _build_document(resource, owner_context: dict[str, Any], check_payload: dict
             doc_text_parts.append(page_path)
         if page_body:
             doc_text_parts.append(page_body[:2000])
+    repository_docs_files = repository_docs_payload.get("files") if isinstance(repository_docs_payload.get("files"), list) else []
+    for repo_file in repository_docs_files[:60]:
+        if not isinstance(repo_file, dict):
+            continue
+        repo_path = str(repo_file.get("path") or "").strip()
+        repo_content = str(repo_file.get("content") or "").strip()
+        if repo_path:
+            doc_text_parts.append(repo_path)
+        if repo_content:
+            doc_text_parts.append(repo_content[:1600])
     document_text = " | ".join(part for part in doc_text_parts if str(part).strip())
     return document, document_text, ssh_configured
 
@@ -702,6 +905,8 @@ def upsert_resource_health_knowledge(
             "owner_user_id": owner_user_id,
             "owner_team_id": owner_team_id,
             "owner_user": owner_user,
+            "owner_root": owner_root,
+            "resource_dir": owner_context.get("resource_dir"),
         },
         {
             "status": status,
@@ -721,6 +926,23 @@ def upsert_resource_health_knowledge(
     )
     skip_chroma_upsert = bool(existing_context_hash and existing_context_hash == context_hash)
 
+    team_ids_to_sync: set[int] = set()
+    if owner_scope == "team" and owner_team_id > 0:
+        team_ids_to_sync.add(int(owner_team_id))
+    if owner_user_id > 0:
+        shared_team_ids = (
+            ResourceTeamShare.objects.filter(owner_id=owner_user_id, resource_uuid=resource_uuid)
+            .values_list("team_id", flat=True)
+        )
+        for team_id in shared_team_ids:
+            resolved_team_id = int(team_id or 0)
+            if resolved_team_id > 0:
+                team_ids_to_sync.add(resolved_team_id)
+
+    access_visibility = "global" if owner_scope == "global" else ("team" if team_ids_to_sync else "user")
+    access_team_ids = ",".join(str(team_id) for team_id in sorted(team_ids_to_sync))
+    access_user_id = int(owner_user_id or 0) if access_visibility in {"user", "team"} else 0
+
     metadata = _build_chroma_metadata(
         resource_uuid=resource_uuid,
         owner_scope=owner_scope,
@@ -735,12 +957,18 @@ def upsert_resource_health_knowledge(
         ssh_configured=ssh_configured,
         document_json=document_json,
         context_hash=context_hash,
+        access_visibility=access_visibility,
+        access_user_id=access_user_id,
+        access_team_ids=access_team_ids,
     )
     if not skip_chroma_upsert:
         resource_name = str(getattr(resource, "name", "") or resource_uuid).strip() or resource_uuid
         wiki_payloads = document.get("resource_wiki_pages")
         if not isinstance(wiki_payloads, list):
             wiki_payloads = []
+        repository_payload = document.get("repository_documents")
+        if not isinstance(repository_payload, dict):
+            repository_payload = {"repository": "", "synced_at": "", "files": []}
 
         # Always keep a resource-scoped KB copy under the resource package directory.
         resource_dir = Path(owner_context.get("resource_dir") or owner_root / "resources" / resource_uuid)
@@ -759,20 +987,32 @@ def upsert_resource_health_knowledge(
                 owner_team_id=owner_team_id,
                 context_hash=context_hash,
                 page_payloads=wiki_payloads,
+                repository_payload=repository_payload,
             )
 
-        team_ids_to_sync: set[int] = set()
-        if owner_scope == "team" and owner_team_id > 0:
-            team_ids_to_sync.add(int(owner_team_id))
-        if owner_user_id > 0:
-            shared_team_ids = (
-                ResourceTeamShare.objects.filter(owner_id=owner_user_id, resource_uuid=resource_uuid)
-                .values_list("team_id", flat=True)
+        # Unified global KB is the source queried by resource_kb/search_kb tools.
+        unified_root = Path(
+            getattr(settings, "GLOBAL_DATA_ROOT", Path(settings.BASE_DIR) / "var" / "global_data")
+        )
+        unified_root.mkdir(parents=True, exist_ok=True)
+        unified_kb_path = unified_root / "knowledge.db"
+        unified_collection = _get_chroma_collection(unified_kb_path, collection_name="knowledge")
+        if unified_collection is not None:
+            unified_metadata = dict(metadata)
+            unified_metadata["collection_name"] = "knowledge"
+            _upsert_resource_records_to_collection(
+                collection=unified_collection,
+                resource_uuid=resource_uuid,
+                resource_name=resource_name,
+                document_text=document_text,
+                resource_metadata=unified_metadata,
+                owner_scope=owner_scope,
+                owner_user_id=owner_user_id,
+                owner_team_id=owner_team_id,
+                context_hash=context_hash,
+                page_payloads=wiki_payloads,
+                repository_payload=repository_payload,
             )
-            for team_id in shared_team_ids:
-                resolved_team_id = int(team_id or 0)
-                if resolved_team_id > 0:
-                    team_ids_to_sync.add(resolved_team_id)
 
         if team_ids_to_sync:
             User = get_user_model()
@@ -797,6 +1037,7 @@ def upsert_resource_health_knowledge(
                     owner_team_id=owner_team_id,
                     context_hash=context_hash,
                     page_payloads=wiki_payloads,
+                    repository_payload=repository_payload,
                 )
 
         if owner_scope != "team":
@@ -813,6 +1054,7 @@ def upsert_resource_health_knowledge(
                     owner_team_id=owner_team_id,
                     context_hash=context_hash,
                     page_payloads=wiki_payloads,
+                    repository_payload=repository_payload,
                 )
 
     _upsert_owner_snapshot(

@@ -230,10 +230,15 @@ def _is_encrypted(value: str) -> bool:
     return value.startswith(_SSH_KEY_PREFIX)
 
 
-def _encrypt_key_text(value: str) -> str:
-    normalized = value.replace("\r", "").strip()
-    if normalized:
+def _normalize_private_key_text(value: str) -> str:
+    normalized = str(value or "").replace("\r", "").strip()
+    if normalized and not normalized.endswith("\n"):
         normalized = f"{normalized}\n"
+    return normalized
+
+
+def _encrypt_key_text(value: str) -> str:
+    normalized = _normalize_private_key_text(value)
     fernet = _fernet_instances()[0]
     token = fernet.encrypt(normalized.encode("utf-8")).decode("utf-8")
     return f"{_SSH_KEY_PREFIX}{token}"
@@ -1666,7 +1671,8 @@ def add_resource(
     conn = _connect(user)
     try:
         _ensure_schema(conn)
-        resolved_key_text = _encrypt_key_text(ssh_key_text) if ssh_key_text else ''
+        normalized_ssh_key_text = _normalize_private_key_text(ssh_key_text) if ssh_key_text else ''
+        resolved_key_text = _encrypt_key_text(normalized_ssh_key_text) if normalized_ssh_key_text else ''
         metadata_payload = json.dumps(resource_metadata or {}, separators=(",", ":"))
         new_uuid = str(uuid.uuid4())
         cursor = conn.execute(
@@ -1756,7 +1762,8 @@ def update_resource(
             else:
                 resolved_key_text = _rotate_encrypted(existing_key_text)
         else:
-            resolved_key_text = _encrypt_key_text(ssh_key_text)
+            normalized_ssh_key_text = _normalize_private_key_text(ssh_key_text)
+            resolved_key_text = _encrypt_key_text(normalized_ssh_key_text) if normalized_ssh_key_text else ''
         metadata_payload = json.dumps(resource_metadata or {}, separators=(",", ":"))
         conn.execute(
             """
@@ -5279,7 +5286,8 @@ def add_ssh_credential(
     private_key_text: str,
 ) -> str:
     resolved_scope = scope if scope in {"account", "team"} else "account"
-    encrypted_key = _encrypt_key_text(private_key_text)
+    normalized_private_key = _normalize_private_key_text(private_key_text)
+    encrypted_key = _encrypt_key_text(normalized_private_key)
 
     if resolved_scope == "team":
         resolved_teams = list(

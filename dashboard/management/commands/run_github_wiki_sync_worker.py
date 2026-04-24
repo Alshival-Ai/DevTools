@@ -160,6 +160,7 @@ class Command(BaseCommand):
                         push_changes=False,
                         reindex_resource_kb=True,
                         reindex_check_method="wiki_sync_worker",
+                        sync_repo_documents=True,
                     )
                 except Exception as exc:
                     totals["failed"] += 1

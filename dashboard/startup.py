@@ -286,6 +286,7 @@ def _sync_default_global_resource_wiki(owner, resource_uuid: str) -> None:
         push_changes=False,
         reindex_resource_kb=True,
         reindex_check_method="wiki_sync_startup",
+        sync_repo_documents=True,
     )
     code = str(result.get("code") or "").strip().lower()
     if code in {"ok", "partial_error"}:

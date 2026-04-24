@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import shutil
@@ -23,6 +24,71 @@ _GITHUB_API_BASE_URL = "https://api.github.com"
 _GITHUB_API_TIMEOUT_SECONDS = 20
 _WIKI_SCOPE_RESOURCE = WikiPage.SCOPE_RESOURCE
 _GITHUB_REPO_PART_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_REPO_DOC_SKIP_DIRS = {
+    ".git",
+    ".idea",
+    ".vscode",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    ".next",
+    ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+}
+_REPO_DOC_ALLOWED_EXTENSIONS = {
+    ".md",
+    ".mdx",
+    ".txt",
+    ".rst",
+    ".adoc",
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".swift",
+    ".rb",
+    ".php",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cs",
+    ".sql",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".yml",
+    ".yaml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".json",
+    ".xml",
+    ".html",
+    ".css",
+    ".scss",
+    ".dockerfile",
+}
+_REPO_DOC_ALLOWED_BASENAMES = {
+    "readme",
+    "license",
+    "dockerfile",
+    "makefile",
+    "justfile",
+    ".env.example",
+}
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -30,6 +96,17 @@ def _env_bool(name: str, default: bool) -> bool:
     if not raw:
         return bool(default)
     return raw in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        value = int(raw)
+    except Exception:
+        return int(default)
+    return max(int(minimum), min(int(maximum), value))
 
 
 def _allow_anonymous_github_wiki_sync() -> bool:
@@ -279,6 +356,10 @@ def _wiki_remote_url(repository_full_name: str) -> str:
     return f"https://github.com/{repository_full_name}.wiki.git"
 
 
+def _repository_remote_url(repository_full_name: str) -> str:
+    return f"https://github.com/{repository_full_name}.git"
+
+
 def _wiki_worktree_dir(*, actor, resource_uuid: str, repository_full_name: str) -> Path:
     owner_context = get_resource_owner_context(actor, resource_uuid)
     resource_dir = Path(owner_context.get("resource_dir") or "")
@@ -303,6 +384,40 @@ def _wiki_worktree_dir(*, actor, resource_uuid: str, repository_full_name: str) 
     owner_slug = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(owner_context.get("owner_slug") or "owner").strip().lower())
     safe_resource = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(resource_uuid or "unknown-resource").strip().lower())
     return fallback_root / owner_slug / safe_resource / safe_repo
+
+
+def _repo_worktree_dir(*, actor, resource_uuid: str, repository_full_name: str) -> Path:
+    owner_context = get_resource_owner_context(actor, resource_uuid)
+    resource_dir = Path(owner_context.get("resource_dir") or "")
+    if not resource_dir:
+        owner_root = Path(owner_context.get("owner_root") or ".")
+        resource_dir = owner_root / "resources" / (resource_uuid or "unknown-resource")
+    safe_repo = re.sub(r"[^a-zA-Z0-9_.-]+", "_", repository_full_name.strip().lower())
+    safe_repo = f"{safe_repo}-{os.getuid()}"
+    preferred_root = resource_dir / ".repo-sync"
+    if resource_dir.exists() and os.access(str(resource_dir), os.W_OK | os.X_OK):
+        preferred_root_writable = (
+            os.access(str(preferred_root), os.W_OK | os.X_OK)
+            if preferred_root.exists()
+            else True
+        )
+        if preferred_root_writable:
+            return preferred_root / safe_repo
+
+    fallback_root = Path(os.environ.get("ALSHIVAL_REPO_SYNC_ROOT", "/tmp/alshival-repo-sync"))
+    owner_slug = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(owner_context.get("owner_slug") or "owner").strip().lower())
+    safe_resource = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(resource_uuid or "unknown-resource").strip().lower())
+    return fallback_root / owner_slug / safe_resource / safe_repo
+
+
+def _repository_docs_cache_path(*, actor, resource_uuid: str) -> Path:
+    owner_context = get_resource_owner_context(actor, resource_uuid)
+    resource_dir = Path(owner_context.get("resource_dir") or "")
+    if not resource_dir:
+        owner_root = Path(owner_context.get("owner_root") or ".")
+        resource_dir = owner_root / "resources" / (resource_uuid or "unknown-resource")
+    resource_dir.mkdir(parents=True, exist_ok=True)
+    return resource_dir / "repository_docs.json"
 
 
 def _git_binary_available() -> bool:
@@ -503,6 +618,100 @@ def _ensure_wiki_git_worktree(
     return worktree, branch, ""
 
 
+def _ensure_repository_git_worktree(
+    *,
+    actor,
+    resource_uuid: str,
+    repository_full_name: str,
+    access_token: str,
+) -> tuple[Path | None, str]:
+    if not _git_binary_available():
+        return None, "git_unavailable"
+
+    worktree = _repo_worktree_dir(
+        actor=actor,
+        resource_uuid=resource_uuid,
+        repository_full_name=repository_full_name,
+    )
+    remote_url = _repository_remote_url(repository_full_name)
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+
+    if not (worktree / ".git").exists():
+        if worktree.exists():
+            try:
+                shutil.rmtree(worktree)
+            except Exception:
+                return None, "repo_worktree_cleanup_failed"
+        code, stdout, stderr = _run_git(
+            args=["clone", "--quiet", remote_url, str(worktree)],
+            access_token=access_token,
+            timeout=150,
+        )
+        if code != 0:
+            detail = _sanitize_git_detail(stderr or stdout)
+            classified = _classify_git_error(detail)
+            if classified:
+                return None, classified
+            return None, f"repo_clone_failed:{detail or 'unknown'}"
+
+    set_url_code, set_url_stdout, set_url_stderr = _run_git(
+        args=["remote", "set-url", "origin", remote_url],
+        cwd=worktree,
+    )
+    if set_url_code != 0:
+        detail = _sanitize_git_detail(set_url_stderr or set_url_stdout)
+        return None, f"repo_remote_set_url_failed:{detail or 'unknown'}"
+
+    fetch_code, fetch_stdout, fetch_stderr = _run_git(
+        args=["fetch", "--prune", "origin"],
+        cwd=worktree,
+        access_token=access_token,
+    )
+    if fetch_code != 0:
+        detail = _sanitize_git_detail(fetch_stderr or fetch_stdout)
+        classified = _classify_git_error(detail)
+        if classified:
+            return None, classified
+        return None, f"repo_fetch_failed:{detail or 'unknown'}"
+
+    branch = _current_git_branch(worktree)
+    if branch:
+        checkout_code, checkout_stdout, checkout_stderr = _run_git(
+            args=["checkout", "-q", branch],
+            cwd=worktree,
+        )
+        if checkout_code != 0:
+            detail = _sanitize_git_detail(checkout_stderr or checkout_stdout)
+            return None, f"repo_checkout_failed:{detail or branch}"
+
+        pull_code, pull_stdout, pull_stderr = _run_git(
+            args=["pull", "--ff-only", "origin", branch],
+            cwd=worktree,
+            access_token=access_token,
+        )
+        if pull_code != 0:
+            detail = _sanitize_git_detail(pull_stderr or pull_stdout)
+            classified = _classify_git_error(detail)
+            if classified:
+                return None, classified
+            return None, f"repo_pull_failed:{detail or branch}"
+    else:
+        pull_code, pull_stdout, pull_stderr = _run_git(
+            args=["pull", "--ff-only"],
+            cwd=worktree,
+            access_token=access_token,
+        )
+        if pull_code != 0:
+            detail = _sanitize_git_detail(pull_stderr or pull_stdout)
+            if "no such ref was fetched" not in str(detail).lower():
+                classified = _classify_git_error(detail)
+                if classified:
+                    return None, classified
+                return None, f"repo_pull_failed:{detail or 'unknown'}"
+
+    return worktree, ""
+
+
 def _list_wiki_markdown_files(worktree: Path) -> list[str]:
     files: list[str] = []
     for path in worktree.rglob("*.md"):
@@ -517,6 +726,158 @@ def _list_wiki_markdown_files(worktree: Path) -> list[str]:
         files.append(rel)
     files.sort()
     return files
+
+
+def _repo_file_priority(path_value: str) -> tuple[int, str]:
+    lowered = str(path_value or "").strip().lower()
+    basename = lowered.rsplit("/", 1)[-1]
+    if basename.startswith("readme"):
+        return 0, lowered
+    if lowered.startswith("docs/"):
+        return 1, lowered
+    if "/docs/" in lowered:
+        return 2, lowered
+    return 3, lowered
+
+
+def _should_index_repo_file(relative_path: Path) -> bool:
+    parts = [str(part or "").strip().lower() for part in relative_path.parts]
+    if any(part in _REPO_DOC_SKIP_DIRS for part in parts[:-1]):
+        return False
+
+    name = str(relative_path.name or "").strip().lower()
+    if not name:
+        return False
+
+    if name in _REPO_DOC_ALLOWED_BASENAMES:
+        return True
+
+    stem = name.split(".", 1)[0]
+    if stem in _REPO_DOC_ALLOWED_BASENAMES:
+        return True
+
+    suffix = str(relative_path.suffix or "").strip().lower()
+    if suffix in _REPO_DOC_ALLOWED_EXTENSIONS:
+        return True
+    return False
+
+
+def _extract_repo_documents_from_worktree(worktree: Path) -> tuple[list[dict[str, Any]], int]:
+    max_files = _env_int("ALSHIVAL_REPO_DOC_MAX_FILES", 220, minimum=1, maximum=2000)
+    max_chars_per_file = _env_int("ALSHIVAL_REPO_DOC_MAX_CHARS_PER_FILE", 22000, minimum=500, maximum=120000)
+    max_total_chars = _env_int("ALSHIVAL_REPO_DOC_MAX_TOTAL_CHARS", 1_600_000, minimum=50_000, maximum=8_000_000)
+
+    candidates: list[tuple[tuple[int, str], str, Path]] = []
+    for candidate in worktree.rglob("*"):
+        if not candidate.is_file():
+            continue
+        if ".git" in candidate.parts:
+            continue
+        try:
+            relative = candidate.relative_to(worktree)
+        except Exception:
+            continue
+        if not _should_index_repo_file(relative):
+            continue
+        rel_path = relative.as_posix().strip()
+        if not rel_path:
+            continue
+        candidates.append((_repo_file_priority(rel_path), rel_path, candidate))
+
+    candidates.sort(key=lambda item: item[0])
+    scanned_files = len(candidates)
+    documents: list[dict[str, Any]] = []
+    consumed_chars = 0
+    for _priority, rel_path, absolute_path in candidates:
+        if len(documents) >= max_files:
+            break
+        remaining_chars = max_total_chars - consumed_chars
+        if remaining_chars <= 0:
+            break
+
+        try:
+            raw_bytes = absolute_path.read_bytes()
+        except Exception:
+            continue
+        if b"\x00" in raw_bytes[:4096]:
+            continue
+        text = raw_bytes.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            continue
+
+        truncated = False
+        if len(text) > max_chars_per_file:
+            text = text[:max_chars_per_file]
+            truncated = True
+
+        if len(text) > remaining_chars:
+            text = text[:remaining_chars]
+            truncated = True
+        text = text.strip()
+        if not text:
+            continue
+
+        consumed_chars += len(text)
+        documents.append(
+            {
+                "path": rel_path,
+                "title": rel_path.rsplit("/", 1)[-1],
+                "content": text,
+                "truncated": bool(truncated),
+                "size_chars": len(text),
+            }
+        )
+
+    return documents, scanned_files
+
+
+def _sync_repository_documents_cache(
+    *,
+    actor,
+    resource_uuid: str,
+    repository_full_name: str,
+    access_token: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "repository": repository_full_name,
+        "indexed_files": 0,
+        "scanned_files": 0,
+        "errors": 0,
+        "error": "",
+        "cache_path": "",
+    }
+
+    worktree, worktree_error = _ensure_repository_git_worktree(
+        actor=actor,
+        resource_uuid=resource_uuid,
+        repository_full_name=repository_full_name,
+        access_token=access_token,
+    )
+    if worktree is None:
+        result["errors"] = 1
+        result["error"] = worktree_error or "repo_sync_failed"
+        return result
+
+    documents, scanned_files = _extract_repo_documents_from_worktree(worktree)
+    result["indexed_files"] = len(documents)
+    result["scanned_files"] = int(scanned_files)
+
+    cache_path = _repository_docs_cache_path(actor=actor, resource_uuid=resource_uuid)
+    result["cache_path"] = str(cache_path)
+    payload = {
+        "repository": repository_full_name,
+        "synced_at": datetime.now(timezone.utc).isoformat(),
+        "files": documents,
+    }
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        result["errors"] = 1
+        result["error"] = f"repo_cache_write_failed:{exc}"
+        return result
+
+    return result
 
 
 def _pull_remote_wiki_into_local(
@@ -865,6 +1226,7 @@ def sync_resource_wiki_with_github(
     deleted_paths: Iterable[str] | None = None,
     reindex_resource_kb: bool = False,
     reindex_check_method: str = "wiki_sync",
+    sync_repo_documents: bool = False,
 ) -> dict[str, Any]:
     resource_uuid = _normalize_resource_uuid(getattr(resource, "resource_uuid", ""))
     resource_name = str(getattr(resource, "name", "") or "").strip() or resource_uuid
@@ -892,6 +1254,14 @@ def sync_resource_wiki_with_github(
             "missing_pages": 0,
             "errors": 0,
             "error": "",
+        },
+        "repo_docs": {
+            "repository": "",
+            "indexed_files": 0,
+            "scanned_files": 0,
+            "errors": 0,
+            "error": "",
+            "cache_path": "",
         },
         "kb_reindexed": False,
         "kb_reindex_error": "",
@@ -959,12 +1329,23 @@ def sync_resource_wiki_with_github(
         )
         result["push"] = push_result
 
+    if sync_repo_documents:
+        repo_docs_result = _sync_repository_documents_cache(
+            actor=resolved_actor,
+            resource_uuid=resource_uuid,
+            repository_full_name=primary_repository,
+            access_token=access_token,
+        )
+        result["repo_docs"] = repo_docs_result
+
     pull_errors = int(result["pull"].get("errors", 0))
     push_errors = int(result["push"].get("errors", 0))
-    if pull_errors or push_errors:
+    repo_errors = int(result["repo_docs"].get("errors", 0))
+    if pull_errors or push_errors or repo_errors:
         result["code"] = "partial_error"
         pull_error_reason = str(result["pull"].get("error") or "").strip()
         push_error_reason = str(result["push"].get("error") or "").strip()
+        repo_error_reason = str(result["repo_docs"].get("error") or "").strip()
         if pull_errors:
             if pull_error_reason:
                 result["errors"].append(f"pull:{pull_error_reason}")
@@ -973,6 +1354,10 @@ def sync_resource_wiki_with_github(
             if push_error_reason:
                 result["errors"].append(f"push:{push_error_reason}")
             result["errors"].append(f"push_errors:{push_errors}")
+        if repo_errors:
+            if repo_error_reason:
+                result["errors"].append(f"repo:{repo_error_reason}")
+            result["errors"].append(f"repo_errors:{repo_errors}")
         result["ok"] = True
     else:
         result["ok"] = True

@@ -318,6 +318,10 @@
             <td>{{ item.created_at }}</td>
             <td class="row-actions">
               {% if item.is_global and request.user.is_superuser %}
+              <form method="post" action="{% url 'download_global_ssh_credential_item' item.id %}" class="inline-form">
+                {% csrf_token %}
+                <button class="icon-btn icon-btn-small" type="submit" title="Download private key">DL</button>
+              </form>
               <form method="post" action="{% url 'delete_global_ssh_credential_item' item.id %}" class="inline-form" onsubmit="return confirm('Delete this SSH key?');">
                 {% csrf_token %}
                 <button class="icon-btn icon-btn-small danger" type="submit">🗑</button>
@@ -325,6 +329,10 @@
               {% elif item.is_global %}
                 <span class="text-muted small">Managed by admin</span>
               {% else %}
+              <form method="post" action="{% url 'download_ssh_credential_item' item.id %}" class="inline-form">
+                {% csrf_token %}
+                <button class="icon-btn icon-btn-small" type="submit" title="Download private key">DL</button>
+              </form>
               <form method="post" action="{% url 'delete_ssh_credential_item' item.id %}" class="inline-form" onsubmit="return confirm('Delete this SSH key?');">
                 {% csrf_token %}
                 <button class="icon-btn icon-btn-small danger" type="submit">🗑</button>

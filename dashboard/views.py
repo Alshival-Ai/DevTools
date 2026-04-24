@@ -45,6 +45,7 @@ from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from .global_ssh_store import (
     add_global_ssh_credential,
     delete_global_ssh_credential,
+    get_global_ssh_private_key,
     list_global_ssh_credentials,
 )
 from .email_branding import build_alshival_branded_email, build_alshival_branded_email_from_html
@@ -89,6 +90,7 @@ from .resources_store import (
     get_reminder,
     get_resource_note_attachment,
     get_resource,
+    get_ssh_credential_private_key,
     get_team_chat_attachment,
     get_user_alert_filter_prompt,
     get_user_calendar_notification_settings,
@@ -112,6 +114,7 @@ from .resources_store import (
     list_resource_logs,
     list_resources,
     list_ssh_credentials,
+    _normalize_private_key_text,
     _global_owner_dir,
     _user_db_path,
     _user_knowledge_db_path,
@@ -1757,6 +1760,38 @@ def _wiki_accessible_queryset(user, *, scope: str, resource_uuid: str = "", team
             draft_filter
             | (published_filter & Q(team_access__id__in=team_ids))
         ).distinct()
+    if not team_ids:
+        return qs.filter(draft_filter | (published_filter & Q(team_access__isnull=True))).distinct()
+    return qs.filter(
+        draft_filter
+        | (published_filter & (Q(team_access__isnull=True) | Q(team_access__id__in=team_ids)))
+    ).distinct()
+
+
+def _wiki_accessible_resource_queryset(user):
+    qs = WikiPage.objects.filter(scope=_WIKI_SCOPE_RESOURCE).exclude(resource_uuid="").prefetch_related("team_access")
+    if user.is_superuser:
+        return qs.distinct()
+
+    candidate_uuids = sorted(
+        {
+            _normalize_resource_uuid(value)
+            for value in qs.values_list("resource_uuid", flat=True).distinct()
+            if _normalize_resource_uuid(value)
+        }
+    )
+    accessible_uuids = [
+        value
+        for value in candidate_uuids
+        if user_can_access_resource(user=user, resource_uuid=value)
+    ]
+    if not accessible_uuids:
+        return WikiPage.objects.none()
+
+    qs = qs.filter(resource_uuid__in=accessible_uuids)
+    draft_filter = Q(is_draft=True, created_by_id=user.id)
+    published_filter = Q(is_draft=False)
+    team_ids = list(user.groups.values_list("id", flat=True))
     if not team_ids:
         return qs.filter(draft_filter | (published_filter & Q(team_access__isnull=True))).distinct()
     return qs.filter(
@@ -5169,19 +5204,53 @@ def _resource_wiki_sync_result_message(result: dict[str, object]) -> str:
     repository = str(result.get("repository") or "").strip()
     pull = result.get("pull") if isinstance(result.get("pull"), dict) else {}
     push = result.get("push") if isinstance(result.get("push"), dict) else {}
+    repo_docs = result.get("repo_docs") if isinstance(result.get("repo_docs"), dict) else {}
 
     pull_created = int(pull.get("created", 0) or 0)
     pull_updated = int(pull.get("updated", 0) or 0)
     pull_unchanged = int(pull.get("unchanged", 0) or 0)
     push_upserted = int(push.get("upserted", 0) or 0)
     push_deleted = int(push.get("deleted", 0) or 0)
+    repo_indexed = int(repo_docs.get("indexed_files", 0) or 0)
+    repo_scanned = int(repo_docs.get("scanned_files", 0) or 0)
 
     parts = [
         f"GitHub wiki sync ({repository or 'repository'})",
         f"pull: +{pull_created} created, {pull_updated} updated, {pull_unchanged} unchanged",
         f"push: {push_upserted} upserted, {push_deleted} deleted",
+        f"repo docs: {repo_indexed} indexed ({repo_scanned} scanned)",
     ]
     return " | ".join(parts)
+
+
+def _auto_sync_resource_github_content_after_save(*, request, resource) -> None:
+    repositories = _resource_github_repository_names(resource)
+    if not repositories:
+        return
+
+    sync_result = sync_resource_wiki_with_github(
+        actor=request.user,
+        resource=resource,
+        token_users=[request.user],
+        pull_remote=True,
+        push_changes=False,
+        changed_page_ids=None,
+        reindex_resource_kb=True,
+        reindex_check_method="github_repo_sync",
+        sync_repo_documents=True,
+    )
+    sync_code = str(sync_result.get("code") or "").strip().lower()
+    if sync_code == "ok":
+        return
+
+    sync_errors = sync_result.get("errors") if isinstance(sync_result.get("errors"), list) else []
+    sync_summary = _resource_wiki_sync_result_message(sync_result)
+    detail = "; ".join(str(item) for item in sync_errors[:3]) if sync_errors else ""
+    message_text = f"{sync_summary}{f' ({detail})' if detail else ''}"
+    if sync_code in {"missing_github_repositories", "missing_github_token"}:
+        messages.warning(request, message_text)
+    else:
+        messages.warning(request, f"Saved resource. {message_text}")
 
 
 def _redirect_resource_wiki_editor(
@@ -5335,7 +5404,7 @@ def _can_manage_owner_resource(*, actor, owner) -> bool:
 def _resolve_ssh_payload(request, *, default_key_name: str = "") -> dict[str, str | bool]:
     ssh_key_name = (request.POST.get('ssh_key_name') or '').strip()
     ssh_username = (request.POST.get('ssh_username') or '').strip()
-    ssh_key_text = (request.POST.get('ssh_key_text') or '').strip()
+    ssh_key_text = _normalize_private_key_text(request.POST.get('ssh_key_text') or '')
     ssh_port = (request.POST.get('ssh_port') or '').strip()
     ssh_key_file = request.FILES.get('ssh_key_file')
     ssh_mode = (request.POST.get('ssh_mode') or 'inline').strip()
@@ -5400,7 +5469,9 @@ def _resolve_ssh_payload(request, *, default_key_name: str = "") -> dict[str, st
         ssh_credential_id = ''
         ssh_credential_scope = ''
         if ssh_key_file:
-            ssh_key_text = ssh_key_file.read().decode('utf-8', errors='ignore').strip()
+            ssh_key_text = _normalize_private_key_text(
+                ssh_key_file.read().decode('utf-8', errors='ignore')
+            )
             if not ssh_key_name:
                 ssh_key_name = ssh_key_file.name
         if ssh_scope_level == 'team':
@@ -9356,12 +9427,12 @@ def _build_wiki_page_listing_context(
     wiki_resource_uuid: str,
     wiki_team_id: str = "",
     requested_page_raw: str,
+    requested_page_id_raw: str = "",
+    scope_filter_applied: bool = False,
 ) -> dict[str, object]:
     requested_path = _normalize_wiki_path(requested_page_raw, "")
     member_teams = _ssh_team_choices_for_user(actor)
-    resource_scope_by_uuid: dict[str, str] = {}
     team_name_by_id: dict[str, str] = {}
-    resource_team_map: dict[str, list[str]] = {}
     resource_name_by_uuid: dict[str, str] = {}
     if actor.is_superuser:
         team_rows = Group.objects.order_by("name").values("id", "name")
@@ -9373,27 +9444,16 @@ def _build_wiki_page_listing_context(
         if resolved_team_id and resolved_team_name:
             team_name_by_id[resolved_team_id] = resolved_team_name
 
-    team_filter_ids: list[int] = []
-    if wiki_scope == _WIKI_SCOPE_TEAM:
-        if wiki_team_id:
-            try:
-                team_filter_ids = [int(wiki_team_id)]
-            except Exception:
-                team_filter_ids = []
-        else:
-            team_filter_ids = [int(team_id) for team_id in team_name_by_id.keys() if str(team_id).isdigit()]
-    if team_filter_ids:
+    share_team_ids = list(team_name_by_id.keys())
+    if share_team_ids:
         for share in (
             ResourceTeamShare.objects.select_related("team")
-            .filter(team_id__in=team_filter_ids)
-            .order_by("team__name", "resource_name", "resource_uuid")
+            .filter(team_id__in=share_team_ids)
+            .order_by("resource_name", "resource_uuid")
         ):
             shared_uuid = _normalize_resource_uuid(getattr(share, "resource_uuid", "") or "")
             if not shared_uuid:
                 continue
-            share_team_name = str(getattr(getattr(share, "team", None), "name", "") or "").strip()
-            if share_team_name and share_team_name not in resource_team_map.setdefault(shared_uuid, []):
-                resource_team_map[shared_uuid].append(share_team_name)
             share_resource_name = str(getattr(share, "resource_name", "") or "").strip()
             if share_resource_name and not resource_name_by_uuid.get(shared_uuid):
                 resource_name_by_uuid[shared_uuid] = share_resource_name
@@ -9402,26 +9462,42 @@ def _build_wiki_page_listing_context(
             resource_uuid = _normalize_resource_uuid(getattr(resource_item, "resource_uuid", "") or "")
             if not resource_uuid:
                 continue
-            access_scope = str(getattr(resource_item, "access_scope", "account") or "account").strip().lower()
-            if access_scope not in {"account", "team", "global"}:
-                access_scope = "account"
-            resource_scope_by_uuid[resource_uuid] = access_scope
             if not resource_name_by_uuid.get(resource_uuid):
                 resource_name = str(getattr(resource_item, "name", "") or "").strip()
                 if resource_name:
                     resource_name_by_uuid[resource_uuid] = resource_name
     except Exception:
-        resource_scope_by_uuid = {}
-    pages = list(
-        _wiki_accessible_queryset(
-            actor,
-            scope=wiki_scope,
-            resource_uuid=wiki_resource_uuid,
-            team_id=wiki_team_id,
-        ).order_by("path", "title")
+        pass
+
+    pages_by_id: dict[int, WikiPage] = {}
+    scoped_pages = [
+        *_wiki_accessible_queryset(actor, scope=_WIKI_SCOPE_WORKSPACE).order_by("path", "title", "id"),
+        *_wiki_accessible_queryset(actor, scope=_WIKI_SCOPE_TEAM, team_id="").order_by("path", "title", "id"),
+        *_wiki_accessible_resource_queryset(actor).order_by("path", "title", "id"),
+    ]
+    for page in scoped_pages:
+        page_id = int(getattr(page, "id", 0) or 0)
+        if page_id > 0:
+            pages_by_id[page_id] = page
+
+    scope_order = {
+        _WIKI_SCOPE_WORKSPACE: 0,
+        _WIKI_SCOPE_TEAM: 1,
+        _WIKI_SCOPE_RESOURCE: 2,
+    }
+    pages = sorted(
+        pages_by_id.values(),
+        key=lambda item: (
+            scope_order.get(_normalize_wiki_scope(getattr(item, "scope", "")), 9),
+            str(getattr(item, "resource_uuid", "") or "").strip().lower(),
+            str(getattr(item, "path", "") or "").strip().lower(),
+            str(getattr(item, "title", "") or "").strip().lower(),
+            int(getattr(item, "id", 0) or 0),
+        ),
     )
 
     wiki_pages: list[dict[str, object]] = []
+    wiki_meta_by_page_id: dict[int, dict[str, str]] = {}
     for item in pages:
         item_scope = str(item.scope or _WIKI_SCOPE_WORKSPACE).strip().lower()
         item_scope_key = str(item.resource_uuid or "").strip()
@@ -9429,42 +9505,38 @@ def _build_wiki_page_listing_context(
         item_team_id = _normalize_team_id(item_scope_key) if item_scope == _WIKI_SCOPE_TEAM else ""
         item_scope_name = str(item.resource_name or "").strip()
         team_names = sorted([str(team.name) for team in item.team_access.all()], key=lambda value: value.lower())
-        nav_scope = "account"
-        nav_team_names: list[str] = []
-        nav_wiki_label = "Workspace Wiki"
+
+        resolved_team_name = ""
+        resolved_resource_name = ""
+        wiki_key = "workspace"
+        wiki_label = "Workspace Wiki"
+        wiki_kind = _WIKI_SCOPE_WORKSPACE
         if item_scope == _WIKI_SCOPE_TEAM:
-            nav_scope = "team"
             resolved_team_name = team_name_by_id.get(item_team_id, "")
             if not resolved_team_name and item_scope_name:
                 resolved_team_name = item_scope_name
             if not resolved_team_name and item_team_id:
                 resolved_team_name = item_team_id
-            if resolved_team_name:
-                nav_team_names = [resolved_team_name]
-            nav_wiki_label = "Team Wiki"
+            wiki_key = f"team:{item_team_id or slugify(resolved_team_name) or int(item.id)}"
+            wiki_label = f"Team Wiki · {resolved_team_name or 'Unknown Team'}"
+            wiki_kind = _WIKI_SCOPE_TEAM
         elif item_scope == _WIKI_SCOPE_RESOURCE:
-            nav_scope = resource_scope_by_uuid.get(item_resource_uuid, "account")
-            if nav_scope not in {"account", "team", "global"}:
-                nav_scope = "account"
-            nav_team_names = list(resource_team_map.get(item_resource_uuid, []))
             resolved_resource_name = item_scope_name or resource_name_by_uuid.get(item_resource_uuid, "")
-            if resolved_resource_name:
-                nav_wiki_label = resolved_resource_name
-            elif item_resource_uuid:
-                nav_wiki_label = item_resource_uuid
-            else:
-                nav_wiki_label = "Resource Wiki"
-        else:
-            if bool(item.is_draft):
-                nav_scope = "account"
-            elif team_names:
-                nav_scope = "team"
-            else:
-                nav_scope = "global"
-            nav_wiki_label = "Workspace Wiki"
+            if not resolved_resource_name and item_resource_uuid:
+                resolved_resource_name = item_resource_uuid
+            wiki_key = f"resource:{item_resource_uuid or int(item.id)}"
+            wiki_label = resolved_resource_name or "Resource Wiki"
+            wiki_kind = _WIKI_SCOPE_RESOURCE
+
+        page_id = int(item.id)
+        wiki_meta_by_page_id[page_id] = {
+            "wiki_key": wiki_key,
+            "wiki_label": wiki_label,
+            "wiki_kind": wiki_kind,
+        }
         wiki_pages.append(
             {
-                "id": int(item.id),
+                "id": page_id,
                 "title": str(item.title or ""),
                 "path": str(item.path or ""),
                 "is_draft": bool(item.is_draft),
@@ -9474,35 +9546,82 @@ def _build_wiki_page_listing_context(
                 "can_edit": _can_edit_wiki_page(actor=actor, page=item),
                 "scope": item_scope,
                 "resource_uuid": item_resource_uuid,
-                "resource_name": item_scope_name if item_scope == _WIKI_SCOPE_RESOURCE else "",
+                "resource_name": resolved_resource_name if item_scope == _WIKI_SCOPE_RESOURCE else "",
                 "team_id": item_team_id,
-                "team_name": item_scope_name if item_scope == _WIKI_SCOPE_TEAM else "",
-                "nav_scope": nav_scope,
-                "nav_team_names": nav_team_names,
-                "nav_team_keys": [slugify(name) for name in nav_team_names],
-                "nav_wiki_label": nav_wiki_label,
+                "team_name": resolved_team_name if item_scope == _WIKI_SCOPE_TEAM else "",
+                "wiki_key": wiki_key,
+                "wiki_label": wiki_label,
+                "wiki_kind": wiki_kind,
                 "updated_display": _format_display_time(item.updated_at.isoformat() if getattr(item, "updated_at", None) else ""),
             }
         )
+    wiki_row_by_page_id = {
+        int(item.get("id") or 0): item
+        for item in wiki_pages
+        if int(item.get("id") or 0) > 0
+    }
+
+    requested_page_id = 0
+    try:
+        requested_page_id = int(str(requested_page_id_raw or "").strip() or "0")
+    except Exception:
+        requested_page_id = 0
 
     selected_page = None
-    if requested_path:
-        selected_page = next((item for item in pages if item.path == requested_path), None)
-    if selected_page is None and pages:
-        selected_page = pages[0]
+    if requested_page_id > 0:
+        selected_page = pages_by_id.get(requested_page_id)
+
+    if selected_page is None and requested_path:
+        candidate_pages = [item for item in pages if str(item.path or "") == requested_path]
+        if candidate_pages:
+            if scope_filter_applied:
+                scope_key = (
+                    wiki_resource_uuid
+                    if wiki_scope == _WIKI_SCOPE_RESOURCE
+                    else (wiki_team_id if wiki_scope == _WIKI_SCOPE_TEAM else "")
+                )
+                expected_scope_key = str(scope_key or "").strip()
+                if wiki_scope == _WIKI_SCOPE_RESOURCE:
+                    expected_scope_key = _normalize_resource_uuid(expected_scope_key)
+                elif wiki_scope == _WIKI_SCOPE_TEAM:
+                    expected_scope_key = _normalize_team_id(expected_scope_key)
+                for item in candidate_pages:
+                    item_scope = _normalize_wiki_scope(str(getattr(item, "scope", "") or ""))
+                    item_scope_key = str(getattr(item, "resource_uuid", "") or "").strip()
+                    if item_scope == _WIKI_SCOPE_RESOURCE:
+                        item_scope_key = _normalize_resource_uuid(item_scope_key)
+                    elif item_scope == _WIKI_SCOPE_TEAM:
+                        item_scope_key = _normalize_team_id(item_scope_key)
+                    if item_scope == wiki_scope and item_scope_key == expected_scope_key:
+                        selected_page = item
+                        break
+            else:
+                selected_page = candidate_pages[0]
 
     missing_status_code = ""
-    if requested_page_raw and selected_page is None:
-        normalized_requested = _normalize_wiki_path(requested_page_raw, "")
-        scope_key = wiki_resource_uuid if wiki_scope == _WIKI_SCOPE_RESOURCE else (wiki_team_id if wiki_scope == _WIKI_SCOPE_TEAM else "")
-        if normalized_requested and WikiPage.objects.filter(
-            path=normalized_requested,
-            scope=wiki_scope,
-            resource_uuid=scope_key,
-        ).exists():
-            missing_status_code = "wiki_no_access"
-        else:
-            missing_status_code = "wiki_page_not_found"
+    if selected_page is None:
+        if requested_page_id > 0:
+            if WikiPage.objects.filter(id=requested_page_id).exists():
+                missing_status_code = "wiki_no_access"
+            else:
+                missing_status_code = "wiki_page_not_found"
+        elif requested_page_raw:
+            normalized_requested = _normalize_wiki_path(requested_page_raw, "")
+            if normalized_requested:
+                if scope_filter_applied:
+                    scope_key = (
+                        wiki_resource_uuid
+                        if wiki_scope == _WIKI_SCOPE_RESOURCE
+                        else (wiki_team_id if wiki_scope == _WIKI_SCOPE_TEAM else "")
+                    )
+                    page_exists = WikiPage.objects.filter(
+                        path=normalized_requested,
+                        scope=wiki_scope,
+                        resource_uuid=str(scope_key or "").strip(),
+                    ).exists()
+                else:
+                    page_exists = WikiPage.objects.filter(path=normalized_requested).exists()
+                missing_status_code = "wiki_no_access" if page_exists else "wiki_page_not_found"
 
     selected_page_payload: dict[str, object] = {}
     selected_page_html_fallback = ""
@@ -9516,21 +9635,27 @@ def _build_wiki_page_listing_context(
             [str(team.name) for team in selected_page.team_access.all()],
             key=lambda value: value.lower(),
         )
+        selected_page_id = int(selected_page.id)
+        selected_wiki_meta = wiki_meta_by_page_id.get(selected_page_id, {})
+        selected_wiki_row = wiki_row_by_page_id.get(selected_page_id, {})
         selected_page_payload = {
-            "id": int(selected_page.id),
+            "id": selected_page_id,
             "title": str(selected_page.title or ""),
             "path": str(selected_page.path or ""),
             "markdown": str(selected_page.body_markdown or ""),
             "is_draft": bool(selected_page.is_draft),
             "scope": selected_page_scope,
             "resource_uuid": selected_resource_uuid,
-            "resource_name": selected_scope_name if selected_page_scope == _WIKI_SCOPE_RESOURCE else "",
+            "resource_name": str(selected_wiki_row.get("resource_name") or selected_scope_name or "") if selected_page_scope == _WIKI_SCOPE_RESOURCE else "",
             "team_id": selected_team_id,
-            "team_name": selected_scope_name if selected_page_scope == _WIKI_SCOPE_TEAM else "",
+            "team_name": str(selected_wiki_row.get("team_name") or selected_scope_name or "") if selected_page_scope == _WIKI_SCOPE_TEAM else "",
             "team_names": selected_team_names,
             "updated_display": _format_display_time(selected_page.updated_at.isoformat() if getattr(selected_page, "updated_at", None) else ""),
             "created_display": _format_display_time(selected_page.created_at.isoformat() if getattr(selected_page, "created_at", None) else ""),
             "can_edit": _can_edit_wiki_page(actor=actor, page=selected_page),
+            "wiki_key": str(selected_wiki_meta.get("wiki_key") or ""),
+            "wiki_label": str(selected_wiki_meta.get("wiki_label") or "Wiki"),
+            "wiki_kind": str(selected_wiki_meta.get("wiki_kind") or selected_page_scope or _WIKI_SCOPE_WORKSPACE),
         }
         selected_page_html_fallback = render_markdown_fallback(selected_page.body_markdown)
 
@@ -9571,65 +9696,91 @@ def wiki(request):
     _ensure_default_sdk_workspace_wiki_page(actor=request.user)
     status_code = (request.GET.get("status") or "").strip()
     status_message, status_tone = _wiki_status_context(status_code)
+    raw_scope = (request.GET.get("scope") or "").strip()
+    scope_filter_applied = bool(raw_scope)
 
     scope_context = _resolve_wiki_scope_context(
         actor=request.user,
-        raw_scope=request.GET.get("scope") or "",
+        raw_scope=raw_scope,
         raw_resource_uuid=request.GET.get("resource_uuid") or "",
         raw_team_id=request.GET.get("team_id") or "",
     )
     wiki_scope = str(scope_context["scope"])
     wiki_resource_uuid = str(scope_context["resource_uuid"])
-    wiki_resource_name = str(scope_context["resource_name"])
-    wiki_resource_options = list(scope_context["resource_options"])
     wiki_team_id = str(scope_context["team_id"])
-    wiki_team_name = str(scope_context["team_name"])
-    wiki_team_options = list(scope_context["team_options"])
     scope_status_code = str(scope_context["status_code"] or "")
     if not status_message and scope_status_code:
         status_message, status_tone = _wiki_status_context(scope_status_code)
 
     requested_page_raw = (request.GET.get("page") or "").strip()
+    requested_page_id_raw = (request.GET.get("page_id") or "").strip()
     listing_context = _build_wiki_page_listing_context(
         actor=request.user,
         wiki_scope=wiki_scope,
         wiki_resource_uuid=wiki_resource_uuid,
         wiki_team_id=wiki_team_id,
         requested_page_raw=requested_page_raw,
+        requested_page_id_raw=requested_page_id_raw,
+        scope_filter_applied=scope_filter_applied,
     )
     missing_status_code = str(listing_context["missing_status_code"] or "")
     if not status_message and missing_status_code:
         status_message, status_tone = _wiki_status_context(missing_status_code)
 
-    wiki_context_query = urlencode(
+    selected_page_payload = (
+        listing_context.get("selected_page_payload")
+        if isinstance(listing_context.get("selected_page_payload"), dict)
+        else {}
+    )
+    selected_scope = _normalize_wiki_scope(str(selected_page_payload.get("scope") or ""))
+    selected_resource_uuid = _normalize_resource_uuid(str(selected_page_payload.get("resource_uuid") or ""))
+    selected_team_id = _normalize_team_id(str(selected_page_payload.get("team_id") or ""))
+    selected_resource_name = str(selected_page_payload.get("resource_name") or "").strip()
+
+    wiki_editor_new_url = reverse("wiki_editor_new")
+    new_page_context_query = urlencode(
         _wiki_query_params(
-            scope=wiki_scope,
-            resource_uuid=wiki_resource_uuid,
-            team_id=wiki_team_id,
+            scope=selected_scope,
+            resource_uuid=selected_resource_uuid,
+            team_id=selected_team_id,
         )
     )
-    wiki_context_with_page_prefix = f"{wiki_context_query}&" if wiki_context_query else ""
-    wiki_editor_new_url = reverse("wiki_editor_new")
-    if wiki_context_query:
-        wiki_editor_new_url = f"{wiki_editor_new_url}?{wiki_context_query}"
+    if new_page_context_query:
+        wiki_editor_new_url = f"{wiki_editor_new_url}?{new_page_context_query}"
+
     wiki_sync_url = ""
     wiki_resource_shell_url = ""
     wiki_resource_shell_label = ""
-    if wiki_scope == _WIKI_SCOPE_RESOURCE and wiki_resource_uuid:
+    if selected_scope == _WIKI_SCOPE_RESOURCE and selected_resource_uuid:
         wiki_sync_url = _resource_wiki_sync_url_for_uuid(
             actor=request.user,
-            resource_uuid=wiki_resource_uuid,
+            resource_uuid=selected_resource_uuid,
         )
         wiki_resource_shell_url = _resource_detail_url_for_uuid(
             actor=request.user,
-            resource_uuid=wiki_resource_uuid,
+            resource_uuid=selected_resource_uuid,
         )
-        wiki_resource_shell_label = wiki_resource_name or "Resource"
+        wiki_resource_shell_label = selected_resource_name or "Resource"
+
+    editor_query_by_page_id: dict[int, str] = {}
+    for item in list(listing_context.get("wiki_pages") or []):
+        page_id = int(item.get("id") or 0)
+        if page_id <= 0:
+            continue
+        page_query = urlencode(
+            _wiki_query_params(
+                scope=str(item.get("scope") or ""),
+                resource_uuid=str(item.get("resource_uuid") or ""),
+                team_id=str(item.get("team_id") or ""),
+            )
+        )
+        editor_query_by_page_id[page_id] = page_query
 
     def _editor_url_builder(page_id: int) -> str:
         base = reverse("wiki_editor", kwargs={"page_id": int(page_id)})
-        if wiki_context_query:
-            return f"{base}?{wiki_context_query}"
+        page_query = editor_query_by_page_id.get(int(page_id), "")
+        if page_query:
+            return f"{base}?{page_query}"
         return base
 
     def _delete_url_builder(page_id: int) -> str:
@@ -9646,28 +9797,11 @@ def wiki(request):
         "pages/wiki.html",
         {
             **listing_context,
-            "wiki_scope": wiki_scope,
-            "wiki_scope_label": (
-                "Resource Wiki"
-                if wiki_scope == _WIKI_SCOPE_RESOURCE
-                else ("Team Wiki" if wiki_scope == _WIKI_SCOPE_TEAM else "Workspace Wiki")
-            ),
-            "wiki_is_resource_scope": wiki_scope == _WIKI_SCOPE_RESOURCE,
-            "wiki_is_team_scope": wiki_scope == _WIKI_SCOPE_TEAM,
-            "wiki_resource_uuid": wiki_resource_uuid,
-            "wiki_resource_name": wiki_resource_name,
-            "wiki_resource_options": wiki_resource_options,
-            "wiki_team_id": wiki_team_id,
-            "wiki_team_name": wiki_team_name,
-            "wiki_team_options": wiki_team_options,
-            "wiki_context_query": wiki_context_query,
-            "wiki_context_with_page_prefix": wiki_context_with_page_prefix,
             "wiki_page_base_url": reverse("wiki"),
             "wiki_editor_new_url": wiki_editor_new_url,
             "wiki_sync_url": wiki_sync_url,
             "wiki_resource_shell_url": wiki_resource_shell_url,
             "wiki_resource_shell_label": wiki_resource_shell_label,
-            "wiki_scope_locked": False,
             "status_message": status_message,
             "status_tone": status_tone,
         },
@@ -11242,6 +11376,7 @@ def resource_wiki_sync(request, username: str, resource_uuid, route_kind: str = 
         changed_page_ids=None,
         reindex_resource_kb=True,
         reindex_check_method="wiki_sync",
+        sync_repo_documents=True,
     )
 
     status_code = "wiki_sync_failed"
@@ -12027,6 +12162,57 @@ def _extract_chat_completion_text(payload: dict) -> str:
     return ""
 
 
+def _extract_openai_error_detail(response) -> str:
+    try:
+        payload = response.json() if getattr(response, "content", None) else {}
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict):
+        error_payload = payload.get("error")
+        if isinstance(error_payload, dict):
+            detail = str(error_payload.get("message") or "").strip()
+            if detail:
+                return detail[:400]
+        detail = str(payload.get("message") or "").strip()
+        if detail:
+            return detail[:400]
+    raw_text = str(getattr(response, "text", "") or "").strip()
+    if not raw_text:
+        return ""
+    compact = re.sub(r"\s+", " ", raw_text).strip()
+    return compact[:400]
+
+
+def _trim_ask_history_messages(
+    rows: list[dict[str, str]],
+    *,
+    max_messages: int = 16,
+    max_chars: int = 12000,
+    max_item_chars: int = 2400,
+) -> list[dict[str, str]]:
+    if not isinstance(rows, list) or not rows:
+        return []
+
+    resolved_rows: list[dict[str, str]] = []
+    total_chars = 0
+    for item in reversed(rows):
+        role = str(item.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > max_item_chars:
+            content = content[:max_item_chars]
+        if resolved_rows and (total_chars + len(content)) > max_chars:
+            break
+        resolved_rows.append({"role": role, "content": content})
+        total_chars += len(content)
+        if len(resolved_rows) >= max_messages:
+            break
+    return list(reversed(resolved_rows))
+
+
 def _query_kb_resources(
     *,
     knowledge_path: Path,
@@ -12464,6 +12650,7 @@ def _tool_search_kb_for_actor(actor, args: dict) -> dict:
     allowed_sources = {
         "resource_health",
         "resource_kb",
+        "resource_repo_file",
         "resource_wiki_page",
         "resource_wiki",
         "workspace_wiki",
@@ -12474,7 +12661,10 @@ def _tool_search_kb_for_actor(actor, args: dict) -> dict:
         query=query,
         limit=50,
         collection_name=_UNIFIED_KB_COLLECTION_NAME,
-        where_filter=_kb_source_where_filter(allowed_sources),
+        # Chroma where-filtered vector queries can fail with "Error finding id" on
+        # some persisted segments. We intentionally fetch broadly and enforce source
+        # + ACL filtering in Python below.
+        where_filter=None,
     )
     if query_error:
         return {"ok": False, "error": query_error, "results": []}
@@ -12669,6 +12859,7 @@ def _tool_resource_kb_for_actor(actor, args: dict) -> dict:
     allowed_sources = {
         "resource_health",
         "resource_kb",
+        "resource_repo_file",
         "resource_wiki_page",
         "resource_wiki",
     }
@@ -12678,7 +12869,9 @@ def _tool_resource_kb_for_actor(actor, args: dict) -> dict:
         query=query,
         limit=min(50, resolved_limit * 6),
         collection_name=_UNIFIED_KB_COLLECTION_NAME,
-        where_filter=_kb_source_where_filter(allowed_sources),
+        # See note in _tool_search_kb_for_actor: rely on Python-side filtering for
+        # stability when Chroma where-filtered vector queries fail on persisted data.
+        where_filter=None,
     )
     if query_error:
         return {"ok": False, "error": query_error, "results": []}
@@ -16012,9 +16205,10 @@ def _ask_alshival_generate_reply_for_user(
         mcp_tool_lines=mcp_tool_lines,
     )
     if history_reader is None:
-        history_items = list_ask_chat_messages(user, conversation_id=resolved_conversation_id, limit=24)
+        raw_history_items = list_ask_chat_messages(user, conversation_id=resolved_conversation_id, limit=24)
     else:
-        history_items = list(history_reader(resolved_conversation_id, 24) or [])
+        raw_history_items = list(history_reader(resolved_conversation_id, 24) or [])
+    history_items = _trim_ask_history_messages(raw_history_items)
     chat_input: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
     for item in history_items:
         role = str(item.get("role") or "").strip().lower()
@@ -16033,15 +16227,20 @@ def _ask_alshival_generate_reply_for_user(
     tools_spec = _ask_alshival_tools_spec(extra_tools=[*github_tool_specs, *asana_tool_specs])
     max_tool_rounds = 6
     messages = list(chat_input)
+    tools_enabled = bool(tools_spec)
+    fallback_without_tools_used = False
+    fallback_compact_history_used = False
+    history_chars = sum(len(str(item.get("content") or "")) for item in history_items)
 
     for _ in range(max_tool_rounds):
         request_payload = {
             "model": model,
             "messages": messages,
-            "tools": tools_spec,
-            "tool_choice": "auto",
             "temperature": 0.2,
         }
+        if tools_enabled:
+            request_payload["tools"] = tools_spec
+            request_payload["tool_choice"] = "auto"
         try:
             response = requests.post(
                 "https://api.openai.com/v1/chat/completions",
@@ -16055,7 +16254,39 @@ def _ask_alshival_generate_reply_for_user(
         except requests.RequestException:
             return "", {"error": "openai_unreachable"}
         if response.status_code >= 400:
-            return "", {"error": "openai_error", "status_code": str(response.status_code)}
+            status_code = int(response.status_code)
+            detail = _extract_openai_error_detail(response)
+            logger.warning(
+                "ask_alshival_openai_error user_id=%s conversation_id=%s channel=%s model=%s status=%s detail=%s "
+                "history_messages=%s history_chars=%s github_tool_count=%s asana_tool_count=%s tools_enabled=%s",
+                int(getattr(user, "id", 0) or 0),
+                resolved_conversation_id,
+                channel,
+                model,
+                status_code,
+                detail[:250],
+                len(history_items),
+                history_chars,
+                len(github_tool_specs),
+                len(asana_tool_specs),
+                tools_enabled,
+            )
+            if status_code == 400 and tools_enabled and not fallback_without_tools_used:
+                tools_enabled = False
+                fallback_without_tools_used = True
+                continue
+            if status_code == 400 and len(messages) > 2 and not fallback_compact_history_used:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": resolved_message},
+                ]
+                tools_enabled = False
+                fallback_compact_history_used = True
+                continue
+            error_payload: dict[str, str] = {"error": "openai_error", "status_code": str(status_code)}
+            if detail:
+                error_payload["detail"] = detail
+            return "", error_payload
 
         data = response.json() if response.content else {}
         choices = data.get("choices")
@@ -16595,7 +16826,14 @@ def ask_alshival_chat(request):
     if error == "tool_loop_limit_reached":
         return JsonResponse({"error": error, "conversation_id": str(meta.get("conversation_id") or conversation_id)}, status=502)
     if error == "openai_error":
-        return JsonResponse({"error": error, "status_code": int(str(meta.get("status_code") or "502"))}, status=502)
+        payload = {
+            "error": error,
+            "status_code": int(str(meta.get("status_code") or "502")),
+        }
+        detail = str(meta.get("detail") or "").strip()
+        if detail:
+            payload["detail"] = detail
+        return JsonResponse(payload, status=502)
     return JsonResponse({"error": error, "conversation_id": str(meta.get("conversation_id") or conversation_id)}, status=502)
 
 
@@ -17147,6 +17385,10 @@ def add_resource_item(request):
                 actor=request.user,
                 resource_uuid=created_resource.resource_uuid,
             )
+            _auto_sync_resource_github_content_after_save(
+                request=request,
+                resource=created_resource,
+            )
         try:
             check_health(resource_id, user=request.user)
         except Exception:
@@ -17230,6 +17472,10 @@ def edit_resource_item(request, resource_id: int):
                 actor=request.user,
                 resource_uuid=updated_resource.resource_uuid,
             )
+            _auto_sync_resource_github_content_after_save(
+                request=request,
+                resource=updated_resource,
+            )
 
     next_url = str(request.POST.get("next") or "").strip()
     if next_url.startswith("/") and not next_url.startswith("//"):
@@ -17274,12 +17520,12 @@ def check_resource_health(request, resource_id: int):
 def add_ssh_credential_item(request):
     scope = (request.POST.get('scope') or 'account').strip()
     name = (request.POST.get('name') or '').strip()
-    key_text = (request.POST.get('private_key_text') or '').strip()
+    key_text = _normalize_private_key_text(request.POST.get('private_key_text') or '')
     key_file = request.FILES.get('private_key_file')
     raw_team_names = request.POST.getlist('team_names')
 
     if key_file:
-        key_text = key_file.read().decode('utf-8', errors='ignore').strip()
+        key_text = _normalize_private_key_text(key_file.read().decode('utf-8', errors='ignore'))
     if not (name and key_text):
         return redirect('resources')
 
@@ -17309,6 +17555,63 @@ def add_ssh_credential_item(request):
     add_ssh_credential(request.user, name, scope, team_names, key_text)
 
     return redirect('resources')
+
+
+def _ssh_private_key_download_filename(name: str) -> str:
+    base_name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "").strip()).strip("-.")
+    if not base_name:
+        base_name = "ssh-private-key"
+    if not base_name.lower().endswith(".key"):
+        base_name = f"{base_name}.key"
+    return base_name
+
+
+def _ssh_private_key_download_response(*, key_name: str, key_text: str) -> HttpResponse:
+    normalized_key_text = _normalize_private_key_text(key_text)
+    response = HttpResponse(normalized_key_text, content_type="application/x-pem-file; charset=utf-8")
+    response["Content-Disposition"] = (
+        f'attachment; filename="{_ssh_private_key_download_filename(key_name)}"'
+    )
+    # Informative header for clients/scripts that can honor file modes.
+    response["X-Alshival-File-Mode"] = "0600"
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+@login_required
+@require_POST
+def download_ssh_credential_item(request, credential_id: str):
+    key_text = get_ssh_credential_private_key(request.user, credential_id)
+    if not key_text:
+        return redirect("resources")
+
+    key_name = "ssh-private-key"
+    credential_id_str = str(credential_id or "").strip()
+    for item in list_ssh_credentials(request.user):
+        if str(item.id or "").strip() == credential_id_str:
+            key_name = str(item.name or "").strip() or key_name
+            break
+
+    return _ssh_private_key_download_response(key_name=key_name, key_text=key_text)
+
+
+@login_required
+@require_POST
+def download_global_ssh_credential_item(request, credential_id: int):
+    if not request.user.is_superuser:
+        return redirect("resources")
+
+    key_text = get_global_ssh_private_key(credential_id=int(credential_id))
+    if not key_text:
+        return redirect("resources")
+
+    key_name = "ssh-private-key"
+    for item in list_global_ssh_credentials():
+        if int(item.id) == int(credential_id):
+            key_name = str(item.name or "").strip() or key_name
+            break
+
+    return _ssh_private_key_download_response(key_name=key_name, key_text=key_text)
 
 
 @login_required
